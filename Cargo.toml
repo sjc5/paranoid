@@ -1,0 +1,8 @@
+[package]
+name = "paranoid"
+version = "0.0.0-pre.0"
+edition = "2024"
+description = "Coming soon."
+license = "MIT OR Apache-2.0"
+readme = "README.md"
+repository = "https://github.com/sjc5/paranoid"
