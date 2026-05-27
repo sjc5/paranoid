@@ -1,0 +1,15 @@
+chip: Apple M3 Max
+memory: 36 GB
+---
+os: macos
+arch: aarch64
+pkg: paranoid
+bench: id
+iterations: 1000000
+new: 285.12 ns/op (200000 iterations)
+new_multi_16: 438.60 ns/op (50000 iterations)
+to_text: 27.53 ns/op (1000000 iterations)
+parse_lower: 12.90 ns/op (1000000 iterations)
+parse_upper: 12.88 ns/op (1000000 iterations)
+from_bytes: 0.79 ns/op (1000000 iterations)
+to_unix_micros: 1.06 ns/op (1000000 iterations)

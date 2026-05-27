@@ -1,0 +1,41 @@
+services:
+    postgres:
+        image: postgres:16-alpine
+        labels:
+            paranoid.isolated_db.managed: "true"
+            paranoid.isolated_db.owner_pid: "${TEST_OWNER_PID:-0}"
+        ports:
+            - "${TEST_POSTGRES_PORT:-0}:5432"
+        environment:
+            POSTGRES_USER: test
+            POSTGRES_PASSWORD: test
+            POSTGRES_DB: test
+            POSTGRES_HOST_AUTH_METHOD: md5
+            POSTGRES_INITDB_ARGS: "--auth-host=md5"
+        healthcheck:
+            test: ["CMD-SHELL", "pg_isready -U test -d test"]
+            interval: 1s
+            timeout: 5s
+            retries: 10
+
+    pgbouncer:
+        image: edoburu/pgbouncer
+        labels:
+            paranoid.isolated_db.managed: "true"
+            paranoid.isolated_db.owner_pid: "${TEST_OWNER_PID:-0}"
+        environment:
+            DATABASE_URL: postgres://test:test@postgres:5432/test
+            POOL_MODE: transaction
+            MAX_CLIENT_CONN: 1000
+            DEFAULT_POOL_SIZE: 20
+            AUTH_TYPE: md5
+        ports:
+            - "${TEST_PGBOUNCER_PORT:-0}:5432"
+        depends_on:
+            postgres:
+                condition: service_healthy
+        healthcheck:
+            test: ["CMD-SHELL", "pg_isready -h localhost -p 5432"]
+            interval: 1s
+            timeout: 5s
+            retries: 10

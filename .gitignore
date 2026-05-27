@@ -1,1 +1,23 @@
-target/
+# Env
+*.env
+*.env.*
+!.env.example
+
+# Local
+*.local
+*.local.*
+
+# Rust
+**/target/
+
+# Node
+**/node_modules/
+
+# IDE
+.vscode/settings.json
+
+# MacOS
+**/.DS_Store
+
+# Fuzzing
+fuzz/artifacts/
