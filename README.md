@@ -1,8 +1,10 @@
-# Paranoid
+# 🕵 paranoid
 
 **DISCLAIMER:** `paranoid` is in an alpha state, and it has not undergone a formal
 security audit. Use at your own risk. Additionally, there will be frequent breaking
 changes, so it is recomended to pin the package to a specific version.
+
+---
 
 `paranoid` is a Rust crate for misuse-resistant application security and Postgres-backed
 distributed systems primitives. It is organized as a small set of intention-revealing

@@ -11,7 +11,7 @@ name = "paranoid"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Misuse-resistant crypto, IDs, web security, and Postgres-backed coordination primitives."
+description = "Misuse-resistant application security and Postgres-backed distributed systems primitives."
 readme = "README.md"
 repository = "https://github.com/sjc5/paranoid"
 
