@@ -1,0 +1,8 @@
+# Paranoid v1 deterministic invalid fixture.
+# All byte fields are standard Base64.
+name=v1-invalid-001-empty-envelope
+input_key_base64=AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=
+purpose=paranoid.fixture.v1
+associated_data_base64=
+envelope_base64=
+expected_error=empty_envelope

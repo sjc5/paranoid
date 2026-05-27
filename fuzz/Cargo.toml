@@ -1,0 +1,46 @@
+[package]
+name = "paranoid-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+
+[dependencies.paranoid]
+path = ".."
+default-features = false
+features = ["db"]
+
+[[bin]]
+name = "paranoid_envelope"
+path = "fuzz_targets/paranoid_envelope.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "paranoid_codecs"
+path = "fuzz_targets/paranoid_codecs.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "paranoid_id"
+path = "fuzz_targets/paranoid_id.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "paranoid_db_validators"
+path = "fuzz_targets/paranoid_db_validators.rs"
+test = false
+doc = false
+bench = false
+
+[workspace]
