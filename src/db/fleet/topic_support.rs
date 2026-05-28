@@ -54,6 +54,7 @@ pub(super) fn normalize_subscription_poll_interval(poll_interval: Duration) -> D
     poll_interval.max(MIN_SUBSCRIPTION_POLL_INTERVAL)
 }
 
+#[allow(clippy::result_large_err)]
 pub(super) fn subscription_poll_error_retry_delay_from_policy<E, OnPollError>(
     error: Error,
     on_poll_error: &mut OnPollError,
@@ -83,6 +84,7 @@ pub(super) fn is_retryable_subscription_poll_error(error: &Error) -> bool {
     }
 }
 
+#[allow(clippy::result_large_err)]
 pub(super) fn combine_subscription_run_and_polling_guard_release_results<E>(
     run_result: Result<(), SubscriptionRunError<E>>,
     release_result: Result<bool, Error>,

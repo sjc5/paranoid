@@ -311,11 +311,13 @@ pub(super) async fn handle_processed_queue_job_error(
             schedule_owned_running_job_retry_with_database_operation_timeout(
                 &runtime.queue,
                 &runtime.pool,
-                job.id,
-                runtime.worker_owner_id.as_str(),
-                next_retry_count,
-                retry_after,
-                error.message(),
+                OwnedRunningJobRetryPersistence {
+                    job_id: job.id,
+                    worker_id: runtime.worker_owner_id.as_str(),
+                    new_retry_count: next_retry_count,
+                    retry_after,
+                    error_message: error.message(),
+                },
                 operation_timeout,
             )
         },
@@ -356,11 +358,13 @@ pub(super) async fn move_running_job_to_dead_letter_or_fail(
                 move_owned_running_job_to_dead_letter_with_database_operation_timeout(
                     &runtime.queue,
                     &runtime.pool,
-                    job.id,
-                    runtime.worker_owner_id.as_str(),
-                    error_message,
-                    increment_retry_count,
-                    reason,
+                    OwnedRunningJobDeadLetterPersistence {
+                        job_id: job.id,
+                        worker_id: runtime.worker_owner_id.as_str(),
+                        error_message,
+                        increment_retry_count,
+                        reason,
+                    },
                     operation_timeout,
                 )
             },

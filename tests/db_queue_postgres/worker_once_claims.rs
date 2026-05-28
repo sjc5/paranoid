@@ -665,7 +665,6 @@ async fn queue_worker_registry_and_config_validation_reject_ambiguous_runtime_sh
                     strategy: RetryBackoffStrategy::Custom(Arc::new(|_, _| Duration::ZERO)),
                     max_backoff: Duration::from_nanos(1),
                     jitter_fraction: 0.0,
-                    ..RetryPolicy::default()
                 },
                 ..WorkerConfig::default()
             },

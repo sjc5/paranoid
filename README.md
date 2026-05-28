@@ -1,13 +1,13 @@
-# 🕵 paranoid
+# 🕵
 
 `paranoid` is a Rust crate for misuse-resistant application security and Postgres-backed
 distributed systems primitives.
 
 ---
 
-**DISCLAIMER:** `paranoid` is in an alpha state, and it has not undergone a formal
-security audit. Use at your own risk. Additionally, there will be frequent breaking
-changes, so it is recomended to pin the package to a specific version.
+**WARNING:** `paranoid` is in an alpha state, and it has not undergone a formal security
+audit. Use at your own risk. There will be frequent breaking changes, so be sure to pin to
+a specific version.
 
 ---
 
@@ -33,7 +33,7 @@ Enable only the namespaces your crate uses:
 
 ```toml
 [dependencies]
-paranoid = { version = "0.0.0-pre.1", features = ["crypto"] }
+paranoid = { version = "0.0.0-pre.2", features = ["crypto"] }
 ```
 
 Feature groups compose intentionally:

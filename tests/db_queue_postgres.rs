@@ -401,7 +401,7 @@ async fn claim_exact_jobs_with_worker_owner_id(
             &test_database.paranoid_pool,
             &registered_task_names,
             expected_count.try_into().expect("expected count fits u32"),
-            &worker_owner_id,
+            worker_owner_id,
         )
         .await?;
     assert_eq!(claimed.len(), expected_count);

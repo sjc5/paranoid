@@ -1,8 +1,9 @@
 [package]
 name = "paranoid-fuzz"
-version = "0.0.0"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
 publish = false
-edition = "2024"
 
 [package.metadata]
 cargo-fuzz = true
@@ -42,5 +43,3 @@ path = "fuzz_targets/paranoid_db_validators.rs"
 test = false
 doc = false
 bench = false
-
-[workspace]

@@ -240,6 +240,7 @@ where
     Ok(value)
 }
 
+#[allow(clippy::result_large_err)]
 pub(super) fn combine_mutex_task_and_release_results<T, E>(
     task_result: Result<T, MutexRunError<E>>,
     release_result: Result<bool, Error>,
@@ -293,6 +294,7 @@ pub(super) fn combine_mutex_guard_stop_and_release_results(
     }
 }
 
+#[allow(clippy::result_large_err)]
 pub(super) fn combine_cron_task_and_release_results<T, E>(
     task_result: Result<T, CronRunError<E>>,
     release_result: Result<bool, Error>,

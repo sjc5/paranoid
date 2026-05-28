@@ -79,12 +79,14 @@ impl Store {
         execute_owned_running_job_update(
             tx.inner.as_mut(),
             database_operation_observer.as_ref(),
-            self.sql_catalog().mark_job_started_query(),
-            QUEUE_OPERATION_MARK_JOB_STARTED,
-            "mark owned running job started",
-            Error::JobNotRunning,
-            job_id,
-            worker_id.as_ref(),
+            OwnedRunningJobUpdate {
+                statement: self.sql_catalog().mark_job_started_query(),
+                database_operation_label: QUEUE_OPERATION_MARK_JOB_STARTED,
+                operation: "mark owned running job started",
+                state_mismatch_error: Error::JobNotRunning,
+                job_id,
+                worker_id: worker_id.as_ref(),
+            },
         )
         .await
     }
@@ -116,12 +118,14 @@ impl Store {
         execute_owned_running_job_update(
             tx.inner.as_mut(),
             database_operation_observer.as_ref(),
-            self.sql_catalog().mark_job_completed_query(),
-            QUEUE_OPERATION_MARK_JOB_COMPLETED,
-            "mark owned running job completed",
-            Error::JobNotRunning,
-            job_id,
-            worker_id.as_ref(),
+            OwnedRunningJobUpdate {
+                statement: self.sql_catalog().mark_job_completed_query(),
+                database_operation_label: QUEUE_OPERATION_MARK_JOB_COMPLETED,
+                operation: "mark owned running job completed",
+                state_mismatch_error: Error::JobNotRunning,
+                job_id,
+                worker_id: worker_id.as_ref(),
+            },
         )
         .await
     }
@@ -155,12 +159,14 @@ impl Store {
         execute_owned_running_job_update(
             tx.inner.as_mut(),
             database_operation_observer.as_ref(),
-            self.sql_catalog().touch_execution_heartbeat_query(),
-            QUEUE_OPERATION_TOUCH_JOB_HEARTBEAT,
-            "touch owned running job heartbeat",
-            Error::JobNotRunning,
-            job_id,
-            worker_id.as_ref(),
+            OwnedRunningJobUpdate {
+                statement: self.sql_catalog().touch_execution_heartbeat_query(),
+                database_operation_label: QUEUE_OPERATION_TOUCH_JOB_HEARTBEAT,
+                operation: "touch owned running job heartbeat",
+                state_mismatch_error: Error::JobNotRunning,
+                job_id,
+                worker_id: worker_id.as_ref(),
+            },
         )
         .await
     }
@@ -210,11 +216,13 @@ impl Store {
             tx.inner.as_mut(),
             database_operation_observer.as_ref(),
             self.sql_catalog(),
-            job_id,
-            worker_id.as_ref(),
-            new_retry_count,
-            retry_after_microseconds,
-            error_message.as_ref(),
+            OwnedRunningJobRetrySchedule {
+                job_id,
+                worker_id: worker_id.as_ref(),
+                new_retry_count,
+                retry_after_microseconds,
+                error_message: error_message.as_ref(),
+            },
         )
         .await
     }
@@ -306,11 +314,13 @@ impl Store {
             tx.inner.as_mut(),
             database_operation_observer.as_ref(),
             self.sql_catalog(),
-            job_id,
-            worker_id.as_ref(),
-            error_message.as_ref(),
-            increment_retry_count,
-            reason,
+            OwnedRunningJobDeadLetterMove {
+                job_id,
+                worker_id: worker_id.as_ref(),
+                error_message: error_message.as_ref(),
+                increment_retry_count,
+                reason,
+            },
         )
         .await
     }
@@ -345,13 +355,16 @@ impl Store {
         execute_owned_running_job_update(
             tx.inner.as_mut(),
             database_operation_observer.as_ref(),
-            self.sql_catalog()
-                .return_owned_unstarted_running_job_to_pending_query(),
-            QUEUE_OPERATION_RETURN_OWNED_UNSTARTED_JOB,
-            "return owned unstarted running job to pending",
-            Error::JobNotRunning,
-            job_id,
-            worker_id.as_ref(),
+            OwnedRunningJobUpdate {
+                statement: self
+                    .sql_catalog()
+                    .return_owned_unstarted_running_job_to_pending_query(),
+                database_operation_label: QUEUE_OPERATION_RETURN_OWNED_UNSTARTED_JOB,
+                operation: "return owned unstarted running job to pending",
+                state_mismatch_error: Error::JobNotRunning,
+                job_id,
+                worker_id: worker_id.as_ref(),
+            },
         )
         .await
     }
@@ -386,13 +399,16 @@ impl Store {
         execute_owned_running_job_update(
             tx.inner.as_mut(),
             database_operation_observer.as_ref(),
-            self.sql_catalog()
-                .return_owned_started_running_job_to_pending_query(),
-            QUEUE_OPERATION_RETURN_OWNED_STARTED_JOB,
-            "return owned started running job to pending",
-            Error::JobNotRunning,
-            job_id,
-            worker_id.as_ref(),
+            OwnedRunningJobUpdate {
+                statement: self
+                    .sql_catalog()
+                    .return_owned_started_running_job_to_pending_query(),
+                database_operation_label: QUEUE_OPERATION_RETURN_OWNED_STARTED_JOB,
+                operation: "return owned started running job to pending",
+                state_mismatch_error: Error::JobNotRunning,
+                job_id,
+                worker_id: worker_id.as_ref(),
+            },
         )
         .await
     }

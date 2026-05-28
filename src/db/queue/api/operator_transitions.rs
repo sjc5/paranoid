@@ -233,12 +233,14 @@ impl Store {
         execute_job_state_transition_for_expected_status(
             tx.inner.as_mut(),
             database_operation_observer.as_ref(),
-            self.sql_catalog().force_requeue_running_job_by_id_query(),
-            QUEUE_OPERATION_FORCE_REQUEUE_RUNNING_JOB,
-            "force requeue running job",
-            JobStatus::Running,
-            Error::JobNotRunning,
-            job_id,
+            ExpectedJobStateTransition {
+                statement: self.sql_catalog().force_requeue_running_job_by_id_query(),
+                database_operation_label: QUEUE_OPERATION_FORCE_REQUEUE_RUNNING_JOB,
+                operation: "force requeue running job",
+                expected_status: JobStatus::Running,
+                state_mismatch_error: Error::JobNotRunning,
+                job_id,
+            },
         )
         .await
     }

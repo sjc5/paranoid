@@ -1,5 +1,14 @@
 use super::*;
 
+pub(in crate::db::queue) struct ExpectedJobStateTransition<'a> {
+    pub(in crate::db::queue) statement: &'a str,
+    pub(in crate::db::queue) database_operation_label: &'static str,
+    pub(in crate::db::queue) operation: &'static str,
+    pub(in crate::db::queue) expected_status: JobStatus,
+    pub(in crate::db::queue) state_mismatch_error: Error,
+    pub(in crate::db::queue) job_id: JobId,
+}
+
 pub(in crate::db::queue) async fn execute_job_state_transition<'e, E>(
     executor: E,
     database_operation_observer: Option<&DatabaseOperationObserver>,
@@ -15,12 +24,14 @@ where
     execute_job_state_transition_for_expected_status(
         executor,
         database_operation_observer,
-        statement,
-        database_operation_label,
-        operation,
-        JobStatus::Pending,
-        state_mismatch_error,
-        job_id,
+        ExpectedJobStateTransition {
+            statement,
+            database_operation_label,
+            operation,
+            expected_status: JobStatus::Pending,
+            state_mismatch_error,
+            job_id,
+        },
     )
     .await
 }
@@ -28,16 +39,19 @@ where
 pub(in crate::db::queue) async fn execute_job_state_transition_for_expected_status<'e, E>(
     executor: E,
     database_operation_observer: Option<&DatabaseOperationObserver>,
-    statement: &str,
-    database_operation_label: &'static str,
-    operation: &'static str,
-    expected_status: JobStatus,
-    state_mismatch_error: Error,
-    job_id: JobId,
+    transition: ExpectedJobStateTransition<'_>,
 ) -> Result<(), Error>
 where
     E: Executor<'e, Database = sqlx::Postgres>,
 {
+    let ExpectedJobStateTransition {
+        statement,
+        database_operation_label,
+        operation,
+        expected_status,
+        state_mismatch_error,
+        job_id,
+    } = transition;
     record_database_operation(
         database_operation_observer,
         DatabaseOperationKind::FetchOne,

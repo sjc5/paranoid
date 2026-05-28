@@ -1,8 +1,8 @@
 [workspace]
-members = ["xtask"]
+members = ["fuzz", "xtask"]
 
 [workspace.package]
-version = "0.0.0-pre.1"
+version = "0.0.0-pre.2"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 

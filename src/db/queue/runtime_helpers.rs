@@ -3,6 +3,22 @@ use super::*;
 pub(in crate::db::queue) const QUEUE_SET_LOCAL_STATEMENT_TIMEOUT_QUERY: &str =
     "SELECT set_config('statement_timeout', $1, true)";
 
+pub(super) struct OwnedRunningJobRetryPersistence<'a> {
+    pub(super) job_id: JobId,
+    pub(super) worker_id: &'a str,
+    pub(super) new_retry_count: u32,
+    pub(super) retry_after: Duration,
+    pub(super) error_message: &'a str,
+}
+
+pub(super) struct OwnedRunningJobDeadLetterPersistence<'a> {
+    pub(super) job_id: JobId,
+    pub(super) worker_id: &'a str,
+    pub(super) error_message: &'a str,
+    pub(super) increment_retry_count: bool,
+    pub(super) reason: DeadLetterReason,
+}
+
 pub(super) fn timeout_from_persisted_nanos(timeout_nanos: i64) -> Result<JobTimeout, Error> {
     match timeout_nanos {
         -1 => Ok(JobTimeout::NoTimeout),
@@ -131,13 +147,16 @@ pub(super) async fn touch_owned_running_job_execution_heartbeat_with_database_op
 pub(super) async fn schedule_owned_running_job_retry_with_database_operation_timeout(
     queue: &Store,
     pool: &Pool,
-    job_id: JobId,
-    worker_id: &str,
-    new_retry_count: u32,
-    retry_after: Duration,
-    error_message: &str,
+    retry_persistence: OwnedRunningJobRetryPersistence<'_>,
     timeout: Duration,
 ) -> Result<i64, Error> {
+    let OwnedRunningJobRetryPersistence {
+        job_id,
+        worker_id,
+        new_retry_count,
+        retry_after,
+        error_message,
+    } = retry_persistence;
     let operation = "schedule owned running job retry";
     let mut tx = begin_worker_database_operation(pool, operation, timeout).await?;
     let result = queue
@@ -156,13 +175,16 @@ pub(super) async fn schedule_owned_running_job_retry_with_database_operation_tim
 pub(super) async fn move_owned_running_job_to_dead_letter_with_database_operation_timeout(
     queue: &Store,
     pool: &Pool,
-    job_id: JobId,
-    worker_id: &str,
-    error_message: &str,
-    increment_retry_count: bool,
-    reason: DeadLetterReason,
+    dead_letter_persistence: OwnedRunningJobDeadLetterPersistence<'_>,
     timeout: Duration,
 ) -> Result<JobId, Error> {
+    let OwnedRunningJobDeadLetterPersistence {
+        job_id,
+        worker_id,
+        error_message,
+        increment_retry_count,
+        reason,
+    } = dead_letter_persistence;
     let operation = "move owned running job to dead letter";
     let mut tx = begin_worker_database_operation(pool, operation, timeout).await?;
     let result = queue

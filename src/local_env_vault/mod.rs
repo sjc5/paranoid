@@ -457,8 +457,17 @@ where
         let lock = acquire_vault_lock(&self.vault_dir, &lock_lost)?;
         let vault_exists = vault_path.try_exists().map_err(Error::Io)?;
         let password = if vault_exists {
-            self.terminal.prompt_hidden_secret("Password: ")?
+            self.terminal.write_line("")?;
+            self.terminal
+                .write_line("Unlock local environment vault.")?;
+            self.terminal.prompt_hidden_secret("Vault password: ")?
         } else {
+            self.terminal.write_line("")?;
+            self.terminal
+                .write_line("Create local environment vault.")?;
+            self.terminal.write_line(
+                "Choose a password. It will be required to check or project secrets.",
+            )?;
             self.prompt_confirmed_password()?
         };
         let mut vault = if vault_exists {
@@ -466,25 +475,29 @@ where
         } else {
             let vault = VaultFile::new(&password, self.password_kdf_params)?;
             write_vault_atomically(&vault_path, &vault)?;
-            self.terminal.write_line("initialized")?;
+            self.terminal.write_line("Vault initialized.")?;
             vault
         };
         let keyset = unlock_vault_keyset(&vault, &password)?;
 
         loop {
             self.terminal.write_line("")?;
+            self.terminal.write_line("Profiles:")?;
             let profile_rows = self.profile_status_rows(&vault);
             for (index, (name, configured, required)) in profile_rows.iter().enumerate() {
                 self.terminal.write_line(&format!(
-                    "{}. {} ({}/{})",
+                    "  {}. {} - {}/{} secrets configured",
                     index + 1,
                     name,
                     configured,
                     required
                 ))?;
             }
-            self.terminal.write_line("0. Done")?;
-            let choice = self.terminal.prompt_line("Profile: ")?;
+            self.terminal.write_line("  0. Done")?;
+            let choice = self.terminal.prompt_line(&format!(
+                "Select a profile [0-{}, Enter = done]: ",
+                profile_rows.len()
+            ))?;
             let choice = choice.trim();
             if choice.is_empty() || choice == "0" {
                 return Ok(());
@@ -501,7 +514,7 @@ where
                         &lock_lost,
                     )?
                 }
-                _ => self.terminal.write_line("unknown choice")?,
+                _ => self.write_unknown_menu_choice(profile_rows.len())?,
             }
         }
     }
@@ -518,19 +531,27 @@ where
         loop {
             self.terminal.write_line("")?;
             self.terminal
-                .write_line(&format!("Profile {profile_name}"))?;
+                .write_line(&format!("Profile: {profile_name}"))?;
+            self.terminal.write_line("Secrets:")?;
             let secret_rows = self.profile_secret_status_rows(profile_name, vault)?;
             for (index, (name, is_configured)) in secret_rows.iter().enumerate() {
-                let status = if *is_configured { "set" } else { "missing" };
+                let status = if *is_configured {
+                    "configured"
+                } else {
+                    "missing"
+                };
                 self.terminal.write_line(&format!(
-                    "{}. {} {}",
+                    "  {}. {} - {}",
                     index + 1,
                     name.as_str(),
                     status
                 ))?;
             }
-            self.terminal.write_line("0. Back")?;
-            let choice = self.terminal.prompt_line("Secret: ")?;
+            self.terminal.write_line("  0. Back")?;
+            let choice = self.terminal.prompt_line(&format!(
+                "Select a secret [0-{}, Enter = back]: ",
+                secret_rows.len()
+            ))?;
             let choice = choice.trim();
             if choice.is_empty() || choice == "0" {
                 return Ok(());
@@ -540,7 +561,7 @@ where
                     let name = secret_rows[index].0.clone();
                     self.write_one_secret(vault_path, vault, keyset, &name, lock, lock_lost)?;
                 }
-                None => self.terminal.write_line("unknown choice")?,
+                None => self.write_unknown_menu_choice(secret_rows.len())?,
             }
         }
     }
@@ -557,12 +578,13 @@ where
         ensure_vault_lock_still_owned(lock, lock_lost)?;
         let value = self
             .terminal
-            .prompt_hidden_secret(&format!("{}: ", name.as_str()))?;
+            .prompt_hidden_secret(&format!("Enter value for {}: ", name.as_str()))?;
         ensure_vault_lock_still_owned(lock, lock_lost)?;
         vault.set_encrypted_value(keyset, name, &value)?;
         ensure_vault_lock_still_owned(lock, lock_lost)?;
         write_vault_atomically(vault_path, vault)?;
-        self.terminal.write_line("stored")
+        self.terminal
+            .write_line(&format!("Stored {}.", name.as_str()))
     }
 
     fn check_profile(&mut self, profile_name: &str) -> Result<(), Error> {
@@ -582,12 +604,13 @@ where
         let profile = self.profile(profile_name)?;
         let missing = missing_profile_names(profile, vault);
         if missing.is_empty() {
-            self.terminal.write_line("ok")?;
+            self.terminal
+                .write_line(&format!("Profile {profile_name} is ready."))?;
             Ok(true)
         } else {
             for name in missing {
                 self.terminal
-                    .write_line(&format!("missing {}", name.as_str()))?;
+                    .write_line(&format!("Missing {}.", name.as_str()))?;
             }
             Ok(false)
         }
@@ -648,7 +671,7 @@ where
         if command.is_empty() {
             return Err(Error::MissingChildCommand);
         }
-        let password = self.terminal.prompt_hidden_secret("Password: ")?;
+        let password = self.terminal.prompt_hidden_secret("Vault password: ")?;
         let projected = self.project_profile_env(profile_name, &password)?;
         self.child_process.run_child_command(command, projected)
     }
@@ -666,12 +689,20 @@ where
     }
 
     fn prompt_confirmed_password(&mut self) -> Result<SecretBytes, Error> {
-        let first = self.terminal.prompt_hidden_secret("Password: ")?;
-        let second = self.terminal.prompt_hidden_secret("Confirm password: ")?;
+        let first = self.terminal.prompt_hidden_secret("New vault password: ")?;
+        let second = self
+            .terminal
+            .prompt_hidden_secret("Confirm vault password: ")?;
         if first.expose_secret() != second.expose_secret() {
             return Err(Error::PasswordConfirmationMismatch);
         }
         Ok(first)
+    }
+
+    fn write_unknown_menu_choice(&mut self, max_choice: usize) -> Result<(), Error> {
+        self.terminal.write_line(&format!(
+            "Unknown selection. Choose a number from 0 to {max_choice}."
+        ))
     }
 }
 

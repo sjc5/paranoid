@@ -161,7 +161,7 @@ fn queue_public_primitives_are_available_through_namespaced_modules() {
             .enqueue_json_batch(
                 pool,
                 "task.public",
-                &[payload.clone()],
+                std::slice::from_ref(&payload),
                 crate::queue::EnqueueBatchOptions::default(),
             )
             .await?;

@@ -440,6 +440,7 @@ impl Cron {
     }
 }
 
+#[allow(clippy::result_large_err)]
 fn release_cron_guard_after_leadership_lost<E>(
     release_result: Result<bool, Error>,
 ) -> Result<CronLeadershipTenureOutcome, CronRunError<E>>

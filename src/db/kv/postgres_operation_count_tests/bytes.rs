@@ -380,7 +380,7 @@ async fn kv_common_store_operations_emit_exact_database_operation_records() {
         store
             .acquire_slot_bytes(
                 &observed_pool,
-                &[slot_key.clone()],
+                std::slice::from_ref(&slot_key),
                 b"slot",
                 Ttl::expires_after(Duration::from_secs(5)).expect("ttl"),
             )

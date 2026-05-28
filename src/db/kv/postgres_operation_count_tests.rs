@@ -245,35 +245,35 @@ fn transaction_records(record: DatabaseOperationRecord) -> Vec<DatabaseOperation
 }
 
 fn read_transaction_records(record: DatabaseOperationRecord) -> Vec<DatabaseOperationRecord> {
-    let mut operation_records = Vec::with_capacity(3);
-    operation_records.push(DatabaseOperationRecord {
-        kind: DatabaseOperationKind::BeginTransaction,
-        label: "db.begin_transaction",
-        statement: None,
-    });
-    operation_records.push(record);
-    operation_records.push(DatabaseOperationRecord {
-        kind: DatabaseOperationKind::RollbackTransaction,
-        label: "db.tx.rollback",
-        statement: None,
-    });
-    operation_records
+    vec![
+        DatabaseOperationRecord {
+            kind: DatabaseOperationKind::BeginTransaction,
+            label: "db.begin_transaction",
+            statement: None,
+        },
+        record,
+        DatabaseOperationRecord {
+            kind: DatabaseOperationKind::RollbackTransaction,
+            label: "db.tx.rollback",
+            statement: None,
+        },
+    ]
 }
 
 fn failed_transaction_records(record: DatabaseOperationRecord) -> Vec<DatabaseOperationRecord> {
-    let mut operation_records = Vec::with_capacity(3);
-    operation_records.push(DatabaseOperationRecord {
-        kind: DatabaseOperationKind::BeginTransaction,
-        label: "db.begin_transaction",
-        statement: None,
-    });
-    operation_records.push(record);
-    operation_records.push(DatabaseOperationRecord {
-        kind: DatabaseOperationKind::RollbackTransaction,
-        label: "db.tx.rollback",
-        statement: None,
-    });
-    operation_records
+    vec![
+        DatabaseOperationRecord {
+            kind: DatabaseOperationKind::BeginTransaction,
+            label: "db.begin_transaction",
+            statement: None,
+        },
+        record,
+        DatabaseOperationRecord {
+            kind: DatabaseOperationKind::RollbackTransaction,
+            label: "db.tx.rollback",
+            statement: None,
+        },
+    ]
 }
 
 fn transaction_records_many<const N: usize>(

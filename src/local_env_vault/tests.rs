@@ -503,7 +503,7 @@ fn parser_rejects_extra_args_missing_child_command_and_unknown_profile() {
 }
 
 #[test]
-fn config_profile_menu_reports_set_and_missing_profile_secret_status() {
+fn config_profile_menu_reports_configured_and_missing_profile_secret_status() {
     let dir = temp_vault_dir();
     let mut runner = configured_runner(
         dir.clone(),
@@ -519,7 +519,7 @@ fn config_profile_menu_reports_set_and_missing_profile_secret_status() {
             .terminal
             .lines
             .iter()
-            .any(|line| line == "1. APP_API_KEY missing")
+            .any(|line| line == "  1. APP_API_KEY - missing")
     );
     fs::remove_dir_all(dir).expect("remove temp vault dir");
 }
@@ -551,7 +551,7 @@ fn profile_check_command_still_fails_when_required_names_are_missing() {
             .terminal
             .lines
             .iter()
-            .any(|line| line == "missing APP_API_KEY")
+            .any(|line| line == "Missing APP_API_KEY.")
     );
     fs::remove_dir_all(dir).expect("remove temp vault dir");
 }
