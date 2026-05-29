@@ -8,6 +8,7 @@ DB_FEATURES := --no-default-features --features db
 # Compiles Paranoid with every feature enabled, including integration tests.
 check:
 	@cargo check --all-features --tests
+	@$(MAKE) --no-print-directory playground-local-env-vault
 
 # Runs the normal all-feature test suite.
 test:
@@ -42,6 +43,11 @@ feature-gate:
 	@$(MAKE) --no-print-directory feature-web
 	@$(MAKE) --no-print-directory feature-db
 	@$(MAKE) --no-print-directory feature-all
+	@$(MAKE) --no-print-directory playground-local-env-vault
+
+# Checks the local-env-vault application wrapper playground.
+playground-local-env-vault:
+	@cargo check -p paranoid-local-env-vault-playground
 
 # Checks the empty-default feature surface.
 feature-none:

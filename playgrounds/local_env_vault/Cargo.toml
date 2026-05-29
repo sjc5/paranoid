@@ -1,0 +1,9 @@
+[package]
+name = "paranoid-local-env-vault-playground"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+paranoid = { path = "../..", features = ["local-env-vault"] }

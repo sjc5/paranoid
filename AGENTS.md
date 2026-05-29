@@ -1,3 +1,47 @@
+## The Paranoid Standard
+
+Paranoid is not application code. It is security, storage, coordination, and auth
+infrastructure. Treat every public API, internal invariant, database query, crypto
+boundary, and test as part of a package that other serious systems may rely on for
+correctness under adversarial conditions.
+
+Do not make “works for this case” changes. Before changing code, identify the invariant
+being protected, the failure mode being prevented, and how the design makes misuse
+difficult or impossible.
+
+Paranoid code should be:
+
+- safe by construction, not merely documented as safe;
+- explicit about state transitions, atomicity, ordering, and effects;
+- resistant to races, replay, stale state, accidental misuse, and adapter mistakes;
+- easy to audit from names, types, tests, and module structure;
+- boring in implementation and uncompromising in semantics.
+
+When working in Paranoid, default to asking:
+
+- What can go wrong if this is called at the wrong time?
+- Can the type system make that impossible?
+- Can an adapter or consumer accidentally skip a required step?
+- Does this rely on caller discipline where the library should enforce the rule?
+- Does this create a public API we may regret supporting?
+- Is the test proving the semantic contract, or just matching the current implementation?
+- Does this preserve transaction-pooler-safe Postgres behavior?
+- Does this preserve byte-stable database semantics?
+- Does this preserve the minimum-query, no-waste performance posture?
+
+If the answer is unclear, stop and clarify the model before editing. Paranoid should feel
+like a small, rigorous machine with carefully shaped controls, not a pile of convenient
+helpers.
+
+Before making non-trivial changes, get oriented from the actual live package surface. Read
+this `AGENTS.md`, the crate `README.md`, the root `Cargo.toml` feature definitions, the
+public module docs for the area you are touching, and the tests/fuzz targets that exercise
+that area. If a design/spec document exists for that subsystem, read it as context, but
+treat live code and live tests as the source of truth unless the user explicitly says the
+spec should win. Do not rely on old audit notes, migration notes, stale brainstorming
+docs, or assumptions from application code. The goal is to understand the invariant, the
+public API promise, and the existing verification story before editing.
+
 ## Postgres Only / Connection Pooler Safe
 
 All packages shall be designed for use with Postgres only and shall be safe for use with
