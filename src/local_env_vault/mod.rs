@@ -1030,7 +1030,7 @@ where
     ) -> Result<BTreeMap<EnvVarName, SecretBytes>, Error> {
         let mut projected = BTreeMap::new();
         for name in profile.required_names() {
-            let value = vault.decrypt_value(&keyset, name)?;
+            let value = vault.decrypt_value(keyset, name)?;
             projected.insert(name.clone(), value);
         }
         Ok(projected)

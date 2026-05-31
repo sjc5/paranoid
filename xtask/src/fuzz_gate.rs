@@ -20,23 +20,12 @@ struct Options {
     runs: u64,
 }
 
-#[derive(Debug, Eq, PartialEq)]
-enum ParsedArgs {
-    Help,
-    Run(Options),
-}
-
 pub(crate) fn run_from_args<I>(args: I) -> Result<(), String>
 where
     I: IntoIterator,
     I::Item: Into<String>,
 {
-    let parsed = parse_args(args)?;
-    let ParsedArgs::Run(options) = parsed else {
-        print_usage();
-        return Ok(());
-    };
-
+    let options = parse_args(args)?;
     for target in &options.targets {
         run_fuzz_target(target, options.runs)?;
     }
@@ -44,7 +33,7 @@ where
     Ok(())
 }
 
-fn parse_args<I>(args: I) -> Result<ParsedArgs, String>
+fn parse_args<I>(args: I) -> Result<Options, String>
 where
     I: IntoIterator,
     I::Item: Into<String>,
@@ -55,7 +44,6 @@ where
 
     while let Some(arg) = iter.next() {
         match arg.as_str() {
-            "--help" | "-h" => return Ok(ParsedArgs::Help),
             "--target" => {
                 let value = iter
                     .next()
@@ -82,7 +70,7 @@ where
             .collect();
     }
 
-    Ok(ParsedArgs::Run(Options { targets, runs }))
+    Ok(Options { targets, runs })
 }
 
 fn parse_positive_u64(flag: &str, value: &str) -> Result<u64, String> {
@@ -242,10 +230,6 @@ fn libfuzzer_completion_line_has_positive_run_count(line: &str) -> bool {
     runs > 0 && rest[digit_count..].starts_with(" runs in ")
 }
 
-fn print_usage() {
-    eprintln!("usage: xtask fuzz-gate [--target <cargo-fuzz-target>]... [--runs <positive-int>]");
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -300,10 +284,7 @@ Done 0 runs in 0 second(s)
 
     #[test]
     fn default_args_run_all_paranoid_fuzz_targets() {
-        let parsed = parse_args(std::iter::empty::<String>()).expect("parse args");
-        let ParsedArgs::Run(options) = parsed else {
-            panic!("expected run options");
-        };
+        let options = parse_args(std::iter::empty::<String>()).expect("parse args");
 
         assert_eq!(
             options,
@@ -334,7 +315,7 @@ Done 0 runs in 0 second(s)
 
     #[test]
     fn explicit_args_can_select_targets_and_run_count() {
-        let parsed = parse_args([
+        let options = parse_args([
             "--target",
             "paranoid_codecs",
             "--target",
@@ -343,9 +324,6 @@ Done 0 runs in 0 second(s)
             "17",
         ])
         .expect("parse args");
-        let ParsedArgs::Run(options) = parsed else {
-            panic!("expected run options");
-        };
 
         assert_eq!(
             options,

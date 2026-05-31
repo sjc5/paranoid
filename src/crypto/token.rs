@@ -115,6 +115,22 @@ impl<K> SecretBytes<K> {
             keyset.latest_key(),
         ))
     }
+
+    pub(crate) fn to_macs_for_all_keyset_keys(
+        &self,
+        keyset: &Keyset,
+        context: &[u8],
+    ) -> Result<Vec<MacOverSecret>, Error> {
+        let mut macs = Vec::new();
+        macs.try_reserve_exact(keyset.key_count())
+            .map_err(|_| Error::AllocationFailed)?;
+        for key in keyset.latest_first_keys() {
+            macs.push(MacOverSecret::from_mac_array(
+                mac_over_secret_bytes_for_key(self.expose_secret(), context, key),
+            )?);
+        }
+        Ok(macs)
+    }
 }
 
 fn mac_over_secret_bytes_for_key(

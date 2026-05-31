@@ -42,6 +42,12 @@ spec should win. Do not rely on old audit notes, migration notes, stale brainsto
 docs, or assumptions from application code. The goal is to understand the invariant, the
 public API promise, and the existing verification story before editing.
 
+## Maintainer Tooling Should Be As Simple and Minimal As Possible
+
+Do not add unnecessary garbage like "help" args to maintainer-facing tooling. All
+maintainer-facing tooling (scripts, xtasks, makefiles, etc.) should be as simple and
+minimal as possible. There should be no extra or speculative surface area, period.
+
 ## Postgres Only / Connection Pooler Safe
 
 All packages shall be designed for use with Postgres only and shall be safe for use with

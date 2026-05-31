@@ -130,3 +130,6 @@ pub mod local_lock;
 pub mod queue;
 #[cfg(feature = "web")]
 pub mod web;
+
+#[cfg(feature = "auth")]
+mod auth_core;

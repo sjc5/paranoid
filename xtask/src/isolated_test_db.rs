@@ -18,7 +18,7 @@ const MAX_STACK_START_ATTEMPTS: u8 = 5;
 pub(crate) fn run_from_args(args: Vec<OsString>) -> Result<i32, String> {
     let child_command = child_command_from_cli_args(args);
     if child_command.is_empty() {
-        return Err("isolated test stack child command is required".to_owned());
+        return Err("isolated test stack child command must follow --".to_owned());
     }
 
     let compose_file = resolve_compose_file()?;
@@ -71,10 +71,10 @@ pub(crate) fn run_from_args(args: Vec<OsString>) -> Result<i32, String> {
 }
 
 fn child_command_from_cli_args(args: Vec<OsString>) -> Vec<OsString> {
-    if args.first().is_some_and(|arg| arg == "--") {
-        return args.into_iter().skip(1).collect();
+    if !args.first().is_some_and(|arg| arg == "--") {
+        return Vec::new();
     }
-    args
+    args.into_iter().skip(1).collect()
 }
 
 fn resolve_compose_file() -> Result<PathBuf, String> {
@@ -573,10 +573,10 @@ mod tests {
     }
 
     #[test]
-    fn child_command_parser_keeps_args_without_separator() {
+    fn child_command_parser_rejects_args_without_separator() {
         let args = vec![OsString::from("cargo"), OsString::from("test")];
 
-        assert_eq!(child_command_from_cli_args(args.clone()), args);
+        assert_eq!(child_command_from_cli_args(args), Vec::<OsString>::new());
     }
 
     #[test]
