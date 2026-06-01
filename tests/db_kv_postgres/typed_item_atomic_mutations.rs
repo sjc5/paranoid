@@ -2,9 +2,7 @@ use super::*;
 
 #[tokio::test]
 async fn kv_item_get_or_init_is_atomic_and_transactional() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let store = KvStore::new(test_database.config.clone()).expect("kv store");
     let item = KvItem::<TestKvPayload>::new_plain(
@@ -128,9 +126,7 @@ async fn kv_item_get_or_init_is_atomic_and_transactional() {
 
 #[tokio::test]
 async fn kv_item_atomic_error_cleanup_survives_caller_transaction_commit() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let store = KvStore::new(test_database.config.clone()).expect("kv store");
     let failing_prefix = KvKeyPrefix::from_parts(["item", "atomic-error-cleanup"]).expect("prefix");
@@ -308,9 +304,7 @@ async fn kv_item_atomic_error_cleanup_survives_caller_transaction_commit() {
 
 #[tokio::test]
 async fn kv_item_atomic_mutation_updates_deletes_preserves_ttl_and_rolls_back() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let store = KvStore::new(test_database.config.clone()).expect("kv store");
     let item = KvItem::<TestKvPayload>::new_plain(
@@ -449,9 +443,7 @@ async fn kv_item_atomic_mutation_updates_deletes_preserves_ttl_and_rolls_back() 
 
 #[tokio::test]
 async fn kv_item_live_atomic_mutation_requires_non_expired_existing_item() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let store = KvStore::new(test_database.config.clone()).expect("kv store");
     let item = KvItem::<TestKvPayload>::new_plain(
@@ -599,9 +591,7 @@ async fn kv_item_live_atomic_mutation_requires_non_expired_existing_item() {
 
 #[tokio::test]
 async fn kv_item_live_or_init_atomic_mutation_initializes_once_and_supports_encryption() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let store = KvStore::new(test_database.config.clone()).expect("kv store");
     let item_prefix = KvKeyPrefix::from_parts(["item", "or-init-atomic"]).expect("prefix");
@@ -896,9 +886,7 @@ async fn kv_item_live_or_init_atomic_mutation_initializes_once_and_supports_encr
 
 #[tokio::test]
 async fn kv_item_atomic_mutation_serializes_concurrent_counter_updates() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let store = KvStore::new(test_database.config.clone()).expect("kv store");
     let item = KvItem::<i64>::new_plain(

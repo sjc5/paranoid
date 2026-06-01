@@ -410,10 +410,10 @@ fn select_resource_only_prefixed_isolated_test_projects_safe_to_cleanup(
 ) -> Vec<String> {
     let mut safe_projects = Vec::new();
     for project_name in project_names {
-        if let Some(owner_pid) = isolated_test_project_owner_pid_from_project_name(project_name) {
-            if is_process_alive(owner_pid) {
-                continue;
-            }
+        if let Some(owner_pid) = isolated_test_project_owner_pid_from_project_name(project_name)
+            && is_process_alive(owner_pid)
+        {
+            continue;
         }
         safe_projects.push(project_name.clone());
     }
@@ -510,10 +510,11 @@ fn parse_compose_port_output(output: &str) -> Option<String> {
         .map(str::trim)
         .filter(|line| !line.is_empty())
     {
-        if let Some((_, port)) = line.rsplit_once(':') {
-            if !port.is_empty() && port.bytes().all(|byte| byte.is_ascii_digit()) {
-                return Some(port.to_owned());
-            }
+        if let Some((_, port)) = line.rsplit_once(':')
+            && !port.is_empty()
+            && port.bytes().all(|byte| byte.is_ascii_digit())
+        {
+            return Some(port.to_owned());
         }
     }
     None

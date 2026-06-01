@@ -2,12 +2,7 @@ use super::*;
 
 #[tokio::test]
 async fn queue_process_available_jobs_once_emits_expected_worker_database_operation_records() {
-    let Some(database_url) = test_database_url() else {
-        eprintln!(
-            "skipping Postgres Queue operation-count test; set TEST_DSN or PARANOID_TEST_DATABASE_URL to run"
-        );
-        return;
-    };
+    let database_url = test_database_url();
 
     let sqlx_pool = connect_sqlx_pool(&database_url).await;
     let config = unique_test_config();
@@ -105,12 +100,7 @@ async fn queue_process_available_jobs_once_emits_expected_worker_database_operat
 
 #[tokio::test]
 async fn queue_long_running_worker_loop_emits_expected_worker_database_operation_records() {
-    let Some(database_url) = test_database_url() else {
-        eprintln!(
-            "skipping Postgres Queue operation-count test; set TEST_DSN or PARANOID_TEST_DATABASE_URL to run"
-        );
-        return;
-    };
+    let database_url = test_database_url();
 
     let sqlx_pool = connect_sqlx_pool(&database_url).await;
     let config = unique_test_config();

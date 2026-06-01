@@ -3,9 +3,7 @@ use super::*;
 
 #[tokio::test]
 async fn queue_worker_lost_ownership_before_start_skips_handler_execution() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let queue = Store::new(test_database.config.clone()).expect("queue");
     reset_queue_schema(&test_database).await;
@@ -83,9 +81,7 @@ async fn queue_worker_lost_ownership_before_start_skips_handler_execution() {
 
 #[tokio::test]
 async fn queue_worker_claim_database_operation_timeout_leaves_job_pending() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let queue = Store::new(test_database.config.clone()).expect("queue");
     reset_queue_schema(&test_database).await;
@@ -142,9 +138,7 @@ async fn queue_worker_claim_database_operation_timeout_leaves_job_pending() {
 
 #[tokio::test]
 async fn queue_worker_claim_future_cancellation_leaves_job_pending() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let queue = Store::new(test_database.config.clone()).expect("queue");
     reset_queue_schema(&test_database).await;
@@ -196,9 +190,7 @@ async fn queue_worker_claim_future_cancellation_leaves_job_pending() {
 
 #[tokio::test]
 async fn queue_worker_cancellation_after_claim_returns_unstarted_job_to_pending() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let queue = Store::new(test_database.config.clone()).expect("queue");
     reset_queue_schema(&test_database).await;
@@ -300,9 +292,7 @@ async fn queue_worker_cancellation_after_claim_returns_unstarted_job_to_pending(
 
 #[tokio::test]
 async fn queue_worker_run_once_times_out_noncooperative_job_and_clears_worker_ownership() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let queue = Store::new(test_database.config.clone()).expect("queue");
     reset_queue_schema(&test_database).await;
@@ -403,9 +393,7 @@ async fn queue_worker_run_once_times_out_noncooperative_job_and_clears_worker_ow
 
 #[tokio::test]
 async fn queue_worker_run_once_dead_letters_preexhausted_job_before_calling_handler() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let queue = Store::new(test_database.config.clone()).expect("queue");
     reset_queue_schema(&test_database).await;
@@ -484,9 +472,7 @@ async fn queue_worker_run_once_dead_letters_preexhausted_job_before_calling_hand
 
 #[tokio::test]
 async fn queue_worker_dead_letters_unknown_task_returned_from_claim() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let queue = Store::new(test_database.config.clone()).expect("queue");
     reset_queue_schema(&test_database).await;
@@ -568,9 +554,7 @@ async fn queue_worker_dead_letters_unknown_task_returned_from_claim() {
 
 #[tokio::test]
 async fn queue_worker_registry_and_config_validation_reject_ambiguous_runtime_shapes() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let queue = Store::new(test_database.config.clone()).expect("queue");
     let mut registry = TaskRegistry::new();
@@ -665,7 +649,6 @@ async fn queue_worker_registry_and_config_validation_reject_ambiguous_runtime_sh
                     strategy: RetryBackoffStrategy::Custom(Arc::new(|_, _| Duration::ZERO)),
                     max_backoff: Duration::from_nanos(1),
                     jitter_fraction: 0.0,
-                    ..RetryPolicy::default()
                 },
                 ..WorkerConfig::default()
             },

@@ -48,7 +48,7 @@ impl Once {
     /// Attempts to start this task with a generated holder identifier.
     pub(crate) async fn try_start_manual_run(
         &self,
-        pool: &Pool,
+        pool: &WritePool,
     ) -> Result<Option<OnceManualRunClaim>, Error> {
         let holder_id = generate_holder_id()?;
         self.try_start_manual_run_for_holder(pool, &holder_id).await
@@ -57,7 +57,7 @@ impl Once {
     /// Attempts to start this task with an explicit holder identifier.
     pub(crate) async fn try_start_manual_run_for_holder(
         &self,
-        pool: &Pool,
+        pool: &WritePool,
         holder_id: &HolderId,
     ) -> Result<Option<OnceManualRunClaim>, Error> {
         if self.check_done(pool).await?.is_some() {
@@ -92,7 +92,7 @@ impl Once {
     /// Attempts to acquire exclusive execution, run `task`, record completion, and release the claim.
     pub async fn try_run_task<T, E, TaskFuture, Task>(
         &self,
-        pool: &Pool,
+        pool: &WritePool,
         task: Task,
     ) -> Result<OnceTryRunTaskResult<T>, OnceRunError<E>>
     where
@@ -128,7 +128,7 @@ impl Once {
     /// Waits for exclusive execution, then runs `task` only if completion has not already been recorded.
     pub async fn run_task_when_available<T, E, TaskFuture, Task>(
         &self,
-        pool: &Pool,
+        pool: &WritePool,
         task: Task,
     ) -> Result<OnceRunTaskResult<T>, OnceRunError<E>>
     where
@@ -150,13 +150,13 @@ impl Once {
     /// Attempts to acquire exclusive execution and run `task` in the same transaction as completion.
     pub async fn try_run_task_atomically<T, E, Task>(
         &self,
-        pool: &Pool,
+        pool: &WritePool,
         task: Task,
     ) -> Result<OnceTryRunTaskResult<T>, OnceTransactionalRunError<E>>
     where
         Task: for<'a, 'tx> FnOnce(
             OnceRunClaimSnapshot,
-            &'a mut Tx<'tx>,
+            &'a mut WriteTx<'tx>,
         ) -> OnceTransactionalTaskFuture<'a, T, E>,
         E: std::error::Error + Send + Sync + 'static,
     {
@@ -188,13 +188,13 @@ impl Once {
     /// Waits for exclusive execution, then runs `task` in the same transaction as completion.
     pub async fn run_task_atomically_when_available<T, E, Task>(
         &self,
-        pool: &Pool,
+        pool: &WritePool,
         task: Task,
     ) -> Result<OnceRunTaskResult<T>, OnceTransactionalRunError<E>>
     where
         Task: for<'a, 'tx> FnOnce(
             OnceRunClaimSnapshot,
-            &'a mut Tx<'tx>,
+            &'a mut WriteTx<'tx>,
         ) -> OnceTransactionalTaskFuture<'a, T, E>,
         E: std::error::Error + Send + Sync + 'static,
     {
@@ -213,14 +213,17 @@ impl Once {
 
 impl OnceManualRunProtocol<'_> {
     /// Attempts to start this task through the manual run protocol.
-    pub async fn try_start_run(&self, pool: &Pool) -> Result<Option<OnceManualRunClaim>, Error> {
+    pub async fn try_start_run(
+        &self,
+        pool: &WritePool,
+    ) -> Result<Option<OnceManualRunClaim>, Error> {
         self.once.try_start_manual_run(pool).await
     }
 
     /// Attempts to start this task for an explicit holder through the manual run protocol.
     pub async fn try_start_run_for_holder(
         &self,
-        pool: &Pool,
+        pool: &WritePool,
         holder_id: &HolderId,
     ) -> Result<Option<OnceManualRunClaim>, Error> {
         self.once

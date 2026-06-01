@@ -311,11 +311,13 @@ pub(super) async fn handle_processed_queue_job_error(
             schedule_owned_running_job_retry_with_database_operation_timeout(
                 &runtime.queue,
                 &runtime.pool,
-                job.id,
-                runtime.worker_owner_id.as_str(),
-                next_retry_count,
-                retry_after,
-                error.message(),
+                OwnedRunningJobRetryPersistence {
+                    job_id: job.id,
+                    worker_id: runtime.worker_owner_id.as_str(),
+                    new_retry_count: next_retry_count,
+                    retry_after,
+                    error_message: error.message(),
+                },
                 operation_timeout,
             )
         },
@@ -356,11 +358,13 @@ pub(super) async fn move_running_job_to_dead_letter_or_fail(
                 move_owned_running_job_to_dead_letter_with_database_operation_timeout(
                     &runtime.queue,
                     &runtime.pool,
-                    job.id,
-                    runtime.worker_owner_id.as_str(),
-                    error_message,
-                    increment_retry_count,
-                    reason,
+                    OwnedRunningJobDeadLetterPersistence {
+                        job_id: job.id,
+                        worker_id: runtime.worker_owner_id.as_str(),
+                        error_message,
+                        increment_retry_count,
+                        reason,
+                    },
                     operation_timeout,
                 )
             },
@@ -424,7 +428,7 @@ pub(super) async fn move_running_job_to_dead_letter_or_fail(
 
 pub(super) async fn requeue_started_job_after_worker_persistence_failure(
     queue: &Store,
-    pool: &Pool,
+    pool: &WritePool,
     job_id: JobId,
     worker_id: &str,
     database_operation_timeout: Duration,
@@ -551,7 +555,7 @@ pub(super) fn worker_runtime_error_from_joined_in_flight_job_after_abort(
 
 pub(super) async fn return_claimed_jobs_after_worker_task_failure(
     queue: &Store,
-    pool: &Pool,
+    pool: &WritePool,
     worker_id: &str,
     database_operation_timeout: Duration,
 ) -> Result<(), Error> {

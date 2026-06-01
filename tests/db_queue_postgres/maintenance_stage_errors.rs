@@ -2,9 +2,7 @@ use super::*;
 
 #[tokio::test]
 async fn queue_reclaim_stage_errors_surface_and_roll_back_prior_stage_changes() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     assert_never_started_reclaim_stage_error_rolls_back(&test_database).await;
     assert_expired_to_failed_reclaim_stage_error_rolls_back(&test_database).await;

@@ -245,35 +245,35 @@ fn transaction_records(record: DatabaseOperationRecord) -> Vec<DatabaseOperation
 }
 
 fn read_transaction_records(record: DatabaseOperationRecord) -> Vec<DatabaseOperationRecord> {
-    let mut operation_records = Vec::with_capacity(3);
-    operation_records.push(DatabaseOperationRecord {
-        kind: DatabaseOperationKind::BeginTransaction,
-        label: "db.begin_transaction",
-        statement: None,
-    });
-    operation_records.push(record);
-    operation_records.push(DatabaseOperationRecord {
-        kind: DatabaseOperationKind::RollbackTransaction,
-        label: "db.tx.rollback",
-        statement: None,
-    });
-    operation_records
+    vec![
+        DatabaseOperationRecord {
+            kind: DatabaseOperationKind::BeginTransaction,
+            label: "db.begin_transaction",
+            statement: None,
+        },
+        record,
+        DatabaseOperationRecord {
+            kind: DatabaseOperationKind::RollbackTransaction,
+            label: "db.tx.rollback",
+            statement: None,
+        },
+    ]
 }
 
 fn failed_transaction_records(record: DatabaseOperationRecord) -> Vec<DatabaseOperationRecord> {
-    let mut operation_records = Vec::with_capacity(3);
-    operation_records.push(DatabaseOperationRecord {
-        kind: DatabaseOperationKind::BeginTransaction,
-        label: "db.begin_transaction",
-        statement: None,
-    });
-    operation_records.push(record);
-    operation_records.push(DatabaseOperationRecord {
-        kind: DatabaseOperationKind::RollbackTransaction,
-        label: "db.tx.rollback",
-        statement: None,
-    });
-    operation_records
+    vec![
+        DatabaseOperationRecord {
+            kind: DatabaseOperationKind::BeginTransaction,
+            label: "db.begin_transaction",
+            statement: None,
+        },
+        record,
+        DatabaseOperationRecord {
+            kind: DatabaseOperationKind::RollbackTransaction,
+            label: "db.tx.rollback",
+            statement: None,
+        },
+    ]
 }
 
 fn transaction_records_many<const N: usize>(
@@ -294,7 +294,7 @@ fn transaction_records_many<const N: usize>(
     operation_records
 }
 
-fn test_database_url() -> Option<String> {
+fn test_database_url() -> String {
     ["TEST_DSN", "PARANOID_TEST_DATABASE_URL"]
         .into_iter()
         .find_map(|env_name| {
@@ -306,13 +306,16 @@ fn test_database_url() -> Option<String> {
                 Some(trimmed.to_owned())
             }
         })
+        .expect("required Postgres test database URL missing; set TEST_DSN or PARANOID_TEST_DATABASE_URL")
 }
 
-async fn connect_paranoid_pool(database_url: &str) -> Pool {
+async fn connect_paranoid_pool(database_url: &str) -> WritePool {
     let mut config = PoolConfig::new(SecretString::from(database_url.to_owned()));
     config.max_connections = 2;
     config.application_name = Some("paranoid_kv_operation_count_test".to_owned());
-    Pool::connect(config).await.expect("connect paranoid pool")
+    WritePool::connect(config)
+        .await
+        .expect("connect paranoid pool")
 }
 
 async fn connect_sqlx_pool(database_url: &str) -> PgPool {

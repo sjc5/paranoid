@@ -2,9 +2,7 @@ use super::*;
 
 #[tokio::test]
 async fn queue_reclaims_stale_running_jobs_without_touching_fresh_running_jobs() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let queue = Store::new(test_database.config.clone()).expect("queue");
     reset_queue_schema(&test_database).await;
@@ -261,9 +259,7 @@ async fn queue_reclaims_stale_running_jobs_without_touching_fresh_running_jobs()
 
 #[tokio::test]
 async fn queue_reclaim_stale_running_jobs_respects_batch_size() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let queue = Store::new(test_database.config.clone()).expect("queue");
     reset_queue_schema(&test_database).await;
@@ -368,9 +364,7 @@ async fn queue_reclaim_stale_running_jobs_respects_batch_size() {
 
 #[tokio::test]
 async fn queue_dead_letter_round_trip_preserves_payload_and_blocks_active_dedupe_conflicts() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let queue = Store::new(test_database.config.clone()).expect("queue");
     reset_queue_schema(&test_database).await;
@@ -519,9 +513,7 @@ async fn queue_dead_letter_round_trip_preserves_payload_and_blocks_active_dedupe
 
 #[tokio::test]
 async fn queue_list_jobs_and_dead_letters_filter_page_and_deduplicate_statuses() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let queue = Store::new(test_database.config.clone()).expect("queue");
     reset_queue_schema(&test_database).await;
@@ -636,9 +628,7 @@ async fn queue_list_jobs_and_dead_letters_filter_page_and_deduplicate_statuses()
 
 #[tokio::test]
 async fn queue_dead_letter_batch_moves_only_failed_rows_and_rejects_oversized_inputs() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let queue = Store::new(test_database.config.clone()).expect("queue");
     reset_queue_schema(&test_database).await;
@@ -765,9 +755,7 @@ async fn queue_dead_letter_batch_moves_only_failed_rows_and_rejects_oversized_in
 
 #[tokio::test]
 async fn queue_job_status_and_single_dead_letter_miss_paths_are_exact() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let queue = Store::new(test_database.config.clone()).expect("queue");
     reset_queue_schema(&test_database).await;
@@ -820,9 +808,7 @@ async fn queue_job_status_and_single_dead_letter_miss_paths_are_exact() {
 
 #[tokio::test]
 async fn queue_cleanup_deletes_only_terminal_rows_older_than_age_in_bounded_batches() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let queue = Store::new(test_database.config.clone()).expect("queue");
     reset_queue_schema(&test_database).await;
@@ -1002,9 +988,7 @@ async fn queue_cleanup_deletes_only_terminal_rows_older_than_age_in_bounded_batc
 
 #[tokio::test]
 async fn queue_cleanup_until_empty_drains_multiple_batches_without_a_caller_transaction() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let queue = Store::new(test_database.config.clone()).expect("queue");
     reset_queue_schema(&test_database).await;
@@ -1137,9 +1121,7 @@ async fn queue_cleanup_until_empty_drains_multiple_batches_without_a_caller_tran
 
 #[tokio::test]
 async fn queue_cleanup_dead_letter_until_empty_future_abort_after_first_batch_does_not_continue() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let queue = Store::new(test_database.config.clone()).expect("queue");
     reset_queue_schema(&test_database).await;
@@ -1219,9 +1201,7 @@ async fn queue_cleanup_dead_letter_until_empty_future_abort_after_first_batch_do
 
 #[tokio::test]
 async fn queue_cleanup_and_reclaim_high_cardinality_smoke_stays_bounded() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let queue = Store::new(test_database.config.clone()).expect("queue");
     reset_queue_schema(&test_database).await;

@@ -379,7 +379,7 @@ fn worker_owned_running_jobs_count_query(queue: &Store) -> String {
 
 async fn enqueue_test_job(
     queue: &Store,
-    pool: &Pool,
+    pool: &WritePool,
     task_name: &'static str,
     value: i32,
 ) -> JobId {
@@ -402,7 +402,7 @@ fn worker_owner_id_for_operation_count_test(worker_owner_id: &str) -> WorkerOwne
 
 async fn claim_test_job(
     queue: &Store,
-    pool: &Pool,
+    pool: &WritePool,
     task_name: &'static str,
     value: i32,
     worker_id: &'static str,
@@ -422,7 +422,7 @@ async fn claim_test_job(
 
 async fn fail_test_job(
     queue: &Store,
-    pool: &Pool,
+    pool: &WritePool,
     task_name: &'static str,
     value: i32,
     worker_id: &'static str,
@@ -497,7 +497,7 @@ async fn queue_dead_letter_job_exists(
         .is_some()
 }
 
-fn test_database_url() -> Option<String> {
+fn test_database_url() -> String {
     ["TEST_DSN", "PARANOID_TEST_DATABASE_URL"]
         .into_iter()
         .find_map(|env_name| {
@@ -509,13 +509,16 @@ fn test_database_url() -> Option<String> {
                 Some(trimmed.to_owned())
             }
         })
+        .expect("required Postgres test database URL missing; set TEST_DSN or PARANOID_TEST_DATABASE_URL")
 }
 
-async fn connect_paranoid_pool(database_url: &str) -> Pool {
+async fn connect_paranoid_pool(database_url: &str) -> WritePool {
     let mut config = PoolConfig::new(SecretString::from(database_url.to_owned()));
     config.max_connections = 2;
     config.application_name = Some("paranoid_queue_operation_count_test".to_owned());
-    Pool::connect(config).await.expect("connect paranoid pool")
+    WritePool::connect(config)
+        .await
+        .expect("connect paranoid pool")
 }
 
 async fn connect_sqlx_pool(database_url: &str) -> PgPool {

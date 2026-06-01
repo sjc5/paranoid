@@ -2,9 +2,7 @@ use super::*;
 
 #[tokio::test]
 async fn fleet_counter_add_get_set_and_negative_values() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let store = Store::new(test_database.config.clone()).expect("fleet store");
     let counter_key = CounterKey::new("page-views").expect("counter key");
@@ -115,9 +113,7 @@ async fn fleet_counter_add_get_set_and_negative_values() {
 
 #[tokio::test]
 async fn fleet_counter_concurrent_adds_are_atomic() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let store = Store::new(test_database.config.clone()).expect("fleet store");
     let counter = Arc::new(
@@ -167,9 +163,7 @@ async fn fleet_counter_concurrent_adds_are_atomic() {
 
 #[tokio::test]
 async fn fleet_counter_composes_inside_current_transaction_and_rolls_back() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let store = Store::new(test_database.config.clone()).expect("fleet store");
     let counter = store
@@ -245,9 +239,7 @@ async fn fleet_counter_composes_inside_current_transaction_and_rolls_back() {
 
 #[tokio::test]
 async fn fleet_counter_rejects_arithmetic_overflow_without_mutating_value() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let store = Store::new(test_database.config.clone()).expect("fleet store");
     let counter = store

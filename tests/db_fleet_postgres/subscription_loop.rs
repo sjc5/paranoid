@@ -2,9 +2,7 @@ use super::*;
 
 #[tokio::test]
 async fn fleet_subscription_polling_loop_advances_cursor_after_handler_success() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
     struct TestEvent {
@@ -39,25 +37,41 @@ async fn fleet_subscription_polling_loop_advances_cursor_after_handler_success()
     }
 
     let handled_count = Arc::new(AtomicUsize::new(0));
+    let (stop_sender, stop_receiver) = tokio::sync::oneshot::channel();
+    let stop_sender = Arc::new(Mutex::new(Some(stop_sender)));
     let handled_count_for_handler = Arc::clone(&handled_count);
-    subscription
-        .run_polling_until_stopped_or_handler_error(
+    let stop_sender_for_handler = Arc::clone(&stop_sender);
+    tokio::time::timeout(
+        Duration::from_secs(2),
+        subscription.run_polling_until_stopped_or_handler_error(
             &test_database.paranoid_pool,
             Duration::ZERO,
-            tokio::time::sleep(Duration::from_millis(50)),
+            async move {
+                let _ = stop_receiver.await;
+            },
             move |events| {
                 let handled_count_for_handler = Arc::clone(&handled_count_for_handler);
+                let stop_sender_for_handler = Arc::clone(&stop_sender_for_handler);
                 async move {
                     assert_eq!(events.len(), 3);
                     assert_eq!(events[0].data().id, 1);
                     assert_eq!(events[2].data().id, 3);
                     handled_count_for_handler.fetch_add(events.len(), Ordering::SeqCst);
+                    if let Some(stop_sender) = stop_sender_for_handler
+                        .lock()
+                        .expect("lock stop sender")
+                        .take()
+                    {
+                        let _ = stop_sender.send(());
+                    }
                     Ok::<_, TestComputeError>(())
                 }
             },
-        )
-        .await
-        .expect("run polling loop");
+        ),
+    )
+    .await
+    .expect("subscription should handle existing events before test timeout")
+    .expect("run polling loop");
 
     assert_eq!(handled_count.load(Ordering::SeqCst), 3);
     assert_eq!(
@@ -73,9 +87,7 @@ async fn fleet_subscription_polling_loop_advances_cursor_after_handler_success()
 
 #[tokio::test]
 async fn fleet_subscription_polling_loop_immediately_repolls_when_backlog_remains() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
     struct TestEvent {
@@ -166,9 +178,7 @@ async fn fleet_subscription_polling_loop_immediately_repolls_when_backlog_remain
 
 #[tokio::test]
 async fn fleet_subscription_start_handle_stops_after_handler_success() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
     struct TestEvent {
@@ -240,9 +250,7 @@ async fn fleet_subscription_start_handle_stops_after_handler_success() {
 
 #[tokio::test]
 async fn fleet_subscription_stop_during_handler_waits_for_success_and_advances_cursor() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
     struct TestEvent {
@@ -341,9 +349,7 @@ async fn fleet_subscription_stop_during_handler_waits_for_success_and_advances_c
 
 #[tokio::test]
 async fn fleet_subscription_polling_loop_serializes_same_subscription_handlers() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
     struct TestEvent {
@@ -458,9 +464,7 @@ async fn fleet_subscription_polling_loop_serializes_same_subscription_handlers()
 
 #[tokio::test]
 async fn fleet_subscription_polling_loop_does_not_advance_cursor_after_handler_error() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
     struct TestEvent {
@@ -518,9 +522,7 @@ async fn fleet_subscription_polling_loop_does_not_advance_cursor_after_handler_e
 
 #[tokio::test]
 async fn fleet_subscription_stops_after_cursor_advance_error_without_rehandling_events() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
     struct TestEvent {
@@ -589,9 +591,7 @@ async fn fleet_subscription_stops_after_cursor_advance_error_without_rehandling_
 
 #[tokio::test]
 async fn fleet_subscription_poll_error_policy_is_not_called_for_nontransient_database_error() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
     struct TestEvent {
@@ -647,9 +647,7 @@ async fn fleet_subscription_poll_error_policy_is_not_called_for_nontransient_dat
 
 #[tokio::test]
 async fn fleet_subscription_default_polling_stops_after_nontransient_initial_database_error() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
     struct TestEvent {
@@ -706,9 +704,7 @@ async fn fleet_subscription_default_polling_stops_after_nontransient_initial_dat
 
 #[tokio::test]
 async fn fleet_subscription_background_policy_is_not_called_for_nontransient_database_error() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
     struct TestEvent {
@@ -772,9 +768,7 @@ async fn fleet_subscription_background_policy_is_not_called_for_nontransient_dat
 
 #[tokio::test]
 async fn fleet_subscription_start_handle_reports_handler_error_without_advancing_cursor() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
     struct TestEvent {
@@ -853,9 +847,7 @@ async fn fleet_subscription_start_handle_handler_panic_does_not_advance_cursor()
         panic!("subscription handler panic")
     }
 
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let store = Store::new(test_database.config.clone()).expect("fleet store");
     let topic = store
@@ -908,9 +900,7 @@ async fn fleet_subscription_start_handle_handler_panic_does_not_advance_cursor()
 
 #[tokio::test]
 async fn fleet_subscription_polling_loop_stops_before_first_database_poll() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
     struct TestEvent;
@@ -953,12 +943,8 @@ async fn fleet_subscription_polling_loop_stops_before_first_database_poll() {
 
 #[tokio::test]
 async fn fleet_subscription_polling_loop_stops_during_poll_error_backoff() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
-    let timeout_database_url = direct_test_database_url()
-        .or_else(test_database_url)
-        .expect("test database URL");
+    let test_database = TestDatabase::connect().await;
+    let timeout_database_url = direct_test_database_url();
     let timeout_pool =
         connect_paranoid_pool_with_statement_timeout(&timeout_database_url, "50ms").await;
 
@@ -1055,9 +1041,7 @@ async fn fleet_subscription_polling_loop_stops_during_poll_error_backoff() {
 
 #[tokio::test]
 async fn fleet_subscription_polling_loop_reuses_loaded_cursor_between_successful_polls() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
     struct TestEvent {

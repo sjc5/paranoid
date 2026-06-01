@@ -2,9 +2,7 @@ use super::*;
 
 #[tokio::test]
 async fn kv_item_suffixless_scan_pagination_and_cursor_validation_are_precise() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let store = KvStore::new(test_database.config.clone()).expect("kv store");
     let item = KvItem::<TestKvPayload>::new_plain(
@@ -113,9 +111,7 @@ async fn kv_item_suffixless_scan_pagination_and_cursor_validation_are_precise() 
 
 #[tokio::test]
 async fn kv_item_multi_part_scan_cursors_page_by_full_persisted_suffix() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let store = KvStore::new(test_database.config.clone()).expect("kv store");
     let item = KvItem::<TestKvPayload>::new_plain(

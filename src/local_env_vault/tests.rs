@@ -2,6 +2,19 @@ use std::collections::VecDeque;
 
 use super::*;
 
+const APP_API_KEY: &str = "APP_API_KEY";
+const APP_API_SECRET: &str = "APP_API_SECRET";
+const APP_ONLY: &str = "APP_ONLY";
+const CURRENT_VALUE: &str = "CURRENT_VALUE";
+const EMPTY_VALUE: &str = "EMPTY_VALUE";
+const FILLED_VALUE: &str = "FILLED_VALUE";
+const FIRST_SECRET: &str = "FIRST_SECRET";
+const INVALID_ENV_VAR: &str = "invalid_env_var";
+const SECOND_SECRET: &str = "SECOND_SECRET";
+const SHARED_SECRET: &str = "SHARED_SECRET";
+const STALE_VALUE: &str = "STALE_VALUE";
+const WORKER_SECRET: &str = "WORKER_SECRET";
+
 struct FakeTerminal {
     secrets: VecDeque<SecretBytes>,
     line_inputs: VecDeque<String>,
@@ -22,13 +35,6 @@ impl FakeTerminal {
 }
 
 impl VaultTerminal for FakeTerminal {
-    fn prompt_line(&mut self, _prompt: &str) -> Result<String, Error> {
-        Ok(self
-            .line_inputs
-            .pop_front()
-            .expect("expected test line prompt"))
-    }
-
     fn prompt_hidden_secret(&mut self, _prompt: &str) -> Result<SecretBytes, Error> {
         Ok(self
             .secrets
@@ -36,10 +42,38 @@ impl VaultTerminal for FakeTerminal {
             .expect("expected test secret prompt"))
     }
 
+    fn select_menu_index(
+        &mut self,
+        prompt: &str,
+        _help_message: &str,
+        options: &[String],
+    ) -> Result<usize, Error> {
+        self.lines.push(prompt.to_owned());
+        for option in options {
+            self.lines.push(format!("  {option}"));
+        }
+        let choice = self
+            .line_inputs
+            .pop_front()
+            .expect("expected test menu choice");
+        Ok(fake_menu_choice_to_index(choice.trim(), options.len()))
+    }
+
     fn write_line(&mut self, line: &str) -> Result<(), Error> {
         self.lines.push(line.to_owned());
         Ok(())
     }
+}
+
+fn fake_menu_choice_to_index(choice: &str, option_count: usize) -> usize {
+    assert_ne!(option_count, 0, "test menu must have at least one option");
+    if choice.is_empty() || choice == "0" {
+        return option_count - 1;
+    }
+    let raw_index = choice.parse::<usize>().expect("test menu choice");
+    let index = raw_index.checked_sub(1).expect("one-based test choice");
+    assert!(index < option_count, "test menu choice out of range");
+    index
 }
 
 #[derive(Default)]
@@ -90,26 +124,69 @@ fn env_var_names_use_strict_ascii_env_shape() {
 }
 
 #[test]
-fn profiles_validate_names_and_required_env_vars() {
+fn profiles_validate_names_and_required_values() {
     let profile =
-        Profile::new("app_1", ["APP_API_KEY", "APP_API_KEY", "APP_API_SECRET"]).expect("profile");
+        Profile::new("app_1", [APP_API_KEY, APP_API_KEY, APP_API_SECRET]).expect("profile");
 
     assert_eq!(profile.name(), "app_1");
     assert_eq!(profile.required_names().count(), 2);
     assert!(matches!(
-        Profile::new("App", ["APP_API_KEY"]),
+        Profile::new("App", [APP_API_KEY]),
         Err(Error::InvalidProfileName { .. })
     ));
     assert!(matches!(
         Profile::new("empty", std::iter::empty::<&str>()),
-        Err(Error::ProfileRequiresNoEnvVars { .. })
+        Err(Error::ProfileRequiresNoValues { .. })
+    ));
+    assert!(matches!(
+        Profile::new("app", [INVALID_ENV_VAR]),
+        Err(Error::InvalidEnvVarName { .. })
     ));
 }
 
 #[test]
-fn no_args_config_initializes_sets_checks_and_projects_without_plaintext_storage() {
+fn runner_rejects_empty_profile_inventory() {
+    assert!(matches!(
+        VaultRunnerCore::with_terminal(std::iter::empty::<Profile>(), FakeTerminal::new(&[], &[]),),
+        Err(Error::RunnerRequiresAtLeastOneProfile)
+    ));
+}
+
+#[test]
+fn vault_dir_resolves_from_absolute_root_and_relative_parent_path() {
+    let root = std::env::temp_dir().join("env-wrapper-root");
+
+    assert_eq!(
+        vault_dir_from_root_and_relative_parent(&root, Path::new(".")).expect("vault dir"),
+        root.join(DEFAULT_VAULT_DIR)
+    );
+    assert_eq!(
+        vault_dir_from_root_and_relative_parent(&root, Path::new("local/private"))
+            .expect("vault dir"),
+        root.join("local/private").join(DEFAULT_VAULT_DIR)
+    );
+    assert!(matches!(
+        vault_dir_from_root_and_relative_parent(Path::new("relative-root"), Path::new(".")),
+        Err(Error::VaultRootMustBeAbsolute { path }) if path == PathBuf::from("relative-root")
+    ));
+    assert!(matches!(
+        vault_dir_from_root_and_relative_parent(&root, Path::new("")),
+        Err(Error::VaultParentPathRelativeToRootMustNotBeEmpty)
+    ));
+    assert!(matches!(
+        vault_dir_from_root_and_relative_parent(&root, &root),
+        Err(Error::VaultParentPathMustBeRelative { path }) if path == root
+    ));
+    assert!(matches!(
+        vault_dir_from_root_and_relative_parent(&root, Path::new("../outside")),
+        Err(Error::VaultParentPathMustNotTraverseParent { path }) if path == PathBuf::from("../outside")
+    ));
+}
+
+#[test]
+fn configure_initializes_sets_checks_and_projects_without_plaintext_storage() {
     let dir = temp_vault_dir();
-    let profile = Profile::new("app", ["APP_API_KEY"]).expect("profile");
+    let profile = Profile::new("app", [APP_API_KEY]).expect("profile");
     let mut config_runner = VaultRunnerCore::with_terminal(
         [profile],
         FakeTerminal::new(
@@ -121,22 +198,24 @@ fn no_args_config_initializes_sets_checks_and_projects_without_plaintext_storage
     .with_vault_dir(dir.clone());
     config_runner.password_kdf_params = minimal_test_kdf_params();
 
-    config_runner.run_from_args(["env"]).expect("config");
+    config_runner
+        .run_from_args(["env", "configure"])
+        .expect("config");
 
     let mut check_runner = VaultRunnerCore::with_terminal(
-        [Profile::new("app", ["APP_API_KEY"]).expect("profile")],
+        [Profile::new("app", [APP_API_KEY]).expect("profile")],
         FakeTerminal::new(&[], &[]),
     )
     .expect("runner")
     .with_vault_dir(dir.clone());
     check_runner
-        .run_from_args(["env", "app"])
+        .run_from_args(["env", "validate", "app"])
         .expect("profile check");
 
     let password: SecretBytes =
         SecretBytes::try_from(b"operator-password".as_slice()).expect("password");
     let project_runner = VaultRunnerCore::with_terminal(
-        [Profile::new("app", ["APP_API_KEY"]).expect("profile")],
+        [Profile::new("app", [APP_API_KEY]).expect("profile")],
         FakeTerminal::new(&[], &[]),
     )
     .expect("runner")
@@ -163,24 +242,173 @@ fn no_args_config_initializes_sets_checks_and_projects_without_plaintext_storage
     fs::remove_dir_all(dir).expect("remove temp vault dir");
 }
 
+#[cfg(unix)]
 #[test]
-fn config_repairs_vault_gitignore_before_writing_secrets() {
-    let dir = temp_vault_dir();
-    fs::create_dir_all(&dir).expect("create vault dir");
-    fs::write(dir.join(".gitignore"), "vault.json\n").expect("write unsafe gitignore");
+fn config_creates_vault_directory_and_files_with_restrictive_permissions() {
+    use std::os::unix::fs::PermissionsExt;
 
+    let dir = temp_vault_dir();
     let mut runner = configured_runner(
         dir.clone(),
-        [Profile::new("app", ["APP_API_KEY"]).expect("profile")],
+        [Profile::new("app", [APP_API_KEY]).expect("profile")],
         &[b"operator-password", b"operator-password"],
         &["0"],
     );
-    runner.run_from_args(["env"]).expect("config");
+
+    runner.run_from_args(["env", "configure"]).expect("config");
 
     assert_eq!(
-        fs::read_to_string(dir.join(".gitignore")).expect("gitignore"),
-        VAULT_GITIGNORE_CONTENT
+        fs::metadata(&dir)
+            .expect("vault dir metadata")
+            .permissions()
+            .mode()
+            & 0o777,
+        VAULT_DIR_MODE
     );
+    assert_eq!(
+        fs::metadata(dir.join(DEFAULT_VAULT_FILE_NAME))
+            .expect("vault metadata")
+            .permissions()
+            .mode()
+            & 0o777,
+        VAULT_FILE_MODE
+    );
+    assert_eq!(
+        fs::metadata(dir.join(".gitignore"))
+            .expect("gitignore metadata")
+            .permissions()
+            .mode()
+            & 0o777,
+        VAULT_FILE_MODE
+    );
+
+    fs::remove_dir_all(dir).expect("remove temp vault dir");
+}
+
+#[cfg(unix)]
+#[test]
+fn validate_restricts_existing_vault_directory_and_file_permissions_before_reading() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = temp_vault_dir();
+    write_vault_with_current_and_stale_values(&dir);
+    let vault_path = dir.join(DEFAULT_VAULT_FILE_NAME);
+    fs::set_permissions(&dir, fs::Permissions::from_mode(0o755)).expect("loosen dir");
+    fs::set_permissions(&vault_path, fs::Permissions::from_mode(0o644)).expect("loosen vault");
+
+    let mut runner = VaultRunnerCore::with_terminal(
+        [Profile::new("app", [CURRENT_VALUE]).expect("profile")],
+        FakeTerminal::new(&[], &[]),
+    )
+    .expect("runner")
+    .with_vault_dir(dir.clone());
+    runner
+        .run_from_args(["env", "validate", "app"])
+        .expect("validate");
+
+    assert_eq!(
+        fs::metadata(&dir)
+            .expect("vault dir metadata")
+            .permissions()
+            .mode()
+            & 0o777,
+        VAULT_DIR_MODE
+    );
+    assert_eq!(
+        fs::metadata(&vault_path)
+            .expect("vault metadata")
+            .permissions()
+            .mode()
+            & 0o777,
+        VAULT_FILE_MODE
+    );
+
+    fs::remove_dir_all(dir).expect("remove temp vault dir");
+}
+
+#[test]
+fn config_rejects_conflicting_vault_gitignore_before_writing_values() {
+    let dir = temp_vault_dir();
+    fs::create_dir_all(&dir).expect("create vault dir");
+    let gitignore_path = dir.join(".gitignore");
+    fs::write(&gitignore_path, "vault.json\n").expect("write conflicting gitignore");
+
+    let mut runner = configured_runner(
+        dir.clone(),
+        [Profile::new("app", [APP_API_KEY]).expect("profile")],
+        &[b"operator-password", b"operator-password"],
+        &["0"],
+    );
+    assert!(matches!(
+        runner.run_from_args(["env", "configure"]),
+        Err(Error::VaultPathConflict { path }) if path == gitignore_path
+    ));
+    assert_eq!(
+        fs::read_to_string(&gitignore_path).expect("gitignore"),
+        "vault.json\n"
+    );
+
+    fs::remove_dir_all(dir).expect("remove temp vault dir");
+}
+
+#[test]
+fn config_rejects_fixed_vault_directory_path_conflict() {
+    let dir = temp_vault_dir();
+    fs::write(&dir, "not a directory").expect("write conflicting file");
+    let mut runner = configured_runner(
+        dir.clone(),
+        [Profile::new("app", [APP_API_KEY]).expect("profile")],
+        &[b"operator-password", b"operator-password"],
+        &["0"],
+    );
+
+    assert!(matches!(
+        runner.run_from_args(["env", "configure"]),
+        Err(Error::VaultPathConflict { path }) if path == dir
+    ));
+
+    fs::remove_file(dir).expect("remove temp vault file");
+}
+
+#[test]
+fn config_rejects_fixed_vault_file_path_conflict_before_password_prompt() {
+    let dir = temp_vault_dir();
+    fs::create_dir_all(dir.join(DEFAULT_VAULT_FILE_NAME)).expect("create conflicting directory");
+    let vault_path = dir.join(DEFAULT_VAULT_FILE_NAME);
+    let mut runner = VaultRunnerCore::with_terminal(
+        [Profile::new("app", [APP_API_KEY]).expect("profile")],
+        FakeTerminal::new(&[], &[]),
+    )
+    .expect("runner")
+    .with_vault_dir(dir.clone());
+    runner.password_kdf_params = minimal_test_kdf_params();
+
+    assert!(matches!(
+        runner.run_from_args(["env", "configure"]),
+        Err(Error::VaultPathConflict { path }) if path == vault_path
+    ));
+
+    fs::remove_dir_all(dir).expect("remove temp vault dir");
+}
+
+#[test]
+fn existing_config_rejects_malformed_vault_before_password_prompt() {
+    let dir = temp_vault_dir();
+    fs::create_dir_all(&dir).expect("create vault dir");
+    let vault_path = dir.join(DEFAULT_VAULT_FILE_NAME);
+    fs::write(&vault_path, br#"{"version":1,"encrypted_env":}"#).expect("write malformed vault");
+    let mut runner = VaultRunnerCore::with_terminal(
+        [Profile::new("app", [APP_API_KEY]).expect("profile")],
+        FakeTerminal::new(&[], &[]),
+    )
+    .expect("runner")
+    .with_vault_dir(dir.clone());
+    runner.password_kdf_params = minimal_test_kdf_params();
+
+    assert!(matches!(
+        runner.run_from_args(["env", "configure"]),
+        Err(Error::Json(_))
+    ));
 
     fs::remove_dir_all(dir).expect("remove temp vault dir");
 }
@@ -188,7 +416,7 @@ fn config_repairs_vault_gitignore_before_writing_secrets() {
 #[test]
 fn existing_config_rejects_wrong_password_before_menu_or_writes() {
     let dir = temp_vault_dir();
-    let profile = Profile::new("app", ["APP_API_KEY"]).expect("profile");
+    let profile = Profile::new("app", [APP_API_KEY]).expect("profile");
     let mut init_runner = VaultRunnerCore::with_terminal(
         [profile],
         FakeTerminal::new(&[b"operator-password", b"operator-password"], &["0"]),
@@ -197,16 +425,18 @@ fn existing_config_rejects_wrong_password_before_menu_or_writes() {
     .with_vault_dir(dir.clone());
     init_runner.password_kdf_params = minimal_test_kdf_params();
 
-    init_runner.run_from_args(["env"]).expect("init config");
+    init_runner
+        .run_from_args(["env", "configure"])
+        .expect("init config");
 
     let mut runner = VaultRunnerCore::with_terminal(
-        [Profile::new("app", ["APP_API_KEY"]).expect("profile")],
+        [Profile::new("app", [APP_API_KEY]).expect("profile")],
         FakeTerminal::new(&[b"wrong-password"], &[]),
     )
     .expect("runner")
     .with_vault_dir(dir.clone());
     assert!(matches!(
-        runner.run_from_args(["env"]),
+        runner.run_from_args(["env", "configure"]),
         Err(Error::PasswordRejected)
     ));
 
@@ -219,7 +449,7 @@ fn existing_config_rejects_wrong_password_before_menu_or_writes() {
 #[test]
 fn ciphertext_copied_between_secret_names_is_rejected() {
     let dir = temp_vault_dir();
-    let profile = Profile::new("app", ["FIRST_SECRET", "SECOND_SECRET"]).expect("profile");
+    let profile = Profile::new("app", [FIRST_SECRET, SECOND_SECRET]).expect("profile");
     let mut runner = configured_runner(
         dir.clone(),
         [profile],
@@ -232,7 +462,7 @@ fn ciphertext_copied_between_secret_names_is_rejected() {
         &["1", "1", "2", "0", "0"],
     );
 
-    runner.run_from_args(["env"]).expect("config");
+    runner.run_from_args(["env", "configure"]).expect("config");
 
     let vault_path = dir.join(DEFAULT_VAULT_FILE_NAME);
     let mut vault = read_vault(&vault_path).expect("vault");
@@ -259,18 +489,15 @@ fn ciphertext_copied_between_secret_names_is_rejected() {
 #[test]
 fn vault_lock_blocks_second_writer_and_drop_releases() {
     let dir = temp_vault_dir();
-    let first_lost = Arc::new(AtomicBool::new(false));
-    let first = acquire_vault_lock(&dir, &first_lost).expect("first lock");
+    let first = acquire_vault_lock(&dir).expect("first lock");
 
-    let second_lost = Arc::new(AtomicBool::new(false));
     assert!(matches!(
-        acquire_vault_lock(&dir, &second_lost),
+        acquire_vault_lock(&dir),
         Err(Error::VaultLocked { .. })
     ));
 
     drop(first);
-    let third_lost = Arc::new(AtomicBool::new(false));
-    let third = acquire_vault_lock(&dir, &third_lost).expect("third lock");
+    let third = acquire_vault_lock(&dir).expect("third lock");
     drop(third);
 
     fs::remove_dir_all(dir).expect("remove temp vault dir");
@@ -284,19 +511,18 @@ fn vault_lock_loss_blocks_secret_write() {
     let password = SecretBytes::try_from(b"operator-password".as_slice()).expect("password");
     let mut vault = VaultFile::new(&password, minimal_test_kdf_params()).expect("vault");
     let keyset = unlock_vault_keyset(&vault, &password).expect("keyset");
-    let lock_lost = Arc::new(AtomicBool::new(false));
-    let lock = acquire_vault_lock(&dir, &lock_lost).expect("lock");
-    lock_lost.store(true, Ordering::SeqCst);
+    let lock = acquire_vault_lock(&dir).expect("lock");
+    lock.mark_lock_lost_for_test();
     let mut runner = configured_runner(
         dir.clone(),
-        [Profile::new("app", ["APP_API_KEY"]).expect("profile")],
+        [Profile::new("app", [APP_API_KEY]).expect("profile")],
         &[b"secret-value"],
         &[],
     );
-    let name = EnvVarName::new("APP_API_KEY").expect("name");
+    let name = EnvVarName::new(APP_API_KEY).expect("name");
 
     assert!(matches!(
-        runner.write_one_secret(&vault_path, &mut vault, &keyset, &name, &lock, &lock_lost),
+        runner.write_one_value(&vault_path, &mut vault, &keyset, &name, &lock),
         Err(Error::VaultLockLost { .. })
     ));
     assert!(!vault_path.exists());
@@ -317,31 +543,56 @@ fn read_vault_reports_missing_vault_without_path_exists_race() {
 }
 
 #[test]
-fn failed_atomic_vault_replace_removes_temporary_file() {
+fn read_vault_rejects_oversized_vault_file_before_json_parsing() {
     let dir = temp_vault_dir();
-    fs::create_dir_all(dir.join(DEFAULT_VAULT_FILE_NAME)).expect("create target directory");
-    let password: SecretBytes =
-        SecretBytes::try_from(b"operator-password".as_slice()).expect("password");
-    let vault = VaultFile::new(&password, minimal_test_kdf_params()).expect("vault");
+    fs::create_dir_all(&dir).expect("create dir");
     let vault_path = dir.join(DEFAULT_VAULT_FILE_NAME);
+    fs::File::create(&vault_path)
+        .expect("create vault")
+        .set_len(MAX_VAULT_FILE_BYTES + 1)
+        .expect("set vault length");
 
     assert!(matches!(
-        write_vault_atomically(&vault_path, &vault),
-        Err(Error::Io(_))
+        read_vault(&vault_path),
+        Err(Error::VaultFileTooLarge { actual, max })
+            if actual == MAX_VAULT_FILE_BYTES + 1 && max == MAX_VAULT_FILE_BYTES
     ));
-    let leftover_tmp_files = fs::read_dir(&dir)
-        .expect("read dir")
-        .filter_map(Result::ok)
-        .filter(|entry| {
-            entry
-                .file_name()
-                .to_str()
-                .is_some_and(|name| name.starts_with(".vault.json.tmp."))
-        })
-        .count();
 
-    assert_eq!(leftover_tmp_files, 0);
-    assert!(vault_path.is_dir());
+    fs::remove_dir_all(dir).expect("remove temp vault dir");
+}
+
+#[test]
+fn atomic_vault_replace_replaces_existing_vault_file() {
+    let dir = temp_vault_dir();
+    let password: SecretBytes =
+        SecretBytes::try_from(b"operator-password".as_slice()).expect("password");
+    let vault_path = dir.join(DEFAULT_VAULT_FILE_NAME);
+    let first_name = EnvVarName::new("FIRST_SECRET").expect("name");
+    let second_name = EnvVarName::new("SECOND_SECRET").expect("name");
+    let mut vault = VaultFile::new(&password, minimal_test_kdf_params()).expect("vault");
+    let keyset = unlock_vault_keyset(&vault, &password).expect("keyset");
+
+    vault
+        .set_encrypted_value(
+            &keyset,
+            &first_name,
+            &SecretBytes::try_from(b"first".as_slice()).expect("secret"),
+        )
+        .expect("set first secret");
+    write_vault_atomically(&vault_path, &vault).expect("first write");
+    vault
+        .set_encrypted_value(
+            &keyset,
+            &second_name,
+            &SecretBytes::try_from(b"second".as_slice()).expect("secret"),
+        )
+        .expect("set second secret");
+    write_vault_atomically(&vault_path, &vault).expect("second write");
+
+    let written = read_vault(&vault_path).expect("written vault");
+
+    assert!(written.encrypted_env.contains_key(first_name.as_str()));
+    assert!(written.encrypted_env.contains_key(second_name.as_str()));
     fs::remove_dir_all(dir).expect("remove temp vault dir");
 }
 
@@ -397,6 +648,68 @@ fn vault_validation_rejects_wrong_vault_id_length() {
 }
 
 #[test]
+fn vault_validation_rejects_stored_kdf_work_factor_above_local_bounds() {
+    let dir = temp_vault_dir();
+    fs::create_dir_all(&dir).expect("create dir");
+    let vault_path = dir.join(DEFAULT_VAULT_FILE_NAME);
+    let password: SecretBytes =
+        SecretBytes::try_from(b"operator-password".as_slice()).expect("password");
+    let mut vault = VaultFile::new(&password, minimal_test_kdf_params()).expect("vault");
+
+    vault.kdf.memory_cost_kib = STORED_PASSWORD_KDF_MAX_MEMORY_COST_KIB + 1;
+    write_vault_json_direct(&vault_path, &vault);
+    assert!(matches!(
+        read_vault(&vault_path),
+        Err(Error::PasswordKdfMemoryCostTooLarge { actual, max })
+            if actual == STORED_PASSWORD_KDF_MAX_MEMORY_COST_KIB + 1
+                && max == STORED_PASSWORD_KDF_MAX_MEMORY_COST_KIB
+    ));
+
+    vault.kdf.memory_cost_kib = crate::crypto::PASSWORD_KDF_MIN_MEMORY_COST_KIB;
+    vault.kdf.iterations = STORED_PASSWORD_KDF_MAX_ITERATIONS + 1;
+    write_vault_json_direct(&vault_path, &vault);
+    assert!(matches!(
+        read_vault(&vault_path),
+        Err(Error::PasswordKdfIterationsTooMany { actual, max })
+            if actual == STORED_PASSWORD_KDF_MAX_ITERATIONS + 1
+                && max == STORED_PASSWORD_KDF_MAX_ITERATIONS
+    ));
+
+    fs::remove_dir_all(dir).expect("remove temp vault dir");
+}
+
+#[test]
+fn vault_creation_rejects_local_kdf_work_factor_above_read_bounds() {
+    let password: SecretBytes =
+        SecretBytes::try_from(b"operator-password".as_slice()).expect("password");
+    let memory_heavy_params = PasswordKdfParams::new(
+        STORED_PASSWORD_KDF_MAX_MEMORY_COST_KIB + 1,
+        crate::crypto::PASSWORD_KDF_MIN_ITERATIONS,
+        1,
+    )
+    .expect("params");
+    assert!(matches!(
+        VaultFile::new(&password, memory_heavy_params),
+        Err(Error::PasswordKdfMemoryCostTooLarge { actual, max })
+            if actual == STORED_PASSWORD_KDF_MAX_MEMORY_COST_KIB + 1
+                && max == STORED_PASSWORD_KDF_MAX_MEMORY_COST_KIB
+    ));
+
+    let iteration_heavy_params = PasswordKdfParams::new(
+        crate::crypto::PASSWORD_KDF_MIN_MEMORY_COST_KIB,
+        STORED_PASSWORD_KDF_MAX_ITERATIONS + 1,
+        1,
+    )
+    .expect("params");
+    assert!(matches!(
+        VaultFile::new(&password, iteration_heavy_params),
+        Err(Error::PasswordKdfIterationsTooMany { actual, max })
+            if actual == STORED_PASSWORD_KDF_MAX_ITERATIONS + 1
+                && max == STORED_PASSWORD_KDF_MAX_ITERATIONS
+    ));
+}
+
+#[test]
 fn vault_validation_rejects_malformed_ciphertext_without_echoing_it() {
     let dir = temp_vault_dir();
     fs::create_dir_all(&dir).expect("create dir");
@@ -436,19 +749,21 @@ fn json_and_password_errors_do_not_echo_secret_inputs() {
 
     let mut init_runner = configured_runner(
         dir.clone(),
-        [Profile::new("app", ["APP_API_KEY"]).expect("profile")],
+        [Profile::new("app", [APP_API_KEY]).expect("profile")],
         &[b"operator-password", b"operator-password"],
         &["0"],
     );
-    init_runner.run_from_args(["env"]).expect("init config");
+    init_runner
+        .run_from_args(["env", "configure"])
+        .expect("init config");
     let mut wrong_password_runner = VaultRunnerCore::with_terminal(
-        [Profile::new("app", ["APP_API_KEY"]).expect("profile")],
+        [Profile::new("app", [APP_API_KEY]).expect("profile")],
         FakeTerminal::new(&[b"secret-wrong-password"], &[]),
     )
     .expect("runner")
     .with_vault_dir(dir.clone());
     let password_error = wrong_password_runner
-        .run_from_args(["env"])
+        .run_from_args(["env", "configure"])
         .expect_err("wrong password rejected");
     assert_error_text_does_not_contain(&password_error, "secret-wrong-password");
 
@@ -460,42 +775,55 @@ fn parser_rejects_extra_args_missing_child_command_and_unknown_profile() {
     let dir = temp_vault_dir();
     let mut init_runner = configured_runner(
         dir.clone(),
-        [Profile::new("app", ["APP_API_KEY"]).expect("profile")],
+        [Profile::new("app", [APP_API_KEY]).expect("profile")],
         &[b"operator-password", b"operator-password"],
         &["0"],
     );
-    init_runner.run_from_args(["env"]).expect("init");
+    init_runner
+        .run_from_args(["env", "configure"])
+        .expect("init");
 
     let mut extra_runner = VaultRunnerCore::with_terminal(
-        [Profile::new("app", ["APP_API_KEY"]).expect("profile")],
+        [Profile::new("app", [APP_API_KEY]).expect("profile")],
         FakeTerminal::new(&[], &[]),
     )
     .expect("runner")
     .with_vault_dir(dir.clone());
     assert!(matches!(
-        extra_runner.run_from_args(["env", "app", "extra"]),
-        Err(Error::UnexpectedExtraArgs)
+        extra_runner.run_from_args(["env", "validate", "app", "extra"]),
+        Err(Error::InvalidCommandUsage)
     ));
 
     let mut empty_child_runner = VaultRunnerCore::with_terminal(
-        [Profile::new("app", ["APP_API_KEY"]).expect("profile")],
+        [Profile::new("app", [APP_API_KEY]).expect("profile")],
         FakeTerminal::new(&[], &[]),
     )
     .expect("runner")
     .with_vault_dir(dir.clone());
     assert!(matches!(
-        empty_child_runner.run_from_args(["env", "app", "--"]),
-        Err(Error::MissingChildCommand)
+        empty_child_runner.run_from_args(["env", "run", "app", "--"]),
+        Err(Error::InvalidCommandUsage)
+    ));
+
+    let mut bare_profile_runner = VaultRunnerCore::with_terminal(
+        [Profile::new("app", [APP_API_KEY]).expect("profile")],
+        FakeTerminal::new(&[], &[]),
+    )
+    .expect("runner")
+    .with_vault_dir(dir.clone());
+    assert!(matches!(
+        bare_profile_runner.run_from_args(["env", "app"]),
+        Err(Error::InvalidCommandUsage)
     ));
 
     let mut unknown_runner = VaultRunnerCore::with_terminal(
-        [Profile::new("app", ["APP_API_KEY"]).expect("profile")],
+        [Profile::new("app", [APP_API_KEY]).expect("profile")],
         FakeTerminal::new(&[], &[]),
     )
     .expect("runner")
     .with_vault_dir(dir.clone());
     assert!(matches!(
-        unknown_runner.run_from_args(["env", "worker"]),
+        unknown_runner.run_from_args(["env", "validate", "worker"]),
         Err(Error::UnknownProfile { .. })
     ));
 
@@ -503,56 +831,237 @@ fn parser_rejects_extra_args_missing_child_command_and_unknown_profile() {
 }
 
 #[test]
-fn config_profile_menu_reports_set_and_missing_profile_secret_status() {
+fn unknown_profile_is_rejected_before_vault_io_or_password_prompt() {
+    let dir = temp_vault_dir();
+    let mut validate_runner = VaultRunnerCore::with_terminal(
+        [Profile::new("app", [APP_API_KEY]).expect("profile")],
+        FakeTerminal::new(&[], &[]),
+    )
+    .expect("runner")
+    .with_vault_dir(dir.clone());
+    assert!(matches!(
+        validate_runner.run_from_args(["env", "validate", "worker"]),
+        Err(Error::UnknownProfile { name }) if name == "worker"
+    ));
+    assert!(!dir.exists());
+
+    let mut run_runner = VaultRunnerCore::with_terminal_and_child_process(
+        [Profile::new("app", [APP_API_KEY]).expect("profile")],
+        FakeTerminal::new(&[], &[]),
+        FakeChildProcessRunner::default(),
+    )
+    .expect("runner")
+    .with_vault_dir(dir.clone());
+    assert!(matches!(
+        run_runner.run_from_args(["env", "run", "worker", "--", "cargo"]),
+        Err(Error::UnknownProfile { name }) if name == "worker"
+    ));
+    assert!(!dir.exists());
+}
+
+#[test]
+fn config_profile_review_reports_missing_values() {
     let dir = temp_vault_dir();
     let mut runner = configured_runner(
         dir.clone(),
-        [Profile::new("app", ["APP_API_KEY"]).expect("profile")],
+        [Profile::new("app", [APP_API_KEY]).expect("profile")],
         &[b"operator-password", b"operator-password"],
-        &["1", "0", "0"],
+        &["2", "1", "0", "0"],
     );
 
-    runner.run_from_args(["env"]).expect("config stays open");
+    runner
+        .run_from_args(["env", "configure"])
+        .expect("config stays open");
 
     assert!(
         runner
             .terminal
             .lines
             .iter()
-            .any(|line| line == "1. APP_API_KEY missing")
+            .any(|line| line == "  APP_API_KEY - missing")
     );
     fs::remove_dir_all(dir).expect("remove temp vault dir");
 }
 
 #[test]
-fn profile_check_command_still_fails_when_required_names_are_missing() {
+fn config_value_menu_reports_profile_required_values_and_profile_counts() {
+    let dir = temp_vault_dir();
+    let mut runner = configured_runner(
+        dir.clone(),
+        [
+            Profile::new("app", [APP_ONLY, SHARED_SECRET]).expect("profile"),
+            Profile::new("worker", [SHARED_SECRET]).expect("profile"),
+        ],
+        &[b"operator-password", b"operator-password"],
+        &["1", "0", "0"],
+    );
+
+    runner
+        .run_from_args(["env", "configure"])
+        .expect("config stays open");
+
+    assert!(runner.terminal.lines.iter().any(|line| {
+        line.contains("APP_ONLY")
+            && line.contains("missing")
+            && line.contains("required by 1 profile")
+    }));
+    assert!(runner.terminal.lines.iter().any(|line| {
+        line.contains("SHARED_SECRET")
+            && line.contains("missing")
+            && line.contains("required by 2 profiles")
+    }));
+    fs::remove_dir_all(dir).expect("remove temp vault dir");
+}
+
+#[test]
+fn config_store_feedback_reports_empty_or_non_empty_without_exact_length() {
+    let dir = temp_vault_dir();
+    let mut runner = configured_runner(
+        dir.clone(),
+        [Profile::new("app", [EMPTY_VALUE, FILLED_VALUE]).expect("profile")],
+        &[b"operator-password", b"operator-password", b"", b"filled"],
+        &["1", "1", "2", "0", "0"],
+    );
+
+    runner.run_from_args(["env", "configure"]).expect("config");
+
+    assert!(
+        runner
+            .terminal
+            .lines
+            .iter()
+            .any(|line| line == "Stored EMPTY_VALUE (0 bytes)")
+    );
+    assert!(
+        runner
+            .terminal
+            .lines
+            .iter()
+            .any(|line| line == "Stored FILLED_VALUE (1+ bytes)")
+    );
+    fs::remove_dir_all(dir).expect("remove temp vault dir");
+}
+
+#[test]
+fn config_keeps_values_not_required_by_profiles_until_explicit_cleanup() {
+    let dir = temp_vault_dir();
+    write_vault_with_current_and_stale_values(&dir);
+
+    let mut runner = configured_runner(
+        dir.clone(),
+        [Profile::new("app", [CURRENT_VALUE]).expect("profile")],
+        &[b"operator-password"],
+        &["0"],
+    );
+    runner.run_from_args(["env", "configure"]).expect("config");
+
+    let vault = read_vault(&dir.join(DEFAULT_VAULT_FILE_NAME)).expect("vault");
+    assert!(vault.encrypted_env.contains_key("CURRENT_VALUE"));
+    assert!(vault.encrypted_env.contains_key("STALE_VALUE"));
+    assert!(
+        runner
+            .terminal
+            .lines
+            .iter()
+            .any(|line| line.contains("Remove values not required by profiles (1 value)"))
+    );
+    fs::remove_dir_all(dir).expect("remove temp vault dir");
+}
+
+#[test]
+fn config_removes_values_not_required_by_profiles_only_from_explicit_cleanup_menu() {
+    let dir = temp_vault_dir();
+    write_vault_with_current_and_stale_values(&dir);
+
+    let mut runner = configured_runner(
+        dir.clone(),
+        [Profile::new("app", [CURRENT_VALUE]).expect("profile")],
+        &[b"operator-password"],
+        &["3", "1", "0"],
+    );
+    runner.run_from_args(["env", "configure"]).expect("config");
+
+    let vault = read_vault(&dir.join(DEFAULT_VAULT_FILE_NAME)).expect("vault");
+    assert!(vault.encrypted_env.contains_key("CURRENT_VALUE"));
+    assert!(!vault.encrypted_env.contains_key("STALE_VALUE"));
+    assert!(
+        runner
+            .terminal
+            .lines
+            .iter()
+            .any(|line| line == "Not required STALE_VALUE")
+    );
+    assert!(
+        runner
+            .terminal
+            .lines
+            .iter()
+            .any(|line| line == "Removed 1 stale value")
+    );
+    fs::remove_dir_all(dir).expect("remove temp vault dir");
+}
+
+#[test]
+fn validate_command_still_fails_when_required_names_are_missing() {
     let dir = temp_vault_dir();
     let mut init_runner = configured_runner(
         dir.clone(),
-        [Profile::new("app", ["APP_API_KEY"]).expect("profile")],
+        [Profile::new("app", [APP_API_KEY]).expect("profile")],
         &[b"operator-password", b"operator-password"],
         &["0"],
     );
-    init_runner.run_from_args(["env"]).expect("init");
+    init_runner
+        .run_from_args(["env", "configure"])
+        .expect("init");
 
     let mut check_runner = VaultRunnerCore::with_terminal(
-        [Profile::new("app", ["APP_API_KEY"]).expect("profile")],
+        [Profile::new("app", [APP_API_KEY]).expect("profile")],
         FakeTerminal::new(&[], &[]),
     )
     .expect("runner")
     .with_vault_dir(dir.clone());
 
     assert!(matches!(
-        check_runner.run_from_args(["env", "app"]),
-        Err(Error::MissingProfileSecrets)
+        check_runner.run_from_args(["env", "validate", "app"]),
+        Err(Error::MissingProfileValues)
     ));
     assert!(
         check_runner
             .terminal
             .lines
             .iter()
-            .any(|line| line == "missing APP_API_KEY")
+            .any(|line| line == "Missing APP_API_KEY")
     );
+    fs::remove_dir_all(dir).expect("remove temp vault dir");
+}
+
+#[test]
+fn run_profile_rejects_missing_values_before_password_prompt() {
+    let dir = temp_vault_dir();
+    let mut init_runner = configured_runner(
+        dir.clone(),
+        [Profile::new("app", [APP_API_KEY]).expect("profile")],
+        &[b"operator-password", b"operator-password"],
+        &["0"],
+    );
+    init_runner
+        .run_from_args(["env", "configure"])
+        .expect("init");
+
+    let mut runner = VaultRunnerCore::with_terminal_and_child_process(
+        [Profile::new("app", [APP_API_KEY]).expect("profile")],
+        FakeTerminal::new(&[], &[]),
+        FakeChildProcessRunner::default(),
+    )
+    .expect("runner")
+    .with_vault_dir(dir.clone());
+
+    assert!(matches!(
+        runner.run_from_args(["env", "run", "app", "--", "cargo"]),
+        Err(Error::MissingProfileValues)
+    ));
+    assert!(runner.child_process.calls.is_empty());
+
     fs::remove_dir_all(dir).expect("remove temp vault dir");
 }
 
@@ -608,8 +1117,8 @@ fn profile_run_projects_only_required_env_into_child_process() {
     let mut config_runner = configured_runner(
         dir.clone(),
         [
-            Profile::new("app", ["APP_API_KEY"]).expect("profile"),
-            Profile::new("worker", ["WORKER_SECRET"]).expect("profile"),
+            Profile::new("app", [APP_API_KEY]).expect("profile"),
+            Profile::new("worker", [WORKER_SECRET]).expect("profile"),
         ],
         &[
             b"operator-password",
@@ -617,12 +1126,14 @@ fn profile_run_projects_only_required_env_into_child_process() {
             b"app-key",
             b"worker-secret",
         ],
-        &["1", "1", "0", "2", "1", "0", "0"],
+        &["1", "1", "2", "0", "0"],
     );
-    config_runner.run_from_args(["env"]).expect("config");
+    config_runner
+        .run_from_args(["env", "configure"])
+        .expect("config");
 
     let mut runner = VaultRunnerCore::with_terminal_and_child_process(
-        [Profile::new("app", ["APP_API_KEY"]).expect("profile")],
+        [Profile::new("app", [APP_API_KEY]).expect("profile")],
         FakeTerminal::new(&[b"operator-password"], &[]),
         FakeChildProcessRunner::default(),
     )
@@ -630,7 +1141,7 @@ fn profile_run_projects_only_required_env_into_child_process() {
     .with_vault_dir(dir.clone());
 
     runner
-        .run_from_args(["env", "app", "--", "cargo", "run", "-p", "app"])
+        .run_from_args(["env", "run", "app", "--", "cargo", "run", "-p", "app"])
         .expect("run profile");
 
     assert_eq!(runner.child_process.calls.len(), 1);
@@ -659,9 +1170,9 @@ fn profile_run_projects_only_required_env_into_child_process() {
     fs::remove_dir_all(dir).expect("remove temp vault dir");
 }
 
-fn configured_runner<const N: usize>(
+fn configured_runner<const P: usize>(
     dir: PathBuf,
-    profiles: [Profile; N],
+    profiles: [Profile; P],
     secret_inputs: &[&[u8]],
     line_inputs: &[&str],
 ) -> VaultRunnerCore<FakeTerminal, SystemChildProcessRunner> {
@@ -671,6 +1182,26 @@ fn configured_runner<const N: usize>(
             .with_vault_dir(dir);
     runner.password_kdf_params = minimal_test_kdf_params();
     runner
+}
+
+fn write_vault_with_current_and_stale_values(dir: &Path) {
+    let password: SecretBytes =
+        SecretBytes::try_from(b"operator-password".as_slice()).expect("password");
+    let mut vault = VaultFile::new(&password, minimal_test_kdf_params()).expect("vault");
+    let keyset = unlock_vault_keyset(&vault, &password).expect("keyset");
+    for (name, value) in [
+        (CURRENT_VALUE, b"current".as_slice()),
+        (STALE_VALUE, b"stale".as_slice()),
+    ] {
+        vault
+            .set_encrypted_value(
+                &keyset,
+                &EnvVarName::new(name).expect("name"),
+                &SecretBytes::try_from(value).expect("secret"),
+            )
+            .expect("set value");
+    }
+    write_vault_atomically(&dir.join(DEFAULT_VAULT_FILE_NAME), &vault).expect("write vault");
 }
 
 fn minimal_test_kdf_params() -> PasswordKdfParams {

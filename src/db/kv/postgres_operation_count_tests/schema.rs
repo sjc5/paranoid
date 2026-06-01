@@ -2,12 +2,7 @@ use super::*;
 
 #[tokio::test]
 async fn kv_schema_setup_and_validation_emit_expected_database_operation_shapes() {
-    let Some(database_url) = test_database_url() else {
-        eprintln!(
-            "skipping Postgres KV schema operation-count test; set TEST_DSN or PARANOID_TEST_DATABASE_URL to run"
-        );
-        return;
-    };
+    let database_url = test_database_url();
 
     let sqlx_pool = connect_sqlx_pool(&database_url).await;
     let table_name = unique_test_table_name();
@@ -54,12 +49,7 @@ async fn kv_schema_setup_and_validation_emit_expected_database_operation_shapes(
 
 #[tokio::test]
 async fn kv_schema_migration_rolls_back_when_existing_schema_is_incompatible() {
-    let Some(database_url) = test_database_url() else {
-        eprintln!(
-            "skipping Postgres KV schema rollback test; set TEST_DSN or PARANOID_TEST_DATABASE_URL to run"
-        );
-        return;
-    };
+    let database_url = test_database_url();
 
     let sqlx_pool = connect_sqlx_pool(&database_url).await;
     let table_name = unique_test_table_name();

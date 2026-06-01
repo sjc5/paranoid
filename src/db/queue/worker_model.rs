@@ -102,7 +102,7 @@ pub struct TaskError {
 #[derive(Clone)]
 pub struct JobExecutionContext {
     pub(in crate::db::queue) queue: Store,
-    pub(in crate::db::queue) pool: Pool,
+    pub(in crate::db::queue) pool: WritePool,
     pub(in crate::db::queue) job_id: JobId,
     pub(in crate::db::queue) task_name: String,
     pub(in crate::db::queue) worker_owner_id: WorkerOwnerId,
@@ -257,7 +257,7 @@ pub(in crate::db::queue) struct ResolvedWorkerConfig {
 #[derive(Clone)]
 pub(in crate::db::queue) struct WorkerRuntime {
     pub(in crate::db::queue) queue: Store,
-    pub(in crate::db::queue) pool: Pool,
+    pub(in crate::db::queue) pool: WritePool,
     pub(in crate::db::queue) task_registry: TaskRegistry,
     pub(in crate::db::queue) worker_owner_id: WorkerOwnerId,
     pub(in crate::db::queue) config: ResolvedWorkerConfig,

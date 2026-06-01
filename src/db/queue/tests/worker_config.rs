@@ -139,7 +139,6 @@ fn queue_worker_config_retry_and_timeout_resolution_cover_edge_cases() {
         })),
         max_backoff: Duration::from_millis(250),
         jitter_fraction: 0.0,
-        ..RetryPolicy::default()
     })
     .expect("custom retry policy");
     assert_eq!(
@@ -379,7 +378,6 @@ fn queue_retry_policy_resolution_preserves_explicit_zero_jitter_for_all_modes() 
         strategy: RetryBackoffStrategy::Exponential { base: 2.0 },
         max_backoff: Duration::from_secs(30),
         jitter_fraction: 0.0,
-        ..RetryPolicy::default()
     })
     .expect("exponential retry policy with zero jitter");
     assert_eq!(exponential.jitter_fraction, 0.0);
@@ -461,7 +459,6 @@ fn queue_retry_policy_rejects_invalid_numeric_edges() {
             strategy: RetryBackoffStrategy::Exponential { base: 2.0 },
             max_backoff: Duration::from_nanos(1),
             jitter_fraction: 0.0,
-            ..RetryPolicy::default()
         }),
         Err(Error::InvalidRetryPolicy { .. })
     ));
@@ -471,7 +468,6 @@ fn queue_retry_policy_rejects_invalid_numeric_edges() {
             strategy: RetryBackoffStrategy::Exponential { base: 2.0 },
             max_backoff: Duration::ZERO,
             jitter_fraction: 0.0,
-            ..RetryPolicy::default()
         }),
         Err(Error::InvalidRetryPolicy { .. })
     ));
@@ -569,7 +565,6 @@ fn queue_retry_backoff_computation_covers_clamping_and_saturating_conversion() {
         strategy: RetryBackoffStrategy::Exponential { base: 2.0 },
         max_backoff: Duration::from_secs(30),
         jitter_fraction: 0.0,
-        ..RetryPolicy::default()
     })
     .expect("exponential retry policy");
     assert_eq!(
@@ -581,7 +576,6 @@ fn queue_retry_backoff_computation_covers_clamping_and_saturating_conversion() {
         strategy: RetryBackoffStrategy::Exponential { base: 2.0 },
         max_backoff: Duration::from_millis(200),
         jitter_fraction: 0.0,
-        ..RetryPolicy::default()
     })
     .expect("subsecond max retry policy");
     assert_eq!(
@@ -607,7 +601,6 @@ fn queue_retry_backoff_computation_covers_clamping_and_saturating_conversion() {
         strategy: RetryBackoffStrategy::Exponential { base: 2.0 },
         max_backoff: Duration::from_secs(2),
         jitter_fraction: 2.0,
-        ..RetryPolicy::default()
     })
     .expect("large jitter retry policy");
     for _ in 0..512 {

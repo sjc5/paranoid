@@ -2,9 +2,7 @@ use super::*;
 
 #[tokio::test]
 async fn fleet_mutex_claim_contention_renew_release_and_fencing_progression() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let store = Store::new(test_database.config.clone()).expect("fleet store");
     let mutex_key = MutexKey::new("leader").expect("mutex key");
@@ -109,9 +107,7 @@ async fn fleet_mutex_claim_contention_renew_release_and_fencing_progression() {
 
 #[tokio::test]
 async fn fleet_mutex_claim_cannot_be_used_with_different_mutex() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let store = Store::new(test_database.config.clone()).expect("fleet store");
     let duration = ClaimDuration::expires_after(Duration::from_secs(60)).expect("duration");
@@ -157,9 +153,7 @@ async fn fleet_mutex_claim_cannot_be_used_with_different_mutex() {
 
 #[tokio::test]
 async fn fleet_mutex_release_manual_renewal_claim_noops_when_lease_row_is_missing() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let store = Store::new(test_database.config.clone()).expect("fleet store");
     let mutex_key = MutexKey::new("missing-release-row").expect("key");
@@ -198,9 +192,7 @@ async fn fleet_mutex_release_manual_renewal_claim_noops_when_lease_row_is_missin
 
 #[tokio::test]
 async fn fleet_mutex_fetch_live_holder_propagates_database_errors() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let store = Store::new(test_database.config.clone()).expect("fleet store");
     let mutex = store
@@ -235,9 +227,7 @@ async fn fleet_mutex_fetch_live_holder_propagates_database_errors() {
 
 #[tokio::test]
 async fn fleet_mutex_claims_compose_inside_current_transaction_and_roll_back() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let store = Store::new(test_database.config.clone()).expect("fleet store");
     let mutex = store
@@ -335,9 +325,7 @@ async fn fleet_mutex_claims_compose_inside_current_transaction_and_roll_back() {
 
 #[tokio::test]
 async fn fleet_mutex_guard_renews_until_explicit_release() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let store = Store::new(test_database.config.clone()).expect("fleet store");
     let mutex = store
@@ -412,9 +400,7 @@ async fn fleet_mutex_guard_renews_until_explicit_release() {
 
 #[tokio::test]
 async fn fleet_mutex_guard_drop_on_plain_thread_releases_after_heartbeat_stops() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let store = Store::new(test_database.config.clone()).expect("fleet store");
     let mutex = store
@@ -471,9 +457,7 @@ async fn fleet_mutex_guard_drop_on_plain_thread_releases_after_heartbeat_stops()
 
 #[tokio::test]
 async fn fleet_mutex_guard_blocking_acquire_waits_for_release() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let store = Store::new(test_database.config.clone()).expect("fleet store");
     let mutex = store
@@ -531,9 +515,7 @@ async fn fleet_mutex_guard_blocking_acquire_waits_for_release() {
 
 #[tokio::test]
 async fn fleet_mutex_waiting_guard_can_be_cancelled_before_claim() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let store = Store::new(test_database.config.clone()).expect("fleet store");
     let mutex = store
@@ -590,9 +572,7 @@ async fn fleet_mutex_waiting_guard_can_be_cancelled_before_claim() {
 
 #[tokio::test]
 async fn fleet_mutex_guard_reports_leadership_lost_after_renewal_failures() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let store = Store::new(test_database.config.clone()).expect("fleet store");
     let mutex = store
@@ -627,9 +607,7 @@ async fn fleet_mutex_guard_reports_leadership_lost_after_renewal_failures() {
 
 #[tokio::test]
 async fn fleet_mutex_guard_heartbeat_recovers_after_transient_renewal_error() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let store = Store::new(test_database.config.clone()).expect("fleet store");
     let mutex = store
@@ -700,9 +678,7 @@ async fn fleet_mutex_guard_heartbeat_recovers_after_transient_renewal_error() {
 
 #[tokio::test]
 async fn fleet_mutex_guard_release_can_be_retried_after_blocked_release_is_cancelled() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let store = Store::new(test_database.config.clone()).expect("fleet store");
     let mutex_key = MutexKey::new("guard-release-retry").expect("key");
@@ -780,9 +756,7 @@ async fn fleet_mutex_guard_release_can_be_retried_after_blocked_release_is_cance
 
 #[tokio::test]
 async fn fleet_mutex_guard_release_cancellation_keeps_heartbeat_active_until_retry() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let store = Store::new(test_database.config.clone()).expect("fleet store");
     let mutex_key = MutexKey::new("release-cancel-heartbeat").expect("key");
@@ -857,9 +831,7 @@ async fn fleet_mutex_guard_release_cancellation_keeps_heartbeat_active_until_ret
 
 #[tokio::test]
 async fn fleet_mutex_guard_config_rejects_invalid_runtime_options() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let store = Store::new(StoreConfig::default()).expect("fleet store");
     let mutex = store
@@ -954,9 +926,7 @@ async fn fleet_mutex_guard_config_rejects_invalid_runtime_options() {
 
 #[tokio::test]
 async fn fleet_mutex_try_run_task_runs_and_releases() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let store = Store::new(test_database.config.clone()).expect("fleet store");
     let mutex_key = MutexKey::new("task-run").expect("key");
@@ -1011,9 +981,7 @@ async fn fleet_mutex_try_run_task_runs_and_releases() {
 
 #[tokio::test]
 async fn fleet_mutex_try_run_task_reports_mutex_held() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let store = Store::new(test_database.config.clone()).expect("fleet store");
     let mutex = store
@@ -1056,9 +1024,7 @@ async fn fleet_mutex_try_run_task_reports_mutex_held() {
 
 #[tokio::test]
 async fn fleet_mutex_try_run_task_returns_release_error_when_release_fails() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let store = Store::new(test_database.config.clone()).expect("fleet store");
     let mutex = store
@@ -1109,9 +1075,7 @@ async fn fleet_mutex_try_run_task_returns_release_error_when_release_fails() {
 
 #[tokio::test]
 async fn fleet_mutex_run_task_when_available_returns_release_error_when_release_fails() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let store = Store::new(test_database.config.clone()).expect("fleet store");
     let mutex = store
@@ -1162,9 +1126,7 @@ async fn fleet_mutex_run_task_when_available_returns_release_error_when_release_
 
 #[tokio::test]
 async fn fleet_mutex_run_task_when_available_waits_for_release() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let store = Store::new(test_database.config.clone()).expect("fleet store");
     let mutex = store
@@ -1224,9 +1186,7 @@ async fn fleet_mutex_run_task_when_available_waits_for_release() {
 
 #[tokio::test]
 async fn fleet_mutex_run_task_error_releases_mutex() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let store = Store::new(test_database.config.clone()).expect("fleet store");
     let mutex = store
@@ -1280,9 +1240,7 @@ async fn fleet_mutex_run_task_error_releases_mutex() {
 
 #[tokio::test]
 async fn fleet_mutex_run_task_when_available_returns_task_and_release_errors_when_both_fail() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let store = Store::new(test_database.config.clone()).expect("fleet store");
     let mutex = store
@@ -1334,9 +1292,7 @@ async fn fleet_mutex_run_task_when_available_returns_task_and_release_errors_whe
 
 #[tokio::test]
 async fn fleet_mutex_cancelled_task_drop_releases_mutex() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let store = Store::new(test_database.config.clone()).expect("fleet store");
     let mutex = store
@@ -1398,9 +1354,7 @@ async fn fleet_mutex_task_panic_drop_releases_mutex() {
         panic!("mutex task panic")
     }
 
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let store = Store::new(test_database.config.clone()).expect("fleet store");
     let mutex = store
@@ -1449,9 +1403,7 @@ async fn fleet_mutex_task_panic_drop_releases_mutex() {
 
 #[tokio::test]
 async fn fleet_mutex_concurrent_try_claim_allows_one_winner_per_round() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let store = Store::new(test_database.config.clone()).expect("fleet store");
     let mutex = Arc::new(

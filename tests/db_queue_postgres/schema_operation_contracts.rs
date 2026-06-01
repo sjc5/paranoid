@@ -2,9 +2,7 @@ use super::*;
 
 #[tokio::test]
 async fn queue_enqueue_deduplicates_active_jobs_and_allows_new_after_terminal_state() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let queue = Store::new(test_database.config.clone()).expect("queue");
     reset_queue_schema(&test_database).await;
@@ -73,9 +71,7 @@ async fn queue_enqueue_deduplicates_active_jobs_and_allows_new_after_terminal_st
 
 #[tokio::test]
 async fn queue_dedupe_enqueue_retries_after_conflicting_transaction_commits() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let queue = Store::new(test_database.config.clone()).expect("queue");
     reset_queue_schema(&test_database).await;
@@ -132,9 +128,7 @@ async fn queue_dedupe_enqueue_retries_after_conflicting_transaction_commits() {
 
 #[tokio::test]
 async fn queue_batch_enqueue_inserts_all_jobs_in_one_pause_gated_operation() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let queue = Store::new(test_database.config.clone()).expect("queue");
     reset_queue_schema(&test_database).await;
@@ -247,9 +241,7 @@ async fn queue_batch_enqueue_inserts_all_jobs_in_one_pause_gated_operation() {
 
 #[tokio::test]
 async fn queue_pause_blocks_enqueue_and_claim_without_races_in_the_operation_query() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let queue = Store::new(test_database.config.clone()).expect("queue");
     reset_queue_schema(&test_database).await;
@@ -304,9 +296,7 @@ async fn queue_pause_blocks_enqueue_and_claim_without_races_in_the_operation_que
 
 #[tokio::test]
 async fn queue_claim_with_no_registered_tasks_returns_empty_without_touching_schema() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let queue = Store::new(test_database.config.clone()).expect("queue");
     drop_queue_test_tables(&test_database.sqlx_pool, &test_database.config).await;
@@ -327,9 +317,7 @@ async fn queue_claim_with_no_registered_tasks_returns_empty_without_touching_sch
 
 #[tokio::test]
 async fn queue_claim_and_owned_transitions_enforce_worker_ownership() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let queue = Store::new(test_database.config.clone()).expect("queue");
     reset_queue_schema(&test_database).await;
@@ -448,9 +436,7 @@ async fn queue_claim_and_owned_transitions_enforce_worker_ownership() {
 
 #[tokio::test]
 async fn queue_database_constraints_reject_invalid_lifecycle_and_pause_shapes() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     reset_queue_schema(&test_database).await;
 

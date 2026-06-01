@@ -17,20 +17,29 @@ pub fn test_database_url_from_env(env_names: &[&str]) -> Option<String> {
     })
 }
 
-pub fn standard_test_database_url() -> Option<String> {
-    test_database_url_from_env(&["TEST_DSN", "PARANOID_TEST_DATABASE_URL"])
+fn required_test_database_url_from_env(env_names: &[&str]) -> String {
+    test_database_url_from_env(env_names).unwrap_or_else(|| {
+        panic!(
+            "required Postgres test database URL missing; set one of: {}",
+            env_names.join(", ")
+        )
+    })
 }
 
-pub fn queue_test_database_url() -> Option<String> {
-    test_database_url_from_env(&[
+pub fn standard_test_database_url() -> String {
+    required_test_database_url_from_env(&["TEST_DSN", "PARANOID_TEST_DATABASE_URL"])
+}
+
+pub fn queue_test_database_url() -> String {
+    required_test_database_url_from_env(&[
         "TEST_DATABASE_URL",
         "TEST_DSN",
         "PARANOID_TEST_DATABASE_URL",
     ])
 }
 
-pub fn direct_test_database_url() -> Option<String> {
-    test_database_url_from_env(&["TEST_DSN_DIRECT", "PARANOID_TEST_DATABASE_DIRECT_URL"])
+pub fn direct_test_database_url() -> String {
+    required_test_database_url_from_env(&["TEST_DSN_DIRECT", "PARANOID_TEST_DATABASE_DIRECT_URL"])
 }
 
 pub async fn connect_sqlx_pool_for_harness(

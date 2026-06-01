@@ -7,7 +7,7 @@
 //!
 //! ```rust,no_run
 //! # #[cfg(feature = "db")]
-//! # async fn example(pool: paranoid::db::Pool) -> Result<(), Box<dyn std::error::Error>> {
+//! # async fn example(pool: paranoid::db::WritePool) -> Result<(), Box<dyn std::error::Error>> {
 //! use paranoid::kv::{Key, Store, StoreConfig, Ttl};
 //!
 //! let store = Store::new(StoreConfig::default())?;

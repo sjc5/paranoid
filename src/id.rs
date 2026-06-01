@@ -358,6 +358,7 @@ impl RandomId {
     }
 
     /// Returns the byte length of the ID text.
+    #[allow(clippy::len_without_is_empty)]
     pub fn len(&self) -> usize {
         self.0.len()
     }

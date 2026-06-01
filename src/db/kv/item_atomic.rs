@@ -7,7 +7,7 @@ where
     /// Fetches a typed value or initializes it atomically inside one transaction.
     pub async fn get_or_init<S, I>(
         &self,
-        pool: &Pool,
+        pool: &WritePool,
         key_parts: I,
         initial_value: T,
         ttl: Ttl,
@@ -27,7 +27,7 @@ where
     /// Fetches a typed value or initializes it atomically inside the caller's transaction.
     pub async fn get_or_init_in_current_transaction<S, I>(
         &self,
-        tx: &mut Tx<'_>,
+        tx: &mut WriteTx<'_>,
         key_parts: I,
         initial_value: T,
         ttl: Ttl,
@@ -42,7 +42,7 @@ where
 
     async fn get_or_init_in_transaction_internal<S, I>(
         &self,
-        tx: &mut Tx<'_>,
+        tx: &mut WriteTx<'_>,
         key_parts: I,
         initial_value: T,
         ttl: Ttl,
@@ -91,7 +91,7 @@ where
     /// Locks one typed item, exposes its current live value, and applies the chosen mutation.
     pub async fn mutate_atomically<S, I, F, E>(
         &self,
-        pool: &Pool,
+        pool: &WritePool,
         key_parts: I,
         decide_mutation: F,
     ) -> Result<ItemAtomicMutationResult<T>, E>
@@ -117,7 +117,7 @@ where
     /// Transactional variant of `mutate_atomically`.
     pub async fn mutate_atomically_in_current_transaction<S, I, F, E>(
         &self,
-        tx: &mut Tx<'_>,
+        tx: &mut WriteTx<'_>,
         key_parts: I,
         decide_mutation: F,
     ) -> Result<ItemAtomicMutationResult<T>, E>
@@ -135,7 +135,7 @@ where
 
     async fn mutate_atomically_in_transaction_internal<S, I, F, E>(
         &self,
-        tx: &mut Tx<'_>,
+        tx: &mut WriteTx<'_>,
         key_parts: I,
         decide_mutation: F,
         cleanup_absent_placeholder_on_callback_error: bool,
@@ -182,7 +182,7 @@ where
     /// Locks one live typed item, requiring it to exist and not be expired.
     pub async fn mutate_live_atomically<S, I, F, E>(
         &self,
-        pool: &Pool,
+        pool: &WritePool,
         key_parts: I,
         decide_mutation: F,
     ) -> Result<ItemAtomicLiveMutationResult<T>, E>
@@ -214,7 +214,7 @@ where
     /// Transactional variant of `mutate_live_atomically`.
     pub async fn mutate_live_atomically_in_current_transaction<S, I, F, E>(
         &self,
-        tx: &mut Tx<'_>,
+        tx: &mut WriteTx<'_>,
         key_parts: I,
         decide_mutation: F,
     ) -> Result<ItemAtomicLiveMutationResult<T>, E>
@@ -232,7 +232,7 @@ where
 
     async fn mutate_live_atomically_in_transaction_internal<S, I, F, E>(
         &self,
-        tx: &mut Tx<'_>,
+        tx: &mut WriteTx<'_>,
         key_parts: I,
         decide_mutation: F,
         cleanup_absent_placeholder_on_callback_error: bool,
@@ -284,7 +284,7 @@ where
     /// Locks one typed item, initializes it when absent or expired, and applies a live-value mutation.
     pub async fn mutate_live_or_insert_initial_value_atomically<S, I, Init, F, E>(
         &self,
-        pool: &Pool,
+        pool: &WritePool,
         key_parts: I,
         initialize_value: Init,
         decide_mutation: F,
@@ -329,7 +329,7 @@ where
         E,
     >(
         &self,
-        tx: &mut Tx<'_>,
+        tx: &mut WriteTx<'_>,
         key_parts: I,
         initialize_value: Init,
         decide_mutation: F,
@@ -361,7 +361,7 @@ where
         E,
     >(
         &self,
-        tx: &mut Tx<'_>,
+        tx: &mut WriteTx<'_>,
         key_parts: I,
         initialize_value: Init,
         decide_mutation: F,

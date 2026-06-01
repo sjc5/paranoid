@@ -1,5 +1,30 @@
 use super::*;
 
+pub(in crate::db::queue) struct OwnedRunningJobUpdate<'a> {
+    pub(in crate::db::queue) statement: &'a str,
+    pub(in crate::db::queue) database_operation_label: &'static str,
+    pub(in crate::db::queue) operation: &'static str,
+    pub(in crate::db::queue) state_mismatch_error: Error,
+    pub(in crate::db::queue) job_id: JobId,
+    pub(in crate::db::queue) worker_id: &'a str,
+}
+
+pub(in crate::db::queue) struct OwnedRunningJobRetrySchedule<'a> {
+    pub(in crate::db::queue) job_id: JobId,
+    pub(in crate::db::queue) worker_id: &'a str,
+    pub(in crate::db::queue) new_retry_count: i32,
+    pub(in crate::db::queue) retry_after_microseconds: i64,
+    pub(in crate::db::queue) error_message: &'a str,
+}
+
+pub(in crate::db::queue) struct OwnedRunningJobDeadLetterMove<'a> {
+    pub(in crate::db::queue) job_id: JobId,
+    pub(in crate::db::queue) worker_id: &'a str,
+    pub(in crate::db::queue) error_message: &'a str,
+    pub(in crate::db::queue) increment_retry_count: bool,
+    pub(in crate::db::queue) reason: DeadLetterReason,
+}
+
 pub(in crate::db::queue) async fn claim_available_jobs_for_worker<'e, E>(
     executor: E,
     database_operation_observer: Option<&DatabaseOperationObserver>,
@@ -40,16 +65,19 @@ where
 pub(in crate::db::queue) async fn execute_owned_running_job_update<'e, E>(
     executor: E,
     database_operation_observer: Option<&DatabaseOperationObserver>,
-    statement: &str,
-    database_operation_label: &'static str,
-    operation: &'static str,
-    state_mismatch_error: Error,
-    job_id: JobId,
-    worker_id: &str,
+    update: OwnedRunningJobUpdate<'_>,
 ) -> Result<(), Error>
 where
     E: Executor<'e, Database = sqlx::Postgres>,
 {
+    let OwnedRunningJobUpdate {
+        statement,
+        database_operation_label,
+        operation,
+        state_mismatch_error,
+        job_id,
+        worker_id,
+    } = update;
     record_database_operation(
         database_operation_observer,
         DatabaseOperationKind::FetchOne,
@@ -107,15 +135,18 @@ pub(in crate::db::queue) async fn schedule_owned_running_job_retry<'e, E>(
     executor: E,
     database_operation_observer: Option<&DatabaseOperationObserver>,
     sql_catalog: &SqlCatalog,
-    job_id: JobId,
-    worker_id: &str,
-    new_retry_count: i32,
-    retry_after_microseconds: i64,
-    error_message: &str,
+    retry_schedule: OwnedRunningJobRetrySchedule<'_>,
 ) -> Result<i64, Error>
 where
     E: Executor<'e, Database = sqlx::Postgres>,
 {
+    let OwnedRunningJobRetrySchedule {
+        job_id,
+        worker_id,
+        new_retry_count,
+        retry_after_microseconds,
+        error_message,
+    } = retry_schedule;
     record_database_operation(
         database_operation_observer,
         DatabaseOperationKind::FetchOne,
@@ -146,15 +177,18 @@ pub(in crate::db::queue) async fn move_owned_running_job_to_dead_letter<'e, E>(
     executor: E,
     database_operation_observer: Option<&DatabaseOperationObserver>,
     sql_catalog: &SqlCatalog,
-    job_id: JobId,
-    worker_id: &str,
-    error_message: &str,
-    increment_retry_count: bool,
-    reason: DeadLetterReason,
+    dead_letter_move: OwnedRunningJobDeadLetterMove<'_>,
 ) -> Result<JobId, Error>
 where
     E: Executor<'e, Database = sqlx::Postgres>,
 {
+    let OwnedRunningJobDeadLetterMove {
+        job_id,
+        worker_id,
+        error_message,
+        increment_retry_count,
+        reason,
+    } = dead_letter_move;
     let dead_letter_job_id = JobId::new()?;
     record_database_operation(
         database_operation_observer,

@@ -2,9 +2,7 @@ use super::*;
 
 #[tokio::test]
 async fn queue_validation_rejects_missing_or_incompatible_active_dedupe_unique_index() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     reset_queue_schema(&test_database).await;
 
@@ -61,9 +59,7 @@ async fn queue_validation_rejects_missing_or_incompatible_active_dedupe_unique_i
 
 #[tokio::test]
 async fn queue_validation_rejects_missing_or_incompatible_required_performance_index() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     reset_queue_schema(&test_database).await;
 
@@ -123,9 +119,7 @@ async fn queue_validation_rejects_missing_or_incompatible_required_performance_i
 
 #[tokio::test]
 async fn queue_validation_rejects_incompatible_job_column_shape() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     reset_queue_schema(&test_database).await;
     let alter_type = format!(
@@ -161,9 +155,7 @@ async fn queue_validation_rejects_incompatible_job_column_shape() {
 
 #[tokio::test]
 async fn queue_validation_rejects_incompatible_dead_letter_and_pause_columns() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     reset_queue_schema(&test_database).await;
     drop_test_table(
@@ -271,9 +263,7 @@ async fn queue_validation_rejects_incompatible_dead_letter_and_pause_columns() {
 
 #[tokio::test]
 async fn queue_validation_rejects_non_c_collation_on_every_correctness_text_column() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let text_columns = [
         (test_database.config.table_name.clone(), "task_name"),
@@ -328,9 +318,7 @@ async fn queue_validation_rejects_non_c_collation_on_every_correctness_text_colu
 
 #[tokio::test]
 async fn queue_validation_rejects_missing_or_broadened_job_status_constraint() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     reset_queue_schema(&test_database).await;
     let status_constraint_name = fetch_check_constraint_name_containing(
@@ -402,9 +390,7 @@ async fn queue_validation_rejects_missing_or_broadened_job_status_constraint() {
 
 #[tokio::test]
 async fn queue_validation_rejects_missing_or_broadened_job_lifecycle_constraint() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     reset_queue_schema(&test_database).await;
     let lifecycle_constraint_name = fetch_check_constraint_name_containing(
@@ -509,9 +495,7 @@ async fn queue_validation_rejects_missing_or_broadened_job_lifecycle_constraint(
 
 #[tokio::test]
 async fn queue_validation_rejects_broadened_pause_key_task_constraint() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     reset_queue_schema(&test_database).await;
     let pause_constraint_name = fetch_check_constraint_name_containing(
@@ -568,9 +552,7 @@ async fn queue_validation_rejects_broadened_pause_key_task_constraint() {
 
 #[tokio::test]
 async fn queue_validation_rejects_missing_or_broadened_numeric_domain_constraints() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     reset_queue_schema(&test_database).await;
     let job_numeric_constraint_name = fetch_check_constraint_name_containing(
@@ -701,9 +683,7 @@ async fn queue_validation_rejects_missing_or_broadened_numeric_domain_constraint
 
 #[tokio::test]
 async fn queue_validation_rejects_missing_or_broadened_text_domain_constraints() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     reset_queue_schema(&test_database).await;
     let job_text_constraint_name = fetch_check_constraint_name_containing(

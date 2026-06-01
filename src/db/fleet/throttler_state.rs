@@ -63,7 +63,7 @@ impl Throttler {
 
     pub(super) fn guard_for_permit(
         &self,
-        pool: &Pool,
+        pool: &WritePool,
         permit: ThrottlerPermit,
     ) -> ThrottlerPermitGuard {
         let probe_heartbeat = self.start_probe_heartbeat_if_needed(pool, &permit);
@@ -79,7 +79,7 @@ impl Throttler {
 
     pub(super) fn start_probe_heartbeat_if_needed(
         &self,
-        pool: &Pool,
+        pool: &WritePool,
         permit: &ThrottlerPermit,
     ) -> Option<ThrottlerProbeHeartbeat> {
         if !permit.probe_acquired {

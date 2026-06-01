@@ -8,10 +8,11 @@ DB_FEATURES := --no-default-features --features db
 # Compiles Paranoid with every feature enabled, including integration tests.
 check:
 	@cargo check --all-features --tests
+	@$(MAKE) --no-print-directory playground-local-env-vault
 
 # Runs the normal all-feature test suite.
 test:
-	@cargo test --all-features
+	@$(XTASK) with-isolated-test-db -- cargo test --all-features
 
 # Runs fast tests that do not need the isolated Postgres/PgBouncer stack.
 test-fast:
@@ -42,6 +43,12 @@ feature-gate:
 	@$(MAKE) --no-print-directory feature-web
 	@$(MAKE) --no-print-directory feature-db
 	@$(MAKE) --no-print-directory feature-all
+	@$(MAKE) --no-print-directory playground-local-env-vault
+
+# Checks the local-env-vault application wrapper playground.
+playground-local-env-vault:
+	@cargo check -p paranoid-local-env-vault-playground
+	@cargo test -p paranoid-local-env-vault-playground
 
 # Checks the empty-default feature surface.
 feature-none:
@@ -51,11 +58,18 @@ feature-none:
 	@cargo test --doc
 
 # Checks one single-feature surface; the feature name is derived from the target name.
-feature-local-lock feature-local-env-vault feature-db:
+feature-local-lock feature-local-env-vault:
 	@cargo check --no-default-features --features '$(@:feature-%=%)' --tests
 	@cargo test --no-default-features --features '$(@:feature-%=%)' --lib
 	@RUSTDOCFLAGS="-D warnings" cargo doc --no-default-features --features '$(@:feature-%=%)' --no-deps
 	@cargo test --no-default-features --features '$(@:feature-%=%)' --doc
+
+# Checks the db feature surface without running DB-backed tests; runtime DB coverage is in test-db.
+feature-db:
+	@cargo check --no-default-features --features db --tests
+	@cargo test --no-default-features --features db --lib --no-run
+	@RUSTDOCFLAGS="-D warnings" cargo doc --no-default-features --features db --no-deps
+	@cargo test --no-default-features --features db --doc
 
 # Checks the web feature surface, including the web integration test.
 feature-web:
@@ -68,7 +82,7 @@ feature-web:
 # Checks the all-features public surface.
 feature-all:
 	@cargo check --all-features --tests
-	@cargo test --all-features
+	@cargo test --all-features --no-run
 	@RUSTDOCFLAGS="-D warnings" cargo doc --all-features --no-deps
 	@cargo test --all-features --doc
 

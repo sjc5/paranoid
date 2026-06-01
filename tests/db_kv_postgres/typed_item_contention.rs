@@ -2,9 +2,7 @@ use super::*;
 
 #[tokio::test]
 async fn kv_item_get_or_init_initializes_once_under_contention() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let store = KvStore::new(test_database.config.clone()).expect("kv store");
     let item = KvItem::<TestKvPayload>::new_plain(
@@ -66,9 +64,7 @@ async fn kv_item_get_or_init_initializes_once_under_contention() {
 
 #[tokio::test]
 async fn kv_item_acquire_slot_validates_inputs_and_claims_multiple_slots_under_contention() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let store = KvStore::new(test_database.config.clone()).expect("kv store");
     let item = KvItem::<TestKvPayload>::new_plain(

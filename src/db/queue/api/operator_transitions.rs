@@ -2,7 +2,7 @@ use super::*;
 
 impl Store {
     /// Deletes a pending job by ID.
-    pub async fn cancel_pending_job(&self, pool: &Pool, job_id: JobId) -> Result<(), Error> {
+    pub async fn cancel_pending_job(&self, pool: &WritePool, job_id: JobId) -> Result<(), Error> {
         let mut tx = pool.begin_transaction().await.map_err(Error::from)?;
         let result = self
             .cancel_pending_job_in_current_transaction(&mut tx, job_id)
@@ -13,7 +13,7 @@ impl Store {
     /// Deletes a pending job by ID inside the caller's active transaction.
     pub async fn cancel_pending_job_in_current_transaction(
         &self,
-        tx: &mut Tx<'_>,
+        tx: &mut WriteTx<'_>,
         job_id: JobId,
     ) -> Result<(), Error> {
         let database_operation_observer = tx.database_operation_observer().cloned();
@@ -32,7 +32,7 @@ impl Store {
     /// Resets one failed job to pending so it can be retried.
     pub async fn retry_failed_job(
         &self,
-        pool: &Pool,
+        pool: &WritePool,
         job_id: JobId,
         run_at_or_after: Option<JobRunAtOrAfter>,
     ) -> Result<(), Error> {
@@ -46,7 +46,7 @@ impl Store {
     /// Resets one failed job to pending inside the caller's active transaction.
     pub async fn retry_failed_job_in_current_transaction(
         &self,
-        tx: &mut Tx<'_>,
+        tx: &mut WriteTx<'_>,
         job_id: JobId,
         run_at_or_after: Option<JobRunAtOrAfter>,
     ) -> Result<(), Error> {
@@ -64,7 +64,7 @@ impl Store {
     /// Resets up to `limit` currently available failed jobs to pending.
     pub async fn retry_available_failed_jobs(
         &self,
-        pool: &Pool,
+        pool: &WritePool,
         optional_task_name: Option<&str>,
         limit: u32,
         run_at_or_after: Option<JobRunAtOrAfter>,
@@ -88,7 +88,7 @@ impl Store {
     /// Resets available failed jobs to pending inside the caller's active transaction.
     pub async fn retry_available_failed_jobs_in_current_transaction(
         &self,
-        tx: &mut Tx<'_>,
+        tx: &mut WriteTx<'_>,
         optional_task_name: Option<&str>,
         limit: u32,
         run_at_or_after: Option<JobRunAtOrAfter>,
@@ -213,7 +213,7 @@ impl Store {
     /// Moves a running job back to pending state.
     pub async fn force_requeue_running_job_by_id(
         &self,
-        pool: &Pool,
+        pool: &WritePool,
         job_id: JobId,
     ) -> Result<(), Error> {
         let mut tx = pool.begin_transaction().await.map_err(Error::from)?;
@@ -226,19 +226,21 @@ impl Store {
     /// Moves a running job back to pending inside the caller's active transaction.
     pub async fn force_requeue_running_job_by_id_in_current_transaction(
         &self,
-        tx: &mut Tx<'_>,
+        tx: &mut WriteTx<'_>,
         job_id: JobId,
     ) -> Result<(), Error> {
         let database_operation_observer = tx.database_operation_observer().cloned();
         execute_job_state_transition_for_expected_status(
             tx.inner.as_mut(),
             database_operation_observer.as_ref(),
-            self.sql_catalog().force_requeue_running_job_by_id_query(),
-            QUEUE_OPERATION_FORCE_REQUEUE_RUNNING_JOB,
-            "force requeue running job",
-            JobStatus::Running,
-            Error::JobNotRunning,
-            job_id,
+            ExpectedJobStateTransition {
+                statement: self.sql_catalog().force_requeue_running_job_by_id_query(),
+                database_operation_label: QUEUE_OPERATION_FORCE_REQUEUE_RUNNING_JOB,
+                operation: "force requeue running job",
+                expected_status: JobStatus::Running,
+                state_mismatch_error: Error::JobNotRunning,
+                job_id,
+            },
         )
         .await
     }
@@ -246,7 +248,7 @@ impl Store {
     /// Atomically moves a failed job into dead-letter storage.
     pub async fn move_failed_job_to_dead_letter(
         &self,
-        pool: &Pool,
+        pool: &WritePool,
         job_id: JobId,
         reason: DeadLetterReason,
     ) -> Result<JobId, Error> {
@@ -260,7 +262,7 @@ impl Store {
     /// Moves a failed job into dead-letter storage inside the caller's active transaction.
     pub async fn move_failed_job_to_dead_letter_in_current_transaction(
         &self,
-        tx: &mut Tx<'_>,
+        tx: &mut WriteTx<'_>,
         job_id: JobId,
         reason: DeadLetterReason,
     ) -> Result<JobId, Error> {
@@ -278,7 +280,7 @@ impl Store {
     /// Moves available failed jobs into dead-letter storage in one bounded batch.
     pub async fn move_failed_jobs_to_dead_letter_batch(
         &self,
-        pool: &Pool,
+        pool: &WritePool,
         job_ids: &[JobId],
         reason: DeadLetterReason,
     ) -> Result<MoveFailedJobsToDeadLetterBatchResult, Error> {
@@ -298,7 +300,7 @@ impl Store {
     /// Moves available failed jobs into dead-letter storage inside the caller's transaction.
     pub async fn move_failed_jobs_to_dead_letter_batch_in_current_transaction(
         &self,
-        tx: &mut Tx<'_>,
+        tx: &mut WriteTx<'_>,
         job_ids: &[JobId],
         reason: DeadLetterReason,
     ) -> Result<MoveFailedJobsToDeadLetterBatchResult, Error> {

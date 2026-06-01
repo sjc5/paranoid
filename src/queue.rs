@@ -6,7 +6,7 @@
 //!
 //! ```rust,no_run
 //! # #[cfg(feature = "db")]
-//! # async fn example(pool: paranoid::db::Pool) -> Result<(), Box<dyn std::error::Error>> {
+//! # async fn example(pool: paranoid::db::WritePool) -> Result<(), Box<dyn std::error::Error>> {
 //! use paranoid::queue::{EnqueueOptions, Store, StoreConfig};
 //!
 //! let queue = Store::new(StoreConfig::default())?;

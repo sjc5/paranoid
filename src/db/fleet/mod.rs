@@ -14,8 +14,8 @@ pub use super::lease::{ClaimDuration, CoordinationError, FencingToken, HolderId}
 use super::{
     ComponentSchemaVersion, DbError, PgQualifiedTableName, PgSqlState, Pool,
     SQLSTATE_ADMIN_SHUTDOWN, SQLSTATE_CANNOT_CONNECT_NOW, SQLSTATE_CRASH_SHUTDOWN,
-    SQLSTATE_LOCK_NOT_AVAILABLE, SQLSTATE_QUERY_CANCELED, SchemaLedgerConfig, Tx,
-    duration_from_nonnegative_f64_seconds, finish_db_pool_transaction,
+    SQLSTATE_LOCK_NOT_AVAILABLE, SQLSTATE_QUERY_CANCELED, SchemaLedgerConfig, Tx, WritePool,
+    WriteTx, duration_from_nonnegative_f64_seconds, finish_db_pool_transaction,
     finish_db_pool_validation_transaction,
     finish_pool_owned_write_transaction_and_preserve_rollback_error,
     pg_table_name_set_could_contain_same_relation, random_unit_f64_from_system,
@@ -142,7 +142,7 @@ pub(crate) const FLEET_OPERATION_SCHEMA_VALIDATE: &str = "fleet.schema.validate"
 
 async fn finish_fleet_pool_transaction<T>(
     operation: &'static str,
-    tx: Tx<'_>,
+    tx: WriteTx<'_>,
     result: Result<T, Error>,
 ) -> Result<T, Error> {
     finish_pool_owned_write_transaction_and_preserve_rollback_error(

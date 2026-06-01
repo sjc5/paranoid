@@ -2,9 +2,7 @@ use super::*;
 
 #[tokio::test]
 async fn kv_atomic_mutation_handles_absent_live_expired_delete_and_rollback() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let store = KvStore::new(test_database.config.clone()).expect("kv store");
     let key = KvKey::from_parts(["atomic", "lifecycle"]).expect("key");
@@ -161,9 +159,7 @@ async fn kv_atomic_mutation_handles_absent_live_expired_delete_and_rollback() {
 
 #[tokio::test]
 async fn kv_atomic_mutation_absent_and_expired_outcomes_clean_up_placeholders() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let store = KvStore::new(test_database.config.clone()).expect("kv store");
     let raw_absent_keep_key = KvKey::from_parts(["atomic", "absent-keep"]).expect("key");

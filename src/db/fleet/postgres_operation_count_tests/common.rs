@@ -2,12 +2,7 @@ use super::*;
 
 #[tokio::test]
 async fn fleet_common_composed_operations_emit_exact_database_operation_records() {
-    let Some(database_url) = test_database_url() else {
-        eprintln!(
-            "skipping Postgres Fleet operation-count test; set TEST_DSN or PARANOID_TEST_DATABASE_URL to run"
-        );
-        return;
-    };
+    let database_url = test_database_url();
 
     let observed = prepare_observed_fleet_store(&database_url).await;
     let store = &observed.store;

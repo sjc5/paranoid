@@ -2,9 +2,7 @@ use super::*;
 
 #[tokio::test]
 async fn queue_claim_retry_and_stale_reclaim_high_contention_keep_single_ownership() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let queue = Arc::new(Store::new(test_database.config.clone()).expect("queue"));
     reset_queue_schema(&test_database).await;
@@ -207,9 +205,7 @@ async fn queue_claim_retry_and_stale_reclaim_high_contention_keep_single_ownersh
 
 #[tokio::test]
 async fn queue_retry_and_force_requeue_preserve_state_and_active_dedupe_rules() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let queue = Store::new(test_database.config.clone()).expect("queue");
     reset_queue_schema(&test_database).await;
@@ -517,9 +513,7 @@ async fn queue_retry_and_force_requeue_preserve_state_and_active_dedupe_rules() 
 #[tokio::test]
 async fn queue_retry_and_dead_letter_requeue_preserve_unrelated_unique_violation_as_database_error()
 {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let queue = Store::new(test_database.config.clone()).expect("queue");
     reset_queue_schema(&test_database).await;
@@ -598,9 +592,7 @@ async fn queue_retry_and_dead_letter_requeue_preserve_unrelated_unique_violation
 
 #[tokio::test]
 async fn queue_owned_worker_retry_dead_letter_and_return_paths_are_state_exact() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let queue = Store::new(test_database.config.clone()).expect("queue");
     reset_queue_schema(&test_database).await;

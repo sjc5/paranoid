@@ -2,9 +2,7 @@ use super::*;
 
 #[tokio::test]
 async fn fleet_topic_transactional_publish_and_poll_respect_commit_boundaries() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
     struct TestEvent {
@@ -120,9 +118,7 @@ async fn fleet_topic_transactional_publish_and_poll_respect_commit_boundaries() 
 #[tokio::test]
 async fn fleet_subscription_pool_read_and_advance_rolls_back_when_cancelled_during_cursor_advance()
 {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
     struct TestEvent {
@@ -208,9 +204,7 @@ async fn fleet_subscription_pool_read_and_advance_rolls_back_when_cancelled_duri
 
 #[tokio::test]
 async fn fleet_topic_concurrent_publish_sequences_are_unique_and_gapless() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
     struct TestEvent {
@@ -298,9 +292,7 @@ async fn fleet_topic_concurrent_publish_sequences_are_unique_and_gapless() {
 
 #[tokio::test]
 async fn fleet_topic_events_expose_database_publication_timestamp() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
     struct TestEvent;

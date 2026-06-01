@@ -3,9 +3,7 @@ use super::*;
 
 #[tokio::test]
 async fn fleet_cron_try_run_once_and_run_once_expose_fencing_tokens() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let store = Store::new(test_database.config.clone()).expect("fleet store");
     let cron = store
@@ -53,9 +51,7 @@ async fn fleet_cron_try_run_once_and_run_once_expose_fencing_tokens() {
 
 #[tokio::test]
 async fn fleet_cron_try_run_once_reports_leadership_held() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let store = Store::new(test_database.config.clone()).expect("fleet store");
     let cron = store
@@ -108,9 +104,7 @@ async fn fleet_cron_try_run_once_reports_leadership_held() {
 
 #[tokio::test]
 async fn fleet_cron_fetch_live_leader_reports_holder_and_fencing_token() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let store = Store::new(test_database.config.clone()).expect("fleet store");
     let cron = store
@@ -181,9 +175,7 @@ async fn fleet_cron_fetch_live_leader_reports_holder_and_fencing_token() {
 
 #[tokio::test]
 async fn fleet_cron_run_until_uses_one_leader_and_stops_cleanly() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let store = Store::new(test_database.config.clone()).expect("fleet store");
     let first_cron = store
@@ -265,9 +257,7 @@ async fn fleet_cron_run_until_uses_one_leader_and_stops_cleanly() {
 
 #[tokio::test]
 async fn fleet_cron_task_error_policy_can_continue_after_reported_task_error() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let store = Store::new(test_database.config.clone()).expect("fleet store");
     let cron = store
@@ -327,9 +317,7 @@ async fn fleet_cron_task_error_policy_can_continue_after_reported_task_error() {
 
 #[tokio::test]
 async fn fleet_cron_task_error_policy_can_stop_after_reported_task_error() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let store = Store::new(test_database.config.clone()).expect("fleet store");
     let cron = store
@@ -383,9 +371,7 @@ async fn fleet_cron_task_error_policy_can_stop_after_reported_task_error() {
 
 #[tokio::test]
 async fn fleet_cron_start_handle_with_task_error_policy_continues_and_stops_cleanly() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let store = Store::new(test_database.config.clone()).expect("fleet store");
     let cron = store
@@ -451,9 +437,7 @@ async fn fleet_cron_start_handle_with_task_error_policy_continues_and_stops_clea
 
 #[tokio::test]
 async fn fleet_cron_task_error_policy_panic_is_reported_as_handle_join_failure() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let store = Store::new(test_database.config.clone()).expect("fleet store");
     let cron = store
@@ -498,9 +482,7 @@ async fn fleet_cron_task_error_policy_panic_is_reported_as_handle_join_failure()
 
 #[tokio::test]
 async fn fleet_cron_start_handle_stops_and_releases_leadership() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let store = Store::new(test_database.config.clone()).expect("fleet store");
     let cron = store
@@ -549,9 +531,7 @@ async fn fleet_cron_start_handle_stops_and_releases_leadership() {
 
 #[tokio::test]
 async fn fleet_cron_stop_during_task_waits_for_success_and_releases_leadership() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let store = Store::new(test_database.config.clone()).expect("fleet store");
     let cron = store
@@ -625,9 +605,7 @@ async fn fleet_cron_stop_during_task_waits_for_success_and_releases_leadership()
 
 #[tokio::test]
 async fn fleet_cron_run_until_returns_immediately_when_stop_future_is_ready_before_acquire() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let store = Store::new(test_database.config.clone()).expect("fleet store");
     let cron = store
@@ -672,9 +650,7 @@ async fn fleet_cron_run_until_returns_immediately_when_stop_future_is_ready_befo
 
 #[tokio::test]
 async fn fleet_cron_run_until_returns_acquire_error_when_schema_is_missing() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let store = Store::new(test_database.config.clone()).expect("fleet store");
     let cron = store
@@ -704,9 +680,7 @@ async fn fleet_cron_run_until_returns_acquire_error_when_schema_is_missing() {
 
 #[tokio::test]
 async fn fleet_cron_run_until_stops_while_blocked_on_leadership_acquire() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let store = Store::new(test_database.config.clone()).expect("fleet store");
     let holding_cron = store
@@ -781,9 +755,7 @@ async fn fleet_cron_run_until_stops_while_blocked_on_leadership_acquire() {
 
 #[tokio::test]
 async fn fleet_cron_run_until_returns_release_error_when_stop_release_fails() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let store = Store::new(test_database.config.clone()).expect("fleet store");
     let cron = store
@@ -846,9 +818,7 @@ async fn fleet_cron_run_until_returns_release_error_when_stop_release_fails() {
 
 #[tokio::test]
 async fn fleet_cron_start_handle_reports_release_error_when_stop_release_fails() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let store = Store::new(test_database.config.clone()).expect("fleet store");
     let cron = store
@@ -899,9 +869,7 @@ async fn fleet_cron_start_handle_reports_release_error_when_stop_release_fails()
 
 #[tokio::test]
 async fn fleet_cron_run_until_reports_leadership_lost() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let store = Store::new(test_database.config.clone()).expect("fleet store");
     let cron = store
@@ -960,9 +928,7 @@ async fn fleet_cron_run_until_reports_leadership_lost() {
 
 #[tokio::test]
 async fn fleet_cron_start_handle_reports_leadership_lost() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let store = Store::new(test_database.config.clone()).expect("fleet store");
     let cron = store
@@ -1017,9 +983,7 @@ async fn fleet_cron_start_handle_reports_leadership_lost() {
 
 #[tokio::test]
 async fn fleet_cron_continuous_run_reacquires_after_leadership_loss() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let store = Store::new(test_database.config.clone()).expect("fleet store");
     let cron_key = "continuous-reacquire";

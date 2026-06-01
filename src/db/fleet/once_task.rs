@@ -1,7 +1,7 @@
 use super::*;
 
 async fn rollback_transaction_and_release_after_task_error<T, E>(
-    tx: Tx<'_>,
+    tx: WriteTx<'_>,
     guard: MutexGuard,
     source: E,
 ) -> Result<OnceRunTaskResult<T>, OnceTransactionalRunError<E>>
@@ -33,7 +33,7 @@ where
 }
 
 async fn rollback_transaction_and_release_after_fleet_error<T, E>(
-    tx: Tx<'_>,
+    tx: WriteTx<'_>,
     guard: MutexGuard,
     source: Error,
 ) -> Result<OnceRunTaskResult<T>, OnceTransactionalRunError<E>>
@@ -59,7 +59,7 @@ where
 }
 
 async fn rollback_transaction_after_stopped_guard_without_claim<T, E>(
-    tx: Tx<'_>,
+    tx: WriteTx<'_>,
     source: Error,
 ) -> Result<OnceRunTaskResult<T>, OnceTransactionalRunError<E>>
 where
@@ -73,7 +73,7 @@ where
 
 async fn release_after_completed_atomic_once_transaction(
     mutex: &Mutex,
-    pool: &Pool,
+    pool: &WritePool,
     renewed_claim: &MutexManualRenewalClaim,
 ) -> Result<(), Error> {
     require_once_task_mutex_released(
@@ -85,7 +85,7 @@ async fn release_after_completed_atomic_once_transaction(
 
 async fn release_after_failed_atomic_once_transaction(
     mutex: &Mutex,
-    pool: &Pool,
+    pool: &WritePool,
     renewed_claim: &MutexManualRenewalClaim,
     original_claim: &MutexManualRenewalClaim,
 ) -> Result<(), Error> {
@@ -106,7 +106,7 @@ async fn release_after_failed_atomic_once_transaction(
 impl Once {
     pub(super) async fn run_task_after_acquiring_guard<T, E, TaskFuture, Task>(
         &self,
-        pool: &Pool,
+        pool: &WritePool,
         guard: MutexGuard,
         task: Task,
     ) -> Result<OnceRunTaskResult<T>, OnceRunError<E>>
@@ -170,14 +170,14 @@ impl Once {
 
     pub(super) async fn run_task_atomically_after_acquiring_guard<T, E, Task>(
         &self,
-        pool: &Pool,
+        pool: &WritePool,
         guard: MutexGuard,
         task: Task,
     ) -> Result<OnceRunTaskResult<T>, OnceTransactionalRunError<E>>
     where
         Task: for<'a, 'tx> FnOnce(
             OnceRunClaimSnapshot,
-            &'a mut Tx<'tx>,
+            &'a mut WriteTx<'tx>,
         ) -> OnceTransactionalTaskFuture<'a, T, E>,
         E: std::error::Error + Send + Sync + 'static,
     {
