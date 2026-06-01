@@ -1,6 +1,6 @@
-**WARNING:** Paranoid is in an alpha state and has not undergone a formal security audit.
+**WARNING:** _Paranoid is in an alpha state and has not undergone a formal security audit.
 Use at your own risk and discretion, and understand that there will be frequent breaking
-changes for the foreseeable future.
+changes for the foreseeable future._
 
 ---
 
