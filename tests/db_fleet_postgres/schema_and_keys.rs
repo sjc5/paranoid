@@ -2,9 +2,7 @@ use super::*;
 
 #[tokio::test]
 async fn fleet_store_reports_missing_backing_schema_as_database_error() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let store = Store::new(test_database.config.clone()).expect("fleet store");
     let mutex = store

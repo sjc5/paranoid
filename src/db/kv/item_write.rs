@@ -7,7 +7,7 @@ where
     /// Stores a typed value.
     pub async fn set<S, I>(
         &self,
-        pool: &Pool,
+        pool: &WritePool,
         key_parts: I,
         value: &T,
         ttl: Ttl,
@@ -24,7 +24,7 @@ where
     /// Stores a typed value inside the caller's current transaction.
     pub async fn set_in_current_transaction<S, I>(
         &self,
-        tx: &mut Tx<'_>,
+        tx: &mut WriteTx<'_>,
         key_parts: I,
         value: &T,
         ttl: Ttl,
@@ -43,7 +43,7 @@ where
     /// Stores a typed value and returns the database statement timestamp for the write.
     pub async fn set_and_return_database_timestamp<S, I>(
         &self,
-        pool: &Pool,
+        pool: &WritePool,
         key_parts: I,
         value: &T,
         ttl: Ttl,
@@ -62,7 +62,7 @@ where
     /// Transactional variant of `set_and_return_database_timestamp`.
     pub async fn set_and_return_database_timestamp_in_current_transaction<S, I>(
         &self,
-        tx: &mut Tx<'_>,
+        tx: &mut WriteTx<'_>,
         key_parts: I,
         value: &T,
         ttl: Ttl,
@@ -81,7 +81,7 @@ where
     /// Stores a typed value only when the key is absent or expired.
     pub async fn set_if_not_exists<S, I>(
         &self,
-        pool: &Pool,
+        pool: &WritePool,
         key_parts: I,
         value: &T,
         ttl: Ttl,
@@ -100,7 +100,7 @@ where
     /// Stores a typed value only when the key is absent or expired inside a transaction.
     pub async fn set_if_not_exists_in_current_transaction<S, I>(
         &self,
-        tx: &mut Tx<'_>,
+        tx: &mut WriteTx<'_>,
         key_parts: I,
         value: &T,
         ttl: Ttl,
@@ -119,7 +119,7 @@ where
     /// Stores a typed value only when absent or expired, returning write timestamp metadata.
     pub async fn set_if_not_exists_and_return_database_timestamp<S, I>(
         &self,
-        pool: &Pool,
+        pool: &WritePool,
         key_parts: I,
         value: &T,
         ttl: Ttl,
@@ -138,7 +138,7 @@ where
     /// Transactional variant of `set_if_not_exists_and_return_database_timestamp`.
     pub async fn set_if_not_exists_and_return_database_timestamp_in_current_transaction<S, I>(
         &self,
-        tx: &mut Tx<'_>,
+        tx: &mut WriteTx<'_>,
         key_parts: I,
         value: &T,
         ttl: Ttl,
@@ -159,7 +159,7 @@ where
     /// Stores many typed values with one shared TTL.
     pub async fn set_multi<S, K>(
         &self,
-        pool: &Pool,
+        pool: &WritePool,
         key_parts_list: &[K],
         values: &[T],
         ttl: Ttl,
@@ -175,7 +175,7 @@ where
     /// Stores many typed values inside the caller's current transaction.
     pub async fn set_multi_in_current_transaction<S, K>(
         &self,
-        tx: &mut Tx<'_>,
+        tx: &mut WriteTx<'_>,
         key_parts_list: &[K],
         values: &[T],
         ttl: Ttl,

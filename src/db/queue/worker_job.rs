@@ -428,7 +428,7 @@ pub(super) async fn move_running_job_to_dead_letter_or_fail(
 
 pub(super) async fn requeue_started_job_after_worker_persistence_failure(
     queue: &Store,
-    pool: &Pool,
+    pool: &WritePool,
     job_id: JobId,
     worker_id: &str,
     database_operation_timeout: Duration,
@@ -555,7 +555,7 @@ pub(super) fn worker_runtime_error_from_joined_in_flight_job_after_abort(
 
 pub(super) async fn return_claimed_jobs_after_worker_task_failure(
     queue: &Store,
-    pool: &Pool,
+    pool: &WritePool,
     worker_id: &str,
     database_operation_timeout: Duration,
 ) -> Result<(), Error> {

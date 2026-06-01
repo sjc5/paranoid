@@ -2,9 +2,7 @@ use super::*;
 
 #[tokio::test]
 async fn kv_basic_byte_operations_round_trip_and_delete() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let store = KvStore::new(test_database.config.clone()).expect("kv store");
     let key = KvKey::from_parts(["account", "session"]).expect("key");
@@ -67,9 +65,7 @@ async fn kv_basic_byte_operations_round_trip_and_delete() {
 
 #[tokio::test]
 async fn kv_multi_byte_operations_round_trip_in_input_order() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let store = KvStore::new(test_database.config.clone()).expect("kv store");
     let key_a = KvKey::from_parts(["multi", "a"]).expect("key");
@@ -155,9 +151,7 @@ async fn kv_multi_byte_operations_round_trip_in_input_order() {
 
 #[tokio::test]
 async fn kv_multi_byte_operations_reject_duplicate_and_oversized_inputs() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let store = KvStore::new(test_database.config.clone()).expect("kv store");
     let key = KvKey::from_parts(["multi", "duplicate"]).expect("key");
@@ -222,9 +216,7 @@ async fn kv_multi_byte_operations_reject_duplicate_and_oversized_inputs() {
 
 #[tokio::test]
 async fn kv_acquire_slot_claims_candidates_once_and_reuses_expired_slots() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let store = KvStore::new(test_database.config.clone()).expect("kv store");
     let prefix = KvKeyPrefix::from_parts(["slots"]).expect("prefix");
@@ -303,9 +295,7 @@ async fn kv_acquire_slot_claims_candidates_once_and_reuses_expired_slots() {
 
 #[tokio::test]
 async fn kv_acquire_slot_rejects_invalid_inputs_without_creating_rows() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let store = KvStore::new(test_database.config.clone()).expect("kv store");
     let key = KvKey::from_parts(["slot-validation"]).expect("key");
@@ -392,9 +382,7 @@ async fn kv_acquire_slot_rejects_invalid_inputs_without_creating_rows() {
 
 #[tokio::test]
 async fn kv_acquire_slot_composes_inside_transaction_and_rolls_back() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let store = KvStore::new(test_database.config.clone()).expect("kv store");
     let key = KvKey::from_parts(["slot-transaction"]).expect("key");
@@ -440,9 +428,7 @@ async fn kv_acquire_slot_composes_inside_transaction_and_rolls_back() {
 
 #[tokio::test]
 async fn kv_acquire_slot_allows_only_one_concurrent_holder_per_slot() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let store = KvStore::new(test_database.config.clone()).expect("kv store");
     let key = KvKey::from_parts(["slot-concurrent"]).expect("key");
@@ -484,9 +470,7 @@ async fn kv_acquire_slot_allows_only_one_concurrent_holder_per_slot() {
 
 #[tokio::test]
 async fn kv_expired_keys_are_treated_as_nonexistent() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let store = KvStore::new(test_database.config.clone()).expect("kv store");
     let key = KvKey::from_parts(["otp", "attempt"]).expect("key");
@@ -554,9 +538,7 @@ async fn kv_expired_keys_are_treated_as_nonexistent() {
 
 #[tokio::test]
 async fn kv_operations_can_compose_inside_current_transaction() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let store = KvStore::new(test_database.config.clone()).expect("kv store");
     let key = KvKey::from_parts(["transaction", "key"]).expect("key");
@@ -595,10 +577,7 @@ async fn kv_operations_can_compose_inside_current_transaction() {
 
 #[tokio::test]
 async fn kv_uncommitted_transaction_drop_rolls_back_and_returns_connection() {
-    let Some(database_url) = test_database_url() else {
-        eprintln!("skipping Postgres KV test; set TEST_DSN or PARANOID_TEST_DATABASE_URL to run");
-        return;
-    };
+    let database_url = test_database_url();
 
     let paranoid_pool = connect_paranoid_pool_with_max_connections(&database_url, 1).await;
     let sqlx_pool = connect_sqlx_pool(&database_url).await;
@@ -641,10 +620,7 @@ async fn kv_uncommitted_transaction_drop_rolls_back_and_returns_connection() {
 
 #[tokio::test]
 async fn kv_transaction_drop_after_task_panic_rolls_back_uncommitted_write() {
-    let Some(database_url) = test_database_url() else {
-        eprintln!("skipping Postgres KV test; set TEST_DSN or PARANOID_TEST_DATABASE_URL to run");
-        return;
-    };
+    let database_url = test_database_url();
 
     let paranoid_pool = connect_paranoid_pool_with_max_connections(&database_url, 1).await;
     let sqlx_pool = connect_sqlx_pool(&database_url).await;
@@ -692,9 +668,7 @@ async fn kv_transaction_drop_after_task_panic_rolls_back_uncommitted_write() {
 
 #[tokio::test]
 async fn kv_set_bytes_if_not_exists_claims_absent_or_expired_keys_only() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let store = KvStore::new(test_database.config.clone()).expect("kv store");
     let key = KvKey::from_parts(["claim", "slot"]).expect("key");
@@ -763,9 +737,7 @@ async fn kv_set_bytes_if_not_exists_claims_absent_or_expired_keys_only() {
 
 #[tokio::test]
 async fn kv_set_bytes_and_conditional_writes_return_database_timestamps() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let store = KvStore::new(test_database.config.clone()).expect("kv store");
     let set_key = KvKey::from_parts(["timestamp", "set"]).expect("key");
@@ -901,9 +873,7 @@ async fn kv_set_bytes_and_conditional_writes_return_database_timestamps() {
 
 #[tokio::test]
 async fn kv_set_bytes_if_not_exists_allows_exactly_one_concurrent_claim() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let store = KvStore::new(test_database.config.clone()).expect("kv store");
     let key = KvKey::from_parts(["claim", "race"]).expect("key");

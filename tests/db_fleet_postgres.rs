@@ -5,7 +5,7 @@ use common::{
     drop_test_table as common_drop_test_table, fetch_table_exists, standard_test_database_url,
 };
 use paranoid::db::{
-    Error as DbError, PgIdentifier, PgQualifiedTableName, PgSqlState, Pool, PoolConfig,
+    Error as DbError, PgIdentifier, PgQualifiedTableName, PgSqlState, Pool, PoolConfig, WritePool,
 };
 use paranoid::fleet::manual::{
     CircuitBreakerManualPermitAcquireResult, RateLimiterManualPermitAcquireResult,
@@ -125,7 +125,7 @@ async fn first_cron_leader_absent(pool: &Pool, store: &Store, key: &str) -> bool
         .is_none()
 }
 
-async fn migrate_schema(pool: &Pool, config: &StoreConfig) -> Result<(), DbError> {
+async fn migrate_schema(pool: &WritePool, config: &StoreConfig) -> Result<(), DbError> {
     Store::new(config.clone())
         .expect("fleet store")
         .migrate_schema(pool)
@@ -208,20 +208,14 @@ impl Drop for RunningCounterGuard {
 }
 
 struct TestDatabase {
-    paranoid_pool: Pool,
+    paranoid_pool: WritePool,
     sqlx_pool: PgPool,
     config: StoreConfig,
 }
 
 impl TestDatabase {
-    async fn connect() -> Option<Self> {
-        let Some(database_url) = test_database_url() else {
-            eprintln!(
-                "skipping Postgres Fleet test; set TEST_DSN or PARANOID_TEST_DATABASE_URL to run"
-            );
-            return None;
-        };
-
+    async fn connect() -> Self {
+        let database_url = test_database_url();
         let paranoid_pool = connect_paranoid_pool(&database_url).await;
         let sqlx_pool = connect_sqlx_pool(&database_url).await;
         let config = StoreConfig::new(
@@ -231,33 +225,35 @@ impl TestDatabase {
         )
         .expect("fleet config");
 
-        Some(Self {
+        Self {
             paranoid_pool,
             sqlx_pool,
             config,
-        })
+        }
     }
 }
 
-fn test_database_url() -> Option<String> {
+fn test_database_url() -> String {
     standard_test_database_url()
 }
 
-fn direct_test_database_url() -> Option<String> {
+fn direct_test_database_url() -> String {
     common_direct_test_database_url()
 }
 
-async fn connect_paranoid_pool(database_url: &str) -> Pool {
+async fn connect_paranoid_pool(database_url: &str) -> WritePool {
     let mut config = PoolConfig::new(SecretString::from(database_url.to_owned()));
     config.max_connections = 2;
     config.application_name = Some("paranoid_db_fleet_postgres_test".to_owned());
-    Pool::connect(config).await.expect("connect paranoid pool")
+    WritePool::connect(config)
+        .await
+        .expect("connect paranoid pool")
 }
 
 async fn connect_paranoid_pool_with_statement_timeout(
     database_url: &str,
     statement_timeout: &str,
-) -> Pool {
+) -> WritePool {
     let separator = if database_url.contains('?') { '&' } else { '?' };
     let connect_url =
         format!("{database_url}{separator}options[statement_timeout]={statement_timeout}");
@@ -268,7 +264,7 @@ async fn connect_paranoid_pool_as_login_role(
     database_url: &str,
     role_name: &PgIdentifier,
     role_password: &str,
-) -> Pool {
+) -> WritePool {
     let connect_url = PgConnectOptions::from_str(database_url)
         .expect("parse test database URL")
         .username(role_name.as_str())
@@ -485,7 +481,7 @@ async fn insert_live_subscription_polling_mutex_lease_row(
 }
 
 async fn set_subscription_cursor_directly(
-    pool: &Pool,
+    pool: &WritePool,
     config: &StoreConfig,
     topic_key: &TopicKey,
     subscription_key: &SubscriptionKey,

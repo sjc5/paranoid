@@ -2,9 +2,7 @@ use super::*;
 
 #[tokio::test]
 async fn fleet_rate_limiter_wraps_throttler_admission_status_and_reset() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let store = Store::new(test_database.config.clone()).expect("fleet store");
     let key = RateLimiterKey::new("rate-wrapper").expect("rate limiter key");
@@ -71,9 +69,7 @@ async fn fleet_rate_limiter_wraps_throttler_admission_status_and_reset() {
 
 #[tokio::test]
 async fn fleet_rate_limiter_fetch_status_propagates_database_errors() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let store = Store::new(test_database.config.clone()).expect("fleet store");
     let rate_limiter = store
@@ -100,9 +96,7 @@ async fn fleet_rate_limiter_fetch_status_propagates_database_errors() {
 
 #[tokio::test]
 async fn fleet_circuit_breaker_wraps_throttler_probe_and_manual_transitions() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let store = Store::new(test_database.config.clone()).expect("fleet store");
     let key = CircuitBreakerKey::new("circuit-wrapper").expect("circuit breaker key");
@@ -204,9 +198,7 @@ async fn fleet_circuit_breaker_wraps_throttler_probe_and_manual_transitions() {
 
 #[tokio::test]
 async fn fleet_circuit_breaker_fetch_status_propagates_database_errors() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let store = Store::new(test_database.config.clone()).expect("fleet store");
     let circuit_breaker = store
@@ -233,9 +225,7 @@ async fn fleet_circuit_breaker_fetch_status_propagates_database_errors() {
 
 #[tokio::test]
 async fn fleet_throttler_guard_drop_on_plain_thread_releases_concurrency_slot() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let store = Store::new(test_database.config.clone()).expect("fleet store");
     let throttler = store
@@ -311,9 +301,7 @@ async fn fleet_throttler_guard_drop_on_plain_thread_releases_concurrency_slot() 
 
 #[tokio::test]
 async fn fleet_circuit_breaker_guard_records_failure_and_drop_clears_probe() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let store = Store::new(test_database.config.clone()).expect("fleet store");
     let circuit_breaker = store
@@ -392,9 +380,7 @@ async fn fleet_circuit_breaker_guard_records_failure_and_drop_clears_probe() {
 
 #[tokio::test]
 async fn fleet_throttler_cancelled_guard_release_preserves_task_outcome_on_drop() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let store = Store::new(test_database.config.clone()).expect("fleet store");
     let throttler_key =
@@ -464,9 +450,7 @@ async fn fleet_throttler_cancelled_guard_release_preserves_task_outcome_on_drop(
 
 #[tokio::test]
 async fn fleet_rate_limiter_try_run_task_runs_and_reports_throttled() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let store = Store::new(test_database.config.clone()).expect("fleet store");
     let rate_limiter = store
@@ -524,9 +508,7 @@ async fn fleet_rate_limiter_try_run_task_runs_and_reports_throttled() {
 
 #[tokio::test]
 async fn fleet_rate_limiter_run_task_when_ready_waits_and_preserves_task_failure() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let store = Store::new(test_database.config.clone()).expect("fleet store");
     let rate_limiter = store
@@ -581,9 +563,7 @@ async fn fleet_rate_limiter_run_task_when_ready_waits_and_preserves_task_failure
 
 #[tokio::test]
 async fn fleet_rate_limiter_waiting_task_can_be_cancelled_before_execution() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let store = Store::new(test_database.config.clone()).expect("fleet store");
     let rate_limiter = store
@@ -630,9 +610,7 @@ async fn fleet_rate_limiter_waiting_task_can_be_cancelled_before_execution() {
 
 #[tokio::test]
 async fn fleet_rate_limiter_high_rate_admits_many_immediate_tasks() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let store = Store::new(test_database.config.clone()).expect("fleet store");
     let rate_limiter = store
@@ -674,9 +652,7 @@ async fn fleet_rate_limiter_high_rate_admits_many_immediate_tasks() {
 
 #[tokio::test]
 async fn fleet_circuit_breaker_run_task_records_failure_denies_and_recovers() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let store = Store::new(test_database.config.clone()).expect("fleet store");
     let circuit_breaker = store
@@ -768,9 +744,7 @@ async fn fleet_circuit_breaker_run_task_records_failure_denies_and_recovers() {
 
 #[tokio::test]
 async fn fleet_circuit_breaker_failed_probe_resets_recovery_timeout() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let store = Store::new(test_database.config.clone()).expect("fleet store");
     let circuit_breaker = store
@@ -878,9 +852,7 @@ async fn fleet_circuit_breaker_failed_probe_resets_recovery_timeout() {
 
 #[tokio::test]
 async fn fleet_circuit_breaker_success_resets_consecutive_failures_before_threshold() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let store = Store::new(test_database.config.clone()).expect("fleet store");
     let circuit_breaker = store
@@ -964,9 +936,7 @@ async fn fleet_circuit_breaker_success_resets_consecutive_failures_before_thresh
 
 #[tokio::test]
 async fn fleet_throttler_run_task_abort_releases_slot_and_records_failure() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let store = Store::new(test_database.config.clone()).expect("fleet store");
     let throttler = store
@@ -1028,9 +998,7 @@ async fn fleet_throttler_run_task_abort_releases_slot_and_records_failure() {
 
 #[tokio::test]
 async fn fleet_throttler_run_task_panic_releases_slot_and_records_failure() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let store = Store::new(test_database.config.clone()).expect("fleet store");
     let throttler = store
@@ -1103,9 +1071,7 @@ async fn fleet_throttler_run_task_panic_releases_slot_and_records_failure() {
 
 #[tokio::test]
 async fn fleet_throttler_mixed_limits_cancellation_stress_releases_all_slots() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let store = Store::new(test_database.config.clone()).expect("fleet store");
     let throttler = store

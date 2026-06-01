@@ -2,9 +2,7 @@ use super::*;
 
 #[tokio::test]
 async fn queue_worker_stop_before_startup_jitter_does_not_claim_pending_job() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let queue = Store::new(test_database.config.clone()).expect("queue");
     reset_queue_schema(&test_database).await;
@@ -69,9 +67,7 @@ async fn queue_worker_stop_before_startup_jitter_does_not_claim_pending_job() {
 
 #[tokio::test]
 async fn queue_worker_churn_claim_retry_heartbeat_high_contention_completes_each_job() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let queue = Store::new(test_database.config.clone()).expect("queue");
     reset_queue_schema(&test_database).await;
@@ -199,9 +195,7 @@ async fn queue_worker_churn_claim_retry_heartbeat_high_contention_completes_each
 
 #[tokio::test]
 async fn queue_worker_run_loop_refills_capacity_without_waiting_for_poll_tick_and_stops_cleanly() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let queue = Store::new(test_database.config.clone()).expect("queue");
     reset_queue_schema(&test_database).await;
@@ -288,9 +282,7 @@ async fn queue_worker_run_loop_refills_capacity_without_waiting_for_poll_tick_an
 
 #[tokio::test]
 async fn queue_worker_run_loop_does_not_claim_past_configured_capacity() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let queue = Store::new(test_database.config.clone()).expect("queue");
     reset_queue_schema(&test_database).await;
@@ -412,9 +404,7 @@ async fn queue_worker_run_loop_does_not_claim_past_configured_capacity() {
 
 #[tokio::test]
 async fn queue_worker_run_loop_accepts_tiny_poll_interval_without_panicking() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let queue = Store::new(test_database.config.clone()).expect("queue");
     reset_queue_schema(&test_database).await;
@@ -485,9 +475,7 @@ async fn queue_worker_run_loop_accepts_tiny_poll_interval_without_panicking() {
 
 #[tokio::test]
 async fn queue_worker_run_loop_backs_off_after_claim_error_and_recovers_after_schema_repair() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let queue = Store::new(test_database.config.clone()).expect("queue");
     reset_queue_schema(&test_database).await;
@@ -573,9 +561,7 @@ async fn queue_worker_run_loop_backs_off_after_claim_error_and_recovers_after_sc
 
 #[tokio::test]
 async fn queue_worker_run_loop_stop_during_claim_backoff_does_not_claim_after_repair() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let queue = Store::new(test_database.config.clone()).expect("queue");
     reset_queue_schema(&test_database).await;

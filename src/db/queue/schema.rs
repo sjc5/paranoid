@@ -5,7 +5,7 @@ use super::{
 };
 
 /// Runs idempotent queue schema migration and validates the result.
-pub(crate) async fn migrate_schema(pool: &Pool, config: &StoreConfig) -> Result<(), Error> {
+pub(crate) async fn migrate_schema(pool: &WritePool, config: &StoreConfig) -> Result<(), Error> {
     let mut tx = pool.begin_transaction().await?;
     let result = migrate_schema_in_current_transaction(&mut tx, config).await;
     finish_queue_pool_transaction(QUEUE_OPERATION_SCHEMA_MIGRATE, tx, result).await
@@ -13,7 +13,7 @@ pub(crate) async fn migrate_schema(pool: &Pool, config: &StoreConfig) -> Result<
 
 /// Runs queue schema migration inside the caller's active transaction.
 pub(crate) async fn migrate_schema_in_current_transaction(
-    tx: &mut Tx<'_>,
+    tx: &mut WriteTx<'_>,
     config: &StoreConfig,
 ) -> Result<(), Error> {
     let queue = Store::new(config.clone())?;
@@ -25,7 +25,7 @@ pub(crate) async fn migrate_schema_in_current_transaction(
 }
 
 /// Validates an existing queue schema.
-pub(crate) async fn validate_schema(pool: &Pool, config: &StoreConfig) -> Result<(), Error> {
+pub(crate) async fn validate_schema(pool: &WritePool, config: &StoreConfig) -> Result<(), Error> {
     let mut tx = pool.begin_transaction().await?;
     let validation_result = validate_schema_in_current_transaction(&mut tx, config).await;
     finish_queue_validation_transaction(QUEUE_OPERATION_SCHEMA_VALIDATE, tx, validation_result)
@@ -34,7 +34,7 @@ pub(crate) async fn validate_schema(pool: &Pool, config: &StoreConfig) -> Result
 
 /// Validates an existing queue schema inside the caller's active transaction.
 pub(crate) async fn validate_schema_in_current_transaction(
-    tx: &mut Tx<'_>,
+    tx: &mut WriteTx<'_>,
     config: &StoreConfig,
 ) -> Result<(), Error> {
     let queue = Store::new(config.clone())?;
@@ -44,7 +44,7 @@ pub(crate) async fn validate_schema_in_current_transaction(
 }
 
 async fn record_queue_schema_version_in_current_transaction(
-    tx: &mut Tx<'_>,
+    tx: &mut WriteTx<'_>,
     config: &StoreConfig,
 ) -> Result<(), Error> {
     let instance_key = queue_schema_instance_key(config);
@@ -63,7 +63,7 @@ async fn record_queue_schema_version_in_current_transaction(
 }
 
 async fn validate_queue_schema_version_in_current_transaction(
-    tx: &mut Tx<'_>,
+    tx: &mut WriteTx<'_>,
     config: &StoreConfig,
 ) -> Result<(), Error> {
     let instance_key = queue_schema_instance_key(config);

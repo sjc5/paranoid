@@ -3,7 +3,7 @@ use super::*;
 impl Throttler {
     pub(super) async fn try_acquire_with_optional_holder(
         &self,
-        pool: &Pool,
+        pool: &WritePool,
         holder_id: Option<&HolderId>,
     ) -> Result<ThrottlerManualPermitAcquireResult, Error> {
         let mut tx = pool.begin_transaction().await?;
@@ -15,7 +15,7 @@ impl Throttler {
 
     pub(super) async fn try_acquire_guard_with_optional_holder(
         &self,
-        pool: &Pool,
+        pool: &WritePool,
         holder_id: Option<&HolderId>,
     ) -> Result<ThrottlerGuardAcquireResult, Error> {
         match self
@@ -36,7 +36,7 @@ impl Throttler {
 
     pub(super) async fn acquire_with_optional_holder_when_ready(
         &self,
-        pool: &Pool,
+        pool: &WritePool,
         holder_id: Option<&HolderId>,
     ) -> Result<ThrottlerPermit, Error> {
         loop {
@@ -60,7 +60,7 @@ impl Throttler {
 
     pub(super) async fn acquire_guard_with_optional_holder_when_ready(
         &self,
-        pool: &Pool,
+        pool: &WritePool,
         holder_id: Option<&HolderId>,
     ) -> Result<ThrottlerPermitGuard, Error> {
         let permit = self
@@ -71,7 +71,7 @@ impl Throttler {
 
     pub(super) async fn try_acquire_with_optional_holder_in_current_transaction(
         &self,
-        tx: &mut Tx<'_>,
+        tx: &mut WriteTx<'_>,
         holder_id: Option<&HolderId>,
     ) -> Result<ThrottlerManualPermitAcquireResult, Error> {
         let mut acquire_result = ThrottlerManualPermitAcquireResult::CircuitOpen;

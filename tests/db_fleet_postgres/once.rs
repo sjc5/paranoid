@@ -2,9 +2,7 @@ use super::*;
 
 #[tokio::test]
 async fn fleet_once_start_mark_done_and_reset_use_mutex_and_completion_marker() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let store = Store::new(test_database.config.clone()).expect("fleet store");
     let once_key = OnceKey::new("schema-bootstrap").expect("once key");
@@ -105,9 +103,7 @@ async fn fleet_once_start_mark_done_and_reset_use_mutex_and_completion_marker() 
 
 #[tokio::test]
 async fn fleet_once_reset_is_idempotent_and_respects_live_claims() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let store = Store::new(test_database.config.clone()).expect("fleet store");
     let once = store
@@ -171,9 +167,7 @@ async fn fleet_once_reset_is_idempotent_and_respects_live_claims() {
 
 #[tokio::test]
 async fn fleet_once_reset_returns_release_error_when_release_fails_and_keeps_completion() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let store = Store::new(test_database.config.clone()).expect("fleet store");
     let once = store
@@ -234,9 +228,7 @@ async fn fleet_once_reset_returns_release_error_when_release_fails_and_keeps_com
 
 #[tokio::test]
 async fn fleet_once_try_run_task_runs_once_reports_done_and_running() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let store = Store::new(test_database.config.clone()).expect("fleet store");
     let once_key = OnceKey::new("try-run-task").expect("once key");
@@ -313,9 +305,7 @@ async fn fleet_once_try_run_task_runs_once_reports_done_and_running() {
 
 #[tokio::test]
 async fn fleet_once_already_done_task_helpers_skip_mutex_acquisition() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let store = Store::new(test_database.config.clone()).expect("fleet store");
     let once = store
@@ -413,9 +403,7 @@ async fn fleet_once_already_done_task_helpers_skip_mutex_acquisition() {
 
 #[tokio::test]
 async fn fleet_once_run_task_when_available_allows_one_concurrent_runner() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let store = Store::new(test_database.config.clone()).expect("fleet store");
     let once = Arc::new(
@@ -482,9 +470,7 @@ async fn fleet_once_run_task_when_available_allows_one_concurrent_runner() {
 
 #[tokio::test]
 async fn fleet_once_run_task_when_available_returns_task_and_release_errors_when_both_fail() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let store = Store::new(test_database.config.clone()).expect("fleet store");
     let once = store
@@ -535,9 +521,7 @@ async fn fleet_once_run_task_when_available_returns_task_and_release_errors_when
 
 #[tokio::test]
 async fn fleet_once_try_run_task_error_releases_without_marking_done() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let store = Store::new(test_database.config.clone()).expect("fleet store");
     let once = store
@@ -592,9 +576,7 @@ async fn fleet_once_try_run_task_panic_releases_without_marking_done() {
         panic!("once task panic")
     }
 
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let store = Store::new(test_database.config.clone()).expect("fleet store");
     let once = store
@@ -636,9 +618,7 @@ async fn fleet_once_try_run_task_panic_releases_without_marking_done() {
 
 #[tokio::test]
 async fn fleet_once_cancelled_task_releases_without_marking_done() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let store = Store::new(test_database.config.clone()).expect("fleet store");
     let once = store
@@ -708,9 +688,7 @@ async fn fleet_once_cancelled_task_releases_without_marking_done() {
 
 #[tokio::test]
 async fn fleet_once_try_run_task_atomically_commits_task_and_completion_once() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let store = Store::new(test_database.config.clone()).expect("fleet store");
     let once_key = OnceKey::new("atomic-run-task").expect("once key");
@@ -783,9 +761,7 @@ async fn fleet_once_try_run_task_atomically_commits_task_and_completion_once() {
 
 #[tokio::test]
 async fn fleet_once_try_run_task_atomically_rolls_back_task_error_and_allows_retry() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let store = Store::new(test_database.config.clone()).expect("fleet store");
     let once = store
@@ -869,9 +845,7 @@ async fn fleet_once_try_run_task_atomically_rolls_back_task_error_and_allows_ret
 
 #[tokio::test]
 async fn fleet_once_run_task_atomically_when_available_allows_one_concurrent_runner() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let store = Store::new(test_database.config.clone()).expect("fleet store");
     let once = Arc::new(
@@ -947,9 +921,7 @@ async fn fleet_once_run_task_atomically_when_available_allows_one_concurrent_run
 
 #[tokio::test]
 async fn fleet_once_try_run_task_atomically_panic_rolls_back_and_allows_retry() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let store = Store::new(test_database.config.clone()).expect("fleet store");
     let once = store
@@ -1029,9 +1001,7 @@ async fn fleet_once_try_run_task_atomically_panic_rolls_back_and_allows_retry() 
 
 #[tokio::test]
 async fn fleet_once_cancelled_atomic_task_rolls_back_and_releases_without_marking_done() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let store = Store::new(test_database.config.clone()).expect("fleet store");
     let once = store
@@ -1133,9 +1103,7 @@ async fn fleet_once_cancelled_atomic_task_rolls_back_and_releases_without_markin
 
 #[tokio::test]
 async fn fleet_once_allows_one_concurrent_starter_and_records_one_completion() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let store = Store::new(test_database.config.clone()).expect("fleet store");
     let once = Arc::new(
@@ -1212,9 +1180,7 @@ async fn fleet_once_allows_one_concurrent_starter_and_records_one_completion() {
 
 #[tokio::test]
 async fn fleet_once_completion_marker_rolls_back_with_current_transaction() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let store = Store::new(test_database.config.clone()).expect("fleet store");
     let once = store
@@ -1284,9 +1250,7 @@ async fn fleet_once_completion_marker_rolls_back_with_current_transaction() {
 
 #[tokio::test]
 async fn fleet_once_claim_cannot_complete_a_different_once_task() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let store = Store::new(test_database.config.clone()).expect("fleet store");
     let duration = ClaimDuration::expires_after(Duration::from_secs(60)).expect("duration");

@@ -64,14 +64,14 @@ impl Store {
     }
 
     /// Creates and validates this store's schema inside one transaction.
-    pub async fn migrate_schema(&self, pool: &Pool) -> Result<(), DbError> {
+    pub async fn migrate_schema(&self, pool: &WritePool) -> Result<(), DbError> {
         migrate_schema(pool, &self.config).await
     }
 
     /// Runs schema migration inside the caller's active transaction.
     pub async fn migrate_schema_in_current_transaction(
         &self,
-        tx: &mut Tx<'_>,
+        tx: &mut WriteTx<'_>,
     ) -> Result<(), DbError> {
         migrate_schema_in_current_transaction(tx, &self.config).await
     }
@@ -92,7 +92,7 @@ impl Store {
     /// Attempts to claim an absent or expired lease.
     pub async fn try_claim_lease(
         &self,
-        pool: &Pool,
+        pool: &WritePool,
         key: &Key,
         holder_id: &HolderId,
         duration: ClaimDuration,
@@ -107,7 +107,7 @@ impl Store {
     /// Attempts to claim an absent or expired lease inside the caller's transaction.
     pub async fn try_claim_lease_in_current_transaction(
         &self,
-        tx: &mut Tx<'_>,
+        tx: &mut WriteTx<'_>,
         key: &Key,
         holder_id: &HolderId,
         duration: ClaimDuration,
@@ -128,7 +128,7 @@ impl Store {
     /// Attempts to renew a live lease claim, rotating the claim token on success.
     pub async fn try_renew_lease(
         &self,
-        pool: &Pool,
+        pool: &WritePool,
         claim: &Claim,
         duration: ClaimDuration,
     ) -> Result<Option<Claim>, Error> {
@@ -142,7 +142,7 @@ impl Store {
     /// Attempts to renew a live lease claim inside the caller's transaction.
     pub async fn try_renew_lease_in_current_transaction(
         &self,
-        tx: &mut Tx<'_>,
+        tx: &mut WriteTx<'_>,
         claim: &Claim,
         duration: ClaimDuration,
     ) -> Result<Option<Claim>, Error> {
@@ -159,7 +159,7 @@ impl Store {
     }
 
     /// Releases a live lease by expiring it only when the full current claim token matches.
-    pub async fn release_lease(&self, pool: &Pool, claim: &Claim) -> Result<bool, Error> {
+    pub async fn release_lease(&self, pool: &WritePool, claim: &Claim) -> Result<bool, Error> {
         let mut tx = pool.begin_transaction().await?;
         let result = self
             .release_lease_in_current_transaction(&mut tx, claim)
@@ -170,7 +170,7 @@ impl Store {
     /// Releases a live lease by expiring it only when the full current claim token matches inside a transaction.
     pub async fn release_lease_in_current_transaction(
         &self,
-        tx: &mut Tx<'_>,
+        tx: &mut WriteTx<'_>,
         claim: &Claim,
     ) -> Result<bool, Error> {
         let database_operation_observer = tx.database_operation_observer().cloned();

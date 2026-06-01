@@ -2,9 +2,7 @@ use super::*;
 
 #[tokio::test]
 async fn kv_atomic_mutation_preserves_expiration_and_exposes_database_timestamp() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let store = KvStore::new(test_database.config.clone()).expect("kv store");
     let expiring_key = KvKey::from_parts(["atomic", "preserve-expiring"]).expect("key");
@@ -139,9 +137,7 @@ async fn kv_atomic_mutation_preserves_expiration_and_exposes_database_timestamp(
 
 #[tokio::test]
 async fn kv_atomic_mutation_applies_to_locked_live_row_even_if_ttl_expires_during_callback() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let store = KvStore::new(test_database.config.clone()).expect("kv store");
     let preserve_key = KvKey::from_parts(["atomic", "ttl-expires-preserve"]).expect("key");

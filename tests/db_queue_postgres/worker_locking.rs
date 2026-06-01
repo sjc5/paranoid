@@ -2,9 +2,7 @@ use super::*;
 
 #[tokio::test]
 async fn queue_owned_worker_mutations_return_locked_without_mutating_locked_rows() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let queue = Store::new(test_database.config.clone()).expect("queue");
     reset_queue_schema(&test_database).await;
@@ -382,9 +380,7 @@ async fn queue_owned_worker_mutations_return_locked_without_mutating_locked_rows
 
 #[tokio::test]
 async fn queue_bulk_owned_worker_returns_skip_locked_rows_and_return_them_after_release() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let queue = Store::new(test_database.config.clone()).expect("queue");
     reset_queue_schema(&test_database).await;

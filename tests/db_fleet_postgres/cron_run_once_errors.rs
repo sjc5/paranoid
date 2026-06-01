@@ -3,9 +3,7 @@ use super::*;
 
 #[tokio::test]
 async fn fleet_cron_run_once_returns_task_error_and_releases_leadership() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let store = Store::new(test_database.config.clone()).expect("fleet store");
     let cron = store
@@ -46,9 +44,7 @@ async fn fleet_cron_run_once_returns_task_error_and_releases_leadership() {
 
 #[tokio::test]
 async fn fleet_cron_try_run_once_returns_acquire_error_when_schema_is_missing() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let store = Store::new(test_database.config.clone()).expect("fleet store");
     let cron = store
@@ -76,9 +72,7 @@ async fn fleet_cron_try_run_once_returns_acquire_error_when_schema_is_missing() 
 
 #[tokio::test]
 async fn fleet_cron_run_once_returns_acquire_error_when_schema_is_missing() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let store = Store::new(test_database.config.clone()).expect("fleet store");
     let cron = store
@@ -106,9 +100,7 @@ async fn fleet_cron_run_once_returns_acquire_error_when_schema_is_missing() {
 
 #[tokio::test]
 async fn fleet_cron_try_run_once_returns_release_error_when_release_fails() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let store = Store::new(test_database.config.clone()).expect("fleet store");
     let cron = store
@@ -145,9 +137,7 @@ async fn fleet_cron_try_run_once_returns_release_error_when_release_fails() {
 
 #[tokio::test]
 async fn fleet_cron_run_once_returns_task_and_release_errors_when_both_fail() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let store = Store::new(test_database.config.clone()).expect("fleet store");
     let cron = store
@@ -185,9 +175,7 @@ async fn fleet_cron_run_once_returns_task_and_release_errors_when_both_fail() {
 
 #[tokio::test]
 async fn fleet_cron_try_run_once_returns_task_error_and_releases_leadership() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let store = Store::new(test_database.config.clone()).expect("fleet store");
     let cron = store
@@ -232,9 +220,7 @@ async fn fleet_cron_try_run_once_task_panic_releases_leadership() {
         panic!("cron try_run_once panic")
     }
 
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let store = Store::new(test_database.config.clone()).expect("fleet store");
     let cron = store
@@ -282,9 +268,7 @@ async fn fleet_cron_run_once_task_panic_releases_leadership() {
         panic!("cron run_once panic")
     }
 
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let store = Store::new(test_database.config.clone()).expect("fleet store");
     let cron = store
@@ -328,9 +312,7 @@ async fn fleet_cron_run_once_task_panic_releases_leadership() {
 
 #[tokio::test]
 async fn fleet_cron_cancelled_run_once_releases_leadership() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let store = Store::new(test_database.config.clone()).expect("fleet store");
     let cron = store
@@ -387,9 +369,7 @@ async fn fleet_cron_cancelled_run_once_releases_leadership() {
 
 #[tokio::test]
 async fn fleet_cron_start_handle_reports_task_error_and_releases_leadership() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let store = Store::new(test_database.config.clone()).expect("fleet store");
     let cron = store
@@ -438,9 +418,7 @@ async fn fleet_cron_start_handle_task_panic_releases_leadership() {
         panic!("cron task panic")
     }
 
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let store = Store::new(test_database.config.clone()).expect("fleet store");
     let cron = store

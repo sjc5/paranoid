@@ -50,7 +50,7 @@ impl MutexGuard {
         mut self,
     ) -> (
         Mutex,
-        Pool,
+        WritePool,
         Option<MutexManualRenewalClaim>,
         Result<(), Error>,
     ) {

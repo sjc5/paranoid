@@ -2,9 +2,7 @@ use super::*;
 
 #[tokio::test]
 async fn queue_worker_internal_task_panic_cleanup_failure_surfaces_database_error_without_panic() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let queue = Store::new(test_database.config.clone()).expect("queue");
     reset_queue_schema(&test_database).await;
@@ -83,9 +81,7 @@ async fn queue_worker_internal_task_panic_cleanup_failure_surfaces_database_erro
 
 #[tokio::test]
 async fn queue_worker_start_failure_cleanup_failure_surfaces_database_error_without_panic() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let queue = Store::new(test_database.config.clone()).expect("queue");
     reset_queue_schema(&test_database).await;

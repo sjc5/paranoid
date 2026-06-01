@@ -9,7 +9,7 @@ use super::{
 };
 use crate::db::{
     DatabaseOperationKind, DatabaseOperationObserver, DbError, PgIdentifier, PgQualifiedTableName,
-    Pool, PoolConfig, unparameterized_simple_query as db_unparameterized_simple_query,
+    PoolConfig, WritePool, unparameterized_simple_query as db_unparameterized_simple_query,
 };
 use crate::id::SortableId as UniqueTestId;
 use secrecy::SecretString;

@@ -4,9 +4,10 @@ use super::fleet::{
 };
 use super::{
     ComponentSchemaVersion, DatabaseOperationKind, DatabaseOperationObserver, DbError,
-    PgIdentifier, PgQualifiedTableName, PgSqlState, Pool, SchemaLedgerConfig, Tx,
-    duration_from_nonnegative_f64_seconds,
+    PgIdentifier, PgQualifiedTableName, PgSqlState, Pool, SchemaLedgerConfig, Tx, WritePool,
+    WriteTx, duration_from_nonnegative_f64_seconds,
     finish_pool_owned_rollback_only_transaction_and_preserve_rollback_error,
+    finish_pool_owned_write_rollback_only_transaction_and_preserve_rollback_error,
     finish_pool_owned_write_transaction_and_preserve_rollback_error,
     normalize_check_constraint_expression, pg_table_name_set_could_contain_same_relation,
     pooler_safe_query, pooler_safe_query_scalar, random_unit_f64_from_system,
@@ -87,7 +88,7 @@ pub use worker_model::{
 
 async fn finish_queue_pool_transaction<T>(
     operation: &'static str,
-    tx: Tx<'_>,
+    tx: WriteTx<'_>,
     result: Result<T, Error>,
 ) -> Result<T, Error> {
     finish_pool_owned_write_transaction_and_preserve_rollback_error(
@@ -106,10 +107,10 @@ async fn finish_queue_pool_transaction<T>(
 
 async fn finish_queue_validation_transaction<T>(
     operation: &'static str,
-    tx: Tx<'_>,
+    tx: WriteTx<'_>,
     result: Result<T, Error>,
 ) -> Result<T, Error> {
-    finish_pool_owned_rollback_only_transaction_and_preserve_rollback_error(
+    finish_pool_owned_write_rollback_only_transaction_and_preserve_rollback_error(
         operation,
         tx,
         result,

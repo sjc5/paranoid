@@ -4,7 +4,7 @@ impl Store {
     /// Locks one key, exposes its current live value, and applies the chosen mutation.
     pub async fn mutate_key_atomically<F, E>(
         &self,
-        pool: &Pool,
+        pool: &WritePool,
         key: &Key,
         decide_mutation: F,
     ) -> Result<AtomicMutationResult, E>
@@ -26,7 +26,7 @@ impl Store {
     /// Locks one key, requires a live value, and applies the chosen mutation.
     pub async fn mutate_live_key_atomically<F, E>(
         &self,
-        pool: &Pool,
+        pool: &WritePool,
         key: &Key,
         decide_mutation: F,
     ) -> Result<AtomicLiveMutationResult, E>
@@ -54,7 +54,7 @@ impl Store {
     /// Transactional variant of `mutate_live_key_atomically`.
     pub async fn mutate_live_key_atomically_in_current_transaction<F, E>(
         &self,
-        tx: &mut Tx<'_>,
+        tx: &mut WriteTx<'_>,
         key: &Key,
         decide_mutation: F,
     ) -> Result<AtomicLiveMutationResult, E>
@@ -68,7 +68,7 @@ impl Store {
 
     pub(in crate::db::kv) async fn mutate_live_key_atomically_in_transaction_internal<F, E>(
         &self,
-        tx: &mut Tx<'_>,
+        tx: &mut WriteTx<'_>,
         key: &Key,
         decide_mutation: F,
         cleanup_absent_placeholder_on_callback_error: bool,
@@ -105,7 +105,7 @@ impl Store {
     /// Locks one key, initializes it when absent or expired, and applies a live-value mutation.
     pub async fn mutate_live_key_or_insert_initial_value_atomically<I, F, E>(
         &self,
-        pool: &Pool,
+        pool: &WritePool,
         key: &Key,
         initialize_value: I,
         decide_mutation: F,
@@ -144,7 +144,7 @@ impl Store {
         E,
     >(
         &self,
-        tx: &mut Tx<'_>,
+        tx: &mut WriteTx<'_>,
         key: &Key,
         initialize_value: I,
         decide_mutation: F,
@@ -170,7 +170,7 @@ impl Store {
         E,
     >(
         &self,
-        tx: &mut Tx<'_>,
+        tx: &mut WriteTx<'_>,
         key: &Key,
         initialize_value: I,
         decide_mutation: F,
@@ -237,7 +237,7 @@ impl Store {
     /// Locks one key inside the caller's transaction, exposes its current live value, and applies the chosen mutation.
     pub async fn mutate_key_atomically_in_current_transaction<F, E>(
         &self,
-        tx: &mut Tx<'_>,
+        tx: &mut WriteTx<'_>,
         key: &Key,
         decide_mutation: F,
     ) -> Result<AtomicMutationResult, E>
@@ -251,7 +251,7 @@ impl Store {
 
     pub(in crate::db::kv) async fn mutate_key_atomically_in_transaction_internal<F, E>(
         &self,
-        tx: &mut Tx<'_>,
+        tx: &mut WriteTx<'_>,
         key: &Key,
         decide_mutation: F,
         cleanup_absent_placeholder_on_callback_error: bool,

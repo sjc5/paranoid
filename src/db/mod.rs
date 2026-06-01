@@ -3,11 +3,18 @@
 //! This module is available behind the `db` feature. It provides the small
 //! Postgres substrate that Paranoid-owned storage primitives build on.
 //!
-//! Paranoid constructs its own Postgres pool through [`Pool::connect`] so its
-//! storage primitives keep their conservative connection configuration. Apps
-//! may also use that same SQLx pool and active Paranoid transactions for
-//! app-owned tables and queries via [`Pool::sqlx_pool`] and
-//! [`Tx::sqlx_transaction`].
+//! Paranoid constructs its own Postgres pools through [`Pool::connect`] and
+//! [`WritePool::connect`] so its storage primitives keep their conservative
+//! connection configuration. [`Pool`] and [`Tx`] are neutral DB handles; they do
+//! not imply any particular database privileges. [`WritePool`] and [`WriteTx`]
+//! are marker wrappers for APIs that require write authority from the
+//! credentials used to connect. They do not inspect, reduce, or enforce
+//! Postgres privileges.
+//!
+//! Apps may also use the exposed SQLx pool and active Paranoid transactions for
+//! app-owned tables and queries via [`Pool::sqlx_pool`],
+//! [`WritePool::sqlx_pool`], [`Tx::sqlx_transaction`], and
+//! [`WriteTx::sqlx_transaction`].
 //!
 //! For app-owned SQL that should stay portable to transaction-mode connection
 //! poolers, use [`portable_query`],
@@ -64,7 +71,7 @@ pub use identifier::{
     InvalidPgIdentifier, MAX_PG_IDENTIFIER_BYTES, PgIdentifier, PgQualifiedTableName, PgSchemaName,
     QuotedPgIdentifier, QuotedPgQualifiedTableName,
 };
-pub use pool::{Pool, PoolConfig, SslMode, Tx};
+pub use pool::{Pool, PoolConfig, SslMode, Tx, WritePool, WriteTx};
 pub use portable_query::{
     portable_query, portable_query_as, portable_query_scalar, unparameterized_simple_query,
 };
@@ -118,7 +125,7 @@ pub(crate) fn first_8_bytes_as_lower_hex(bytes: &[u8; 32]) -> String {
 
 pub(crate) async fn finish_db_pool_transaction<T>(
     operation: &'static str,
-    tx: Tx<'_>,
+    tx: WriteTx<'_>,
     result: Result<T, DbError>,
 ) -> Result<T, DbError> {
     finish_pool_owned_write_transaction_and_preserve_rollback_error(
@@ -156,7 +163,7 @@ pub(crate) async fn finish_db_pool_validation_transaction<T>(
 
 pub(crate) async fn finish_pool_owned_write_transaction_and_preserve_rollback_error<T, E>(
     operation: &'static str,
-    tx: Tx<'_>,
+    tx: WriteTx<'_>,
     result: Result<T, E>,
     build_database_error: impl FnOnce(DbError) -> E,
     build_rollback_error: impl FnOnce(&'static str, E, DbError) -> E,
@@ -164,6 +171,28 @@ pub(crate) async fn finish_pool_owned_write_transaction_and_preserve_rollback_er
     match result {
         Ok(value) => {
             tx.commit().await.map_err(build_database_error)?;
+            Ok(value)
+        }
+        Err(error) => match tx.rollback().await {
+            Ok(()) => Err(error),
+            Err(rollback_error) => Err(build_rollback_error(operation, error, rollback_error)),
+        },
+    }
+}
+
+pub(crate) async fn finish_pool_owned_write_rollback_only_transaction_and_preserve_rollback_error<
+    T,
+    E,
+>(
+    operation: &'static str,
+    tx: WriteTx<'_>,
+    result: Result<T, E>,
+    build_database_error: impl FnOnce(DbError) -> E,
+    build_rollback_error: impl FnOnce(&'static str, E, DbError) -> E,
+) -> Result<T, E> {
+    match result {
+        Ok(value) => {
+            tx.rollback().await.map_err(build_database_error)?;
             Ok(value)
         }
         Err(error) => match tx.rollback().await {

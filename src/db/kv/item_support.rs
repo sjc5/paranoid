@@ -6,7 +6,7 @@ where
 {
     pub(super) async fn acquire_prepared_slot_in_current_transaction(
         &self,
-        tx: &mut Tx<'_>,
+        tx: &mut WriteTx<'_>,
         prepared: PreparedSlotCandidateKeys,
         value: &T,
         ttl: Ttl,

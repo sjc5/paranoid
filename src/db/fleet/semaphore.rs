@@ -19,7 +19,7 @@ impl Semaphore {
     /// Attempts to acquire one semaphore slot with a generated holder identifier.
     pub(crate) async fn try_acquire_manual_claim(
         &self,
-        pool: &Pool,
+        pool: &WritePool,
     ) -> Result<Option<SemaphoreClaim>, Error> {
         let holder_id = generate_holder_id()?;
         self.try_acquire_manual_claim_for_holder(pool, &holder_id)
@@ -29,7 +29,7 @@ impl Semaphore {
     /// Attempts to acquire one owned semaphore claim guard without waiting.
     pub async fn try_acquire_guard(
         &self,
-        pool: &Pool,
+        pool: &WritePool,
     ) -> Result<Option<SemaphoreClaimGuard>, Error> {
         Ok(self
             .try_acquire_manual_claim(pool)
@@ -40,7 +40,7 @@ impl Semaphore {
     /// Attempts to acquire one semaphore slot with an explicit holder identifier.
     pub(crate) async fn try_acquire_manual_claim_for_holder(
         &self,
-        pool: &Pool,
+        pool: &WritePool,
         holder_id: &HolderId,
     ) -> Result<Option<SemaphoreClaim>, Error> {
         let mut tx = pool.begin_transaction().await?;
@@ -53,7 +53,7 @@ impl Semaphore {
     /// Attempts to acquire one owned semaphore claim guard with an explicit holder identifier.
     pub async fn try_acquire_guard_for_holder(
         &self,
-        pool: &Pool,
+        pool: &WritePool,
         holder_id: &HolderId,
     ) -> Result<Option<SemaphoreClaimGuard>, Error> {
         Ok(self
@@ -65,7 +65,7 @@ impl Semaphore {
     /// Waits until one owned semaphore claim guard is acquired.
     pub async fn acquire_guard_when_available(
         &self,
-        pool: &Pool,
+        pool: &WritePool,
     ) -> Result<SemaphoreClaimGuard, Error> {
         loop {
             if let Some(guard) = self.try_acquire_guard(pool).await? {
@@ -78,7 +78,7 @@ impl Semaphore {
     /// Attempts to acquire one semaphore slot inside the caller's transaction.
     pub(crate) async fn try_acquire_manual_claim_in_current_transaction(
         &self,
-        tx: &mut Tx<'_>,
+        tx: &mut WriteTx<'_>,
     ) -> Result<Option<SemaphoreClaim>, Error> {
         let holder_id = generate_holder_id()?;
         self.try_acquire_manual_claim_for_holder_in_current_transaction(tx, &holder_id)
@@ -88,7 +88,7 @@ impl Semaphore {
     /// Attempts to acquire one semaphore slot with an explicit holder identifier inside the caller's transaction.
     pub(crate) async fn try_acquire_manual_claim_for_holder_in_current_transaction(
         &self,
-        tx: &mut Tx<'_>,
+        tx: &mut WriteTx<'_>,
         holder_id: &HolderId,
     ) -> Result<Option<SemaphoreClaim>, Error> {
         let slot = SemaphoreSlot {
@@ -109,7 +109,7 @@ impl Semaphore {
     /// Releases a live semaphore claim.
     pub(crate) async fn release_manual_claim(
         &self,
-        pool: &Pool,
+        pool: &WritePool,
         claim: &SemaphoreClaim,
     ) -> Result<bool, Error> {
         let mut tx = pool.begin_transaction().await?;
@@ -122,7 +122,7 @@ impl Semaphore {
     /// Releases a live semaphore claim inside the caller's transaction.
     pub(crate) async fn release_manual_claim_in_current_transaction(
         &self,
-        tx: &mut Tx<'_>,
+        tx: &mut WriteTx<'_>,
         claim: &SemaphoreClaim,
     ) -> Result<bool, Error> {
         self.require_claim_matches_semaphore(claim)?;
@@ -169,7 +169,7 @@ impl Semaphore {
     }
 
     /// Deletes all semaphore slots, expired or live.
-    pub async fn reset(&self, pool: &Pool) -> Result<u64, Error> {
+    pub async fn reset(&self, pool: &WritePool) -> Result<u64, Error> {
         Ok(self
             .slots_item
             .delete_entire_namespace_atomically(pool)
@@ -177,7 +177,7 @@ impl Semaphore {
     }
 
     /// Deletes all semaphore slots inside the caller's transaction.
-    pub async fn reset_in_current_transaction(&self, tx: &mut Tx<'_>) -> Result<u64, Error> {
+    pub async fn reset_in_current_transaction(&self, tx: &mut WriteTx<'_>) -> Result<u64, Error> {
         Ok(self
             .slots_item
             .delete_entire_namespace_in_current_transaction(tx)
@@ -187,7 +187,7 @@ impl Semaphore {
     /// Attempts to acquire a semaphore slot, run a guarded task, and release the slot.
     pub async fn try_run_task<T, E, Fut, F>(
         &self,
-        pool: &Pool,
+        pool: &WritePool,
         task: F,
     ) -> Result<SemaphoreTryRunTaskResult<T, E>, Error>
     where
@@ -203,7 +203,7 @@ impl Semaphore {
     /// Waits for a semaphore slot, runs a guarded task, and releases the slot.
     pub async fn run_task_when_available<T, E, Fut, F>(
         &self,
-        pool: &Pool,
+        pool: &WritePool,
         task: F,
     ) -> Result<SemaphoreGuardedTaskResult<T, E>, Error>
     where
@@ -229,7 +229,7 @@ impl Semaphore {
         Ok(())
     }
 
-    fn guard_from_claim(&self, pool: &Pool, claim: SemaphoreClaim) -> SemaphoreClaimGuard {
+    fn guard_from_claim(&self, pool: &WritePool, claim: SemaphoreClaim) -> SemaphoreClaimGuard {
         SemaphoreClaimGuard {
             semaphore: self.clone(),
             pool: pool.clone(),
@@ -241,14 +241,17 @@ impl Semaphore {
 
 impl SemaphoreManualClaimProtocol<'_> {
     /// Attempts to acquire one semaphore claim with a generated holder identifier.
-    pub async fn try_acquire_claim(&self, pool: &Pool) -> Result<Option<SemaphoreClaim>, Error> {
+    pub async fn try_acquire_claim(
+        &self,
+        pool: &WritePool,
+    ) -> Result<Option<SemaphoreClaim>, Error> {
         self.semaphore.try_acquire_manual_claim(pool).await
     }
 
     /// Attempts to acquire one semaphore claim with an explicit holder identifier.
     pub async fn try_acquire_claim_for_holder(
         &self,
-        pool: &Pool,
+        pool: &WritePool,
         holder_id: &HolderId,
     ) -> Result<Option<SemaphoreClaim>, Error> {
         self.semaphore
@@ -259,7 +262,7 @@ impl SemaphoreManualClaimProtocol<'_> {
     /// Attempts to acquire one semaphore claim inside the caller's transaction.
     pub async fn try_acquire_claim_in_current_transaction(
         &self,
-        tx: &mut Tx<'_>,
+        tx: &mut WriteTx<'_>,
     ) -> Result<Option<SemaphoreClaim>, Error> {
         self.semaphore
             .try_acquire_manual_claim_in_current_transaction(tx)
@@ -269,7 +272,7 @@ impl SemaphoreManualClaimProtocol<'_> {
     /// Attempts to acquire one semaphore claim with an explicit holder identifier inside the caller's transaction.
     pub async fn try_acquire_claim_for_holder_in_current_transaction(
         &self,
-        tx: &mut Tx<'_>,
+        tx: &mut WriteTx<'_>,
         holder_id: &HolderId,
     ) -> Result<Option<SemaphoreClaim>, Error> {
         self.semaphore
@@ -278,14 +281,18 @@ impl SemaphoreManualClaimProtocol<'_> {
     }
 
     /// Releases a semaphore claim acquired through the manual claim protocol.
-    pub async fn release_claim(&self, pool: &Pool, claim: &SemaphoreClaim) -> Result<bool, Error> {
+    pub async fn release_claim(
+        &self,
+        pool: &WritePool,
+        claim: &SemaphoreClaim,
+    ) -> Result<bool, Error> {
         self.semaphore.release_manual_claim(pool, claim).await
     }
 
     /// Releases a semaphore claim acquired through the manual claim protocol inside the caller's transaction.
     pub async fn release_claim_in_current_transaction(
         &self,
-        tx: &mut Tx<'_>,
+        tx: &mut WriteTx<'_>,
         claim: &SemaphoreClaim,
     ) -> Result<bool, Error> {
         self.semaphore

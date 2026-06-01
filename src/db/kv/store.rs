@@ -38,14 +38,14 @@ impl Store {
     }
 
     /// Creates and validates this store's schema inside one transaction.
-    pub async fn migrate_schema(&self, pool: &Pool) -> Result<(), crate::db::Error> {
+    pub async fn migrate_schema(&self, pool: &WritePool) -> Result<(), crate::db::Error> {
         migrate_schema(pool, &self.config).await
     }
 
     /// Runs schema migration inside the caller's active transaction.
     pub async fn migrate_schema_in_current_transaction(
         &self,
-        tx: &mut Tx<'_>,
+        tx: &mut WriteTx<'_>,
     ) -> Result<(), crate::db::Error> {
         migrate_schema_in_current_transaction(tx, &self.config).await
     }
@@ -66,7 +66,7 @@ impl Store {
     /// Stores bytes for a key.
     pub async fn set_bytes(
         &self,
-        pool: &Pool,
+        pool: &WritePool,
         key: &Key,
         value: &[u8],
         ttl: Ttl,
@@ -81,7 +81,7 @@ impl Store {
     /// Stores bytes for a key inside the caller's current transaction.
     pub async fn set_bytes_in_current_transaction(
         &self,
-        tx: &mut Tx<'_>,
+        tx: &mut WriteTx<'_>,
         key: &Key,
         value: &[u8],
         ttl: Ttl,
@@ -100,7 +100,7 @@ impl Store {
     /// Stores bytes for a key and returns the database statement timestamp for the write.
     pub async fn set_bytes_and_return_database_timestamp(
         &self,
-        pool: &Pool,
+        pool: &WritePool,
         key: &Key,
         value: &[u8],
         ttl: Ttl,
@@ -122,7 +122,7 @@ impl Store {
     /// Stores bytes for a key inside the caller's transaction and returns the database timestamp.
     pub async fn set_bytes_and_return_database_timestamp_in_current_transaction(
         &self,
-        tx: &mut Tx<'_>,
+        tx: &mut WriteTx<'_>,
         key: &Key,
         value: &[u8],
         ttl: Ttl,
@@ -141,7 +141,7 @@ impl Store {
     /// Stores bytes only when the key is absent or expired.
     pub async fn set_bytes_if_not_exists(
         &self,
-        pool: &Pool,
+        pool: &WritePool,
         key: &Key,
         value: &[u8],
         ttl: Ttl,
@@ -156,7 +156,7 @@ impl Store {
     /// Stores bytes only when the key is absent or expired inside the caller's transaction.
     pub async fn set_bytes_if_not_exists_in_current_transaction(
         &self,
-        tx: &mut Tx<'_>,
+        tx: &mut WriteTx<'_>,
         key: &Key,
         value: &[u8],
         ttl: Ttl,
@@ -175,7 +175,7 @@ impl Store {
     /// Stores bytes only when the key is absent or expired, returning write timestamp metadata.
     pub async fn set_bytes_if_not_exists_and_return_database_timestamp(
         &self,
-        pool: &Pool,
+        pool: &WritePool,
         key: &Key,
         value: &[u8],
         ttl: Ttl,
@@ -197,7 +197,7 @@ impl Store {
     /// Transactional variant of `set_bytes_if_not_exists_and_return_database_timestamp`.
     pub async fn set_bytes_if_not_exists_and_return_database_timestamp_in_current_transaction(
         &self,
-        tx: &mut Tx<'_>,
+        tx: &mut WriteTx<'_>,
         key: &Key,
         value: &[u8],
         ttl: Ttl,
@@ -295,7 +295,7 @@ impl Store {
     /// Stores bytes for many unique keys with one shared TTL.
     pub async fn set_bytes_multi(
         &self,
-        pool: &Pool,
+        pool: &WritePool,
         entries: &[BytesSetEntry],
         ttl: Ttl,
     ) -> Result<(), Error> {
@@ -309,7 +309,7 @@ impl Store {
     /// Stores bytes for many unique keys inside the caller's transaction.
     pub async fn set_bytes_multi_in_current_transaction(
         &self,
-        tx: &mut Tx<'_>,
+        tx: &mut WriteTx<'_>,
         entries: &[BytesSetEntry],
         ttl: Ttl,
     ) -> Result<(), Error> {
@@ -324,7 +324,7 @@ impl Store {
     }
 
     /// Updates `updated_at` for a non-expired key without changing its value or expiration.
-    pub async fn touch_key(&self, pool: &Pool, key: &Key) -> Result<(), Error> {
+    pub async fn touch_key(&self, pool: &WritePool, key: &Key) -> Result<(), Error> {
         let mut tx = pool.begin_transaction().await?;
         let result = self.touch_key_in_current_transaction(&mut tx, key).await;
         finish_kv_pool_transaction(KV_OPERATION_TOUCH_KEY, tx, result).await
@@ -333,7 +333,7 @@ impl Store {
     /// Updates `updated_at` for a non-expired key inside the caller's transaction.
     pub async fn touch_key_in_current_transaction(
         &self,
-        tx: &mut Tx<'_>,
+        tx: &mut WriteTx<'_>,
         key: &Key,
     ) -> Result<(), Error> {
         let database_operation_observer = tx.database_operation_observer().cloned();
@@ -342,7 +342,7 @@ impl Store {
     }
 
     /// Replaces the expiration for a non-expired key.
-    pub async fn set_key_ttl(&self, pool: &Pool, key: &Key, ttl: Ttl) -> Result<(), Error> {
+    pub async fn set_key_ttl(&self, pool: &WritePool, key: &Key, ttl: Ttl) -> Result<(), Error> {
         let mut tx = pool.begin_transaction().await?;
         let result = self
             .set_key_ttl_in_current_transaction(&mut tx, key, ttl)
@@ -353,7 +353,7 @@ impl Store {
     /// Replaces the expiration for a non-expired key inside the caller's transaction.
     pub async fn set_key_ttl_in_current_transaction(
         &self,
-        tx: &mut Tx<'_>,
+        tx: &mut WriteTx<'_>,
         key: &Key,
         ttl: Ttl,
     ) -> Result<(), Error> {
@@ -368,7 +368,7 @@ impl Store {
     }
 
     /// Marks a non-expired key as expired without physically deleting the row.
-    pub async fn expire_key(&self, pool: &Pool, key: &Key) -> Result<(), Error> {
+    pub async fn expire_key(&self, pool: &WritePool, key: &Key) -> Result<(), Error> {
         let mut tx = pool.begin_transaction().await?;
         let result = self.expire_key_in_current_transaction(&mut tx, key).await;
         finish_kv_pool_transaction(KV_OPERATION_EXPIRE_KEY, tx, result).await
@@ -377,7 +377,7 @@ impl Store {
     /// Marks a non-expired key as expired inside the caller's transaction.
     pub async fn expire_key_in_current_transaction(
         &self,
-        tx: &mut Tx<'_>,
+        tx: &mut WriteTx<'_>,
         key: &Key,
     ) -> Result<(), Error> {
         let database_operation_observer = tx.database_operation_observer().cloned();
@@ -386,7 +386,7 @@ impl Store {
     }
 
     /// Deletes a non-expired key.
-    pub async fn delete_key(&self, pool: &Pool, key: &Key) -> Result<(), Error> {
+    pub async fn delete_key(&self, pool: &WritePool, key: &Key) -> Result<(), Error> {
         let mut tx = pool.begin_transaction().await?;
         let result = self.delete_key_in_current_transaction(&mut tx, key).await;
         finish_kv_pool_transaction(KV_OPERATION_DELETE_KEY, tx, result).await
@@ -395,7 +395,7 @@ impl Store {
     /// Deletes a non-expired key inside the caller's current transaction.
     pub async fn delete_key_in_current_transaction(
         &self,
-        tx: &mut Tx<'_>,
+        tx: &mut WriteTx<'_>,
         key: &Key,
     ) -> Result<(), Error> {
         let database_operation_observer = tx.database_operation_observer().cloned();
@@ -430,7 +430,7 @@ impl Store {
     /// Physically deletes at most `batch_size` expired keys.
     pub async fn delete_expired_keys_once(
         &self,
-        pool: &Pool,
+        pool: &WritePool,
         batch_size: u32,
     ) -> Result<u64, Error> {
         let mut tx = pool.begin_transaction().await?;
@@ -443,7 +443,7 @@ impl Store {
     /// Physically deletes at most `batch_size` expired keys inside a transaction.
     pub async fn delete_expired_keys_once_in_current_transaction(
         &self,
-        tx: &mut Tx<'_>,
+        tx: &mut WriteTx<'_>,
         batch_size: u32,
     ) -> Result<u64, Error> {
         let database_operation_observer = tx.database_operation_observer().cloned();
@@ -458,7 +458,7 @@ impl Store {
     /// Physically deletes expired keys in batches until one batch observes none remaining.
     pub async fn delete_expired_keys_until_empty(
         &self,
-        pool: &Pool,
+        pool: &WritePool,
         batch_size: u32,
     ) -> Result<u64, Error> {
         self.delete_expired_keys_until_empty_with_delay_between_batches(
@@ -472,7 +472,7 @@ impl Store {
     /// Physically deletes expired keys in batches until one batch observes none remaining.
     pub async fn delete_expired_keys_until_empty_with_delay_between_batches(
         &self,
-        pool: &Pool,
+        pool: &WritePool,
         batch_size: u32,
         delay_between_full_batches: Duration,
     ) -> Result<u64, Error> {
@@ -591,7 +591,7 @@ impl Store {
     /// Physically deletes at most `batch_size` keys under a prefix, expired or live.
     pub async fn delete_keys_with_prefix_once(
         &self,
-        pool: &Pool,
+        pool: &WritePool,
         prefix: &KeyPrefix,
         batch_size: u32,
     ) -> Result<u64, Error> {
@@ -605,7 +605,7 @@ impl Store {
     /// Physically deletes at most `batch_size` keys under a prefix inside a transaction.
     pub async fn delete_keys_with_prefix_once_in_current_transaction(
         &self,
-        tx: &mut Tx<'_>,
+        tx: &mut WriteTx<'_>,
         prefix: &KeyPrefix,
         batch_size: u32,
     ) -> Result<u64, Error> {
@@ -622,7 +622,7 @@ impl Store {
     /// Acquires one expired or absent candidate slot and stores bytes in it.
     pub async fn acquire_slot_bytes(
         &self,
-        pool: &Pool,
+        pool: &WritePool,
         candidate_keys: &[Key],
         value: &[u8],
         ttl: Ttl,
@@ -648,7 +648,7 @@ impl Store {
     /// Acquires one expired or absent candidate slot inside the caller's transaction.
     pub async fn acquire_slot_bytes_in_current_transaction(
         &self,
-        tx: &mut Tx<'_>,
+        tx: &mut WriteTx<'_>,
         candidate_keys: &[Key],
         value: &[u8],
         ttl: Ttl,

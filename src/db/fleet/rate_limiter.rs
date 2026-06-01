@@ -14,7 +14,7 @@ impl RateLimiter {
     /// Attempts to acquire one rate-limiter permit without waiting.
     pub(crate) async fn try_acquire_manual_permit(
         &self,
-        pool: &Pool,
+        pool: &WritePool,
     ) -> Result<RateLimiterManualPermitAcquireResult, Error> {
         self.wrap_acquire_result(self.throttler.try_acquire_manual_permit(pool).await?)
     }
@@ -22,7 +22,7 @@ impl RateLimiter {
     /// Attempts to acquire one owned rate-limiter permit guard without waiting.
     pub async fn try_acquire_guard(
         &self,
-        pool: &Pool,
+        pool: &WritePool,
     ) -> Result<RateLimiterGuardAcquireResult, Error> {
         self.wrap_guard_acquire_result(self.throttler.try_acquire_guard(pool).await?)
     }
@@ -30,7 +30,7 @@ impl RateLimiter {
     /// Waits until a rate-limiter permit is acquired.
     pub(crate) async fn acquire_manual_permit_when_ready(
         &self,
-        pool: &Pool,
+        pool: &WritePool,
     ) -> Result<RateLimiterPermit, Error> {
         Ok(self.wrap_permit(
             self.throttler
@@ -42,7 +42,7 @@ impl RateLimiter {
     /// Waits until an owned rate-limiter permit guard is acquired.
     pub async fn acquire_guard_when_ready(
         &self,
-        pool: &Pool,
+        pool: &WritePool,
     ) -> Result<RateLimiterPermitGuard, Error> {
         Ok(self.wrap_guard(self.throttler.acquire_guard_when_ready(pool).await?))
     }
@@ -50,7 +50,7 @@ impl RateLimiter {
     /// Attempts to acquire one rate-limiter permit and run a guarded task.
     pub async fn try_run_task<T, E, Fut, F>(
         &self,
-        pool: &Pool,
+        pool: &WritePool,
         task: F,
     ) -> Result<RateLimiterTryRunTaskResult<T, E>, Error>
     where
@@ -70,7 +70,7 @@ impl RateLimiter {
     /// Waits until a rate-limiter permit is acquired and runs a guarded task.
     pub async fn run_task_when_ready<T, E, Fut, F>(
         &self,
-        pool: &Pool,
+        pool: &WritePool,
         task: F,
     ) -> Result<RateLimiterGuardedTaskResult<T, E>, Error>
     where
@@ -142,7 +142,7 @@ impl RateLimiter {
     }
 
     /// Deletes rate-limiter state.
-    pub async fn reset(&self, pool: &Pool) -> Result<(), Error> {
+    pub async fn reset(&self, pool: &WritePool) -> Result<(), Error> {
         self.throttler.reset(pool).await
     }
 }
@@ -151,13 +151,16 @@ impl RateLimiterManualPermitProtocol<'_> {
     /// Attempts to acquire one rate-limiter permit through the manual permit protocol.
     pub async fn try_acquire_permit(
         &self,
-        pool: &Pool,
+        pool: &WritePool,
     ) -> Result<RateLimiterManualPermitAcquireResult, Error> {
         self.rate_limiter.try_acquire_manual_permit(pool).await
     }
 
     /// Waits until a rate-limiter permit is acquired through the manual permit protocol.
-    pub async fn acquire_permit_when_ready(&self, pool: &Pool) -> Result<RateLimiterPermit, Error> {
+    pub async fn acquire_permit_when_ready(
+        &self,
+        pool: &WritePool,
+    ) -> Result<RateLimiterPermit, Error> {
         self.rate_limiter
             .acquire_manual_permit_when_ready(pool)
             .await

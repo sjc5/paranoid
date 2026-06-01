@@ -2,9 +2,7 @@ use super::*;
 
 #[tokio::test]
 async fn queue_cleanup_completed_jobs_skips_locked_rows_and_deletes_them_after_release() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let queue = Store::new(test_database.config.clone()).expect("queue");
     reset_queue_schema(&test_database).await;
@@ -108,9 +106,7 @@ async fn queue_cleanup_completed_jobs_skips_locked_rows_and_deletes_them_after_r
 
 #[tokio::test]
 async fn queue_cleanup_dead_letter_jobs_skips_locked_rows_and_deletes_them_after_release() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let queue = Store::new(test_database.config.clone()).expect("queue");
     reset_queue_schema(&test_database).await;
@@ -209,9 +205,7 @@ async fn queue_cleanup_dead_letter_jobs_skips_locked_rows_and_deletes_them_after
 
 #[tokio::test]
 async fn queue_reclaim_stale_running_jobs_skips_locked_rows_and_reclaims_them_after_release() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let queue = Store::new(test_database.config.clone()).expect("queue");
     reset_queue_schema(&test_database).await;

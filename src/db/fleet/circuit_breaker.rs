@@ -16,7 +16,7 @@ impl CircuitBreaker {
     /// Attempts to acquire circuit-breaker permission without waiting.
     pub(crate) async fn try_acquire_manual_permit(
         &self,
-        pool: &Pool,
+        pool: &WritePool,
     ) -> Result<CircuitBreakerManualPermitAcquireResult, Error> {
         match self.throttler.try_acquire_manual_permit(pool).await? {
             ThrottlerManualPermitAcquireResult::Acquired(permit) => Ok(
@@ -32,7 +32,7 @@ impl CircuitBreaker {
     /// Attempts to acquire an owned circuit-breaker permit guard without waiting.
     pub async fn try_acquire_guard(
         &self,
-        pool: &Pool,
+        pool: &WritePool,
     ) -> Result<CircuitBreakerGuardAcquireResult, Error> {
         match self.throttler.try_acquire_guard(pool).await? {
             ThrottlerGuardAcquireResult::Acquired(guard) => Ok(
@@ -48,7 +48,7 @@ impl CircuitBreaker {
     /// Waits until circuit-breaker permission is acquired.
     pub(crate) async fn acquire_manual_permit_when_ready(
         &self,
-        pool: &Pool,
+        pool: &WritePool,
     ) -> Result<CircuitBreakerPermit, Error> {
         Ok(self.wrap_permit(
             self.throttler
@@ -60,7 +60,7 @@ impl CircuitBreaker {
     /// Waits until an owned circuit-breaker permit guard is acquired.
     pub async fn acquire_guard_when_ready(
         &self,
-        pool: &Pool,
+        pool: &WritePool,
     ) -> Result<CircuitBreakerPermitGuard, Error> {
         Ok(self.wrap_guard(self.throttler.acquire_guard_when_ready(pool).await?))
     }
@@ -68,7 +68,7 @@ impl CircuitBreaker {
     /// Attempts to acquire circuit-breaker permission and run a guarded task.
     pub async fn try_run_task<T, E, Fut, F>(
         &self,
-        pool: &Pool,
+        pool: &WritePool,
         task: F,
     ) -> Result<CircuitBreakerTryRunTaskResult<T, E>, Error>
     where
@@ -88,7 +88,7 @@ impl CircuitBreaker {
     /// Waits until circuit-breaker permission is acquired and runs a guarded task.
     pub async fn run_task_when_ready<T, E, Fut, F>(
         &self,
-        pool: &Pool,
+        pool: &WritePool,
         task: F,
     ) -> Result<CircuitBreakerGuardedTaskResult<T, E>, Error>
     where
@@ -105,7 +105,7 @@ impl CircuitBreaker {
     /// Releases a circuit-breaker permit after a successful task.
     pub(crate) async fn release_manual_permit_after_success(
         &self,
-        pool: &Pool,
+        pool: &WritePool,
         permit: &CircuitBreakerPermit,
     ) -> Result<CircuitBreakerReleaseResult, Error> {
         self.throttler
@@ -117,7 +117,7 @@ impl CircuitBreaker {
     /// Releases a circuit-breaker permit after a failed task.
     pub(crate) async fn release_manual_permit_after_failure(
         &self,
-        pool: &Pool,
+        pool: &WritePool,
         permit: &CircuitBreakerPermit,
     ) -> Result<CircuitBreakerReleaseResult, Error> {
         self.throttler
@@ -129,7 +129,7 @@ impl CircuitBreaker {
     /// Releases a circuit-breaker permit when the protected task did not run.
     pub(crate) async fn release_manual_permit_without_task_outcome(
         &self,
-        pool: &Pool,
+        pool: &WritePool,
         permit: &CircuitBreakerPermit,
     ) -> Result<CircuitBreakerReleaseResult, Error> {
         self.throttler
@@ -162,17 +162,17 @@ impl CircuitBreaker {
     }
 
     /// Deletes circuit-breaker state.
-    pub async fn reset(&self, pool: &Pool) -> Result<(), Error> {
+    pub async fn reset(&self, pool: &WritePool) -> Result<(), Error> {
         self.throttler.reset(pool).await
     }
 
     /// Opens the circuit.
-    pub async fn open(&self, pool: &Pool) -> Result<(), Error> {
+    pub async fn open(&self, pool: &WritePool) -> Result<(), Error> {
         self.throttler.open_circuit(pool).await
     }
 
     /// Closes the circuit and resets failure count.
-    pub async fn close(&self, pool: &Pool) -> Result<(), Error> {
+    pub async fn close(&self, pool: &WritePool) -> Result<(), Error> {
         self.throttler.close_circuit(pool).await
     }
 }
@@ -181,7 +181,7 @@ impl CircuitBreakerManualPermitProtocol<'_> {
     /// Attempts to acquire circuit-breaker permission through the manual permit protocol.
     pub async fn try_acquire_permit(
         &self,
-        pool: &Pool,
+        pool: &WritePool,
     ) -> Result<CircuitBreakerManualPermitAcquireResult, Error> {
         self.circuit_breaker.try_acquire_manual_permit(pool).await
     }
@@ -189,7 +189,7 @@ impl CircuitBreakerManualPermitProtocol<'_> {
     /// Waits until circuit-breaker permission is acquired through the manual permit protocol.
     pub async fn acquire_permit_when_ready(
         &self,
-        pool: &Pool,
+        pool: &WritePool,
     ) -> Result<CircuitBreakerPermit, Error> {
         self.circuit_breaker
             .acquire_manual_permit_when_ready(pool)
@@ -199,7 +199,7 @@ impl CircuitBreakerManualPermitProtocol<'_> {
     /// Releases a circuit-breaker permit acquired through the manual permit protocol after a successful task.
     pub async fn release_permit_after_success(
         &self,
-        pool: &Pool,
+        pool: &WritePool,
         permit: &CircuitBreakerPermit,
     ) -> Result<CircuitBreakerReleaseResult, Error> {
         self.circuit_breaker
@@ -210,7 +210,7 @@ impl CircuitBreakerManualPermitProtocol<'_> {
     /// Releases a circuit-breaker permit acquired through the manual permit protocol after a failed task.
     pub async fn release_permit_after_failure(
         &self,
-        pool: &Pool,
+        pool: &WritePool,
         permit: &CircuitBreakerPermit,
     ) -> Result<CircuitBreakerReleaseResult, Error> {
         self.circuit_breaker
@@ -221,7 +221,7 @@ impl CircuitBreakerManualPermitProtocol<'_> {
     /// Releases a circuit-breaker permit acquired through the manual permit protocol when the protected task did not run.
     pub async fn release_permit_without_task_outcome(
         &self,
-        pool: &Pool,
+        pool: &WritePool,
         permit: &CircuitBreakerPermit,
     ) -> Result<CircuitBreakerReleaseResult, Error> {
         self.circuit_breaker

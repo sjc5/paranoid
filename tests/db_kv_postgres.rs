@@ -7,7 +7,7 @@ use common::{
 };
 use paranoid::crypto::{Error, Key32, Keyset, PublicBytes, derive_keyset_from_latest_first_keys};
 use paranoid::db::{
-    Error as DbError, PgIdentifier, PgQualifiedTableName, Pool, PoolConfig,
+    Error as DbError, PgIdentifier, PgQualifiedTableName, Pool, PoolConfig, WritePool,
     portable_query as db_query, portable_query_scalar as db_query_scalar,
     unparameterized_simple_query as db_unparameterized_simple_query,
 };
@@ -48,7 +48,7 @@ mod support;
 
 use support::*;
 
-async fn migrate_kv_schema(pool: &Pool, config: &KvStoreConfig) -> Result<(), DbError> {
+async fn migrate_kv_schema(pool: &WritePool, config: &KvStoreConfig) -> Result<(), DbError> {
     KvStore::new(config.clone())
         .expect("KV store")
         .migrate_schema(pool)

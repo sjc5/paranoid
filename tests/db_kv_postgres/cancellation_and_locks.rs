@@ -2,9 +2,7 @@ use super::*;
 
 #[tokio::test]
 async fn kv_atomic_mutation_rejection_cleans_up_absent_key_placeholder() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let store = KvStore::new(test_database.config.clone()).expect("kv store");
     let key = KvKey::from_parts(["atomic", "reject"]).expect("key");
@@ -40,9 +38,7 @@ async fn kv_atomic_mutation_rejection_cleans_up_absent_key_placeholder() {
 
 #[tokio::test]
 async fn kv_atomic_mutation_serializes_absent_key_races_with_placeholder_lock() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let store = KvStore::new(test_database.config.clone()).expect("kv store");
     let key = KvKey::from_parts(["atomic", "absent-race"]).expect("key");
@@ -118,9 +114,7 @@ async fn kv_atomic_mutation_serializes_absent_key_races_with_placeholder_lock() 
 
 #[tokio::test]
 async fn kv_atomic_mutation_future_abort_while_waiting_for_lock_does_not_write_later() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let store = KvStore::new(test_database.config.clone()).expect("kv store");
     let key = KvKey::from_parts(["atomic", "cancel-while-waiting"]).expect("key");
@@ -217,10 +211,7 @@ async fn kv_atomic_mutation_future_abort_while_waiting_for_lock_does_not_write_l
 
 #[tokio::test]
 async fn kv_future_abort_while_waiting_for_pool_connection_does_not_write_later() {
-    let Some(database_url) = test_database_url() else {
-        eprintln!("skipping Postgres KV test; set TEST_DSN or PARANOID_TEST_DATABASE_URL to run");
-        return;
-    };
+    let database_url = test_database_url();
 
     let paranoid_pool = connect_paranoid_pool_with_max_connections(&database_url, 1).await;
     let sqlx_pool = connect_sqlx_pool(&database_url).await;
@@ -276,10 +267,7 @@ async fn kv_future_abort_while_waiting_for_pool_connection_does_not_write_later(
 #[tokio::test]
 async fn kv_set_multi_touch_and_set_if_not_exists_future_abort_while_waiting_for_pool_connection_does_not_write_later()
  {
-    let Some(database_url) = test_database_url() else {
-        eprintln!("skipping Postgres KV test; set TEST_DSN or PARANOID_TEST_DATABASE_URL to run");
-        return;
-    };
+    let database_url = test_database_url();
 
     let paranoid_pool = connect_paranoid_pool_with_max_connections(&database_url, 1).await;
     let sqlx_pool = connect_sqlx_pool(&database_url).await;
@@ -405,9 +393,7 @@ async fn kv_set_multi_touch_and_set_if_not_exists_future_abort_while_waiting_for
 
 #[tokio::test]
 async fn kv_public_write_future_abort_while_waiting_for_row_lock_does_not_write_later() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let store = KvStore::new(test_database.config.clone()).expect("kv store");
     let key = KvKey::from_parts(["cancel", "row-lock"]).expect("key");
@@ -471,10 +457,7 @@ async fn kv_public_write_future_abort_while_waiting_for_row_lock_does_not_write_
 #[tokio::test]
 async fn kv_destructive_maintenance_future_abort_while_waiting_for_pool_connection_does_not_delete_later()
  {
-    let Some(database_url) = test_database_url() else {
-        eprintln!("skipping Postgres KV test; set TEST_DSN or PARANOID_TEST_DATABASE_URL to run");
-        return;
-    };
+    let database_url = test_database_url();
 
     let paranoid_pool = connect_paranoid_pool_with_max_connections(&database_url, 1).await;
     let sqlx_pool = connect_sqlx_pool(&database_url).await;
@@ -600,9 +583,7 @@ async fn kv_destructive_maintenance_future_abort_while_waiting_for_pool_connecti
 
 #[tokio::test]
 async fn kv_delete_expired_until_empty_future_abort_during_batch_delay_does_not_delete_later() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let store = KvStore::new(test_database.config.clone()).expect("kv store");
     let expired_a = KvKey::from_parts(["cancel-delay", "expired-a"]).expect("key");
@@ -677,10 +658,7 @@ async fn kv_delete_expired_until_empty_future_abort_during_batch_delay_does_not_
 #[tokio::test]
 async fn kv_item_delete_entire_namespace_atomically_future_abort_while_waiting_for_pool_connection_does_not_delete_later()
  {
-    let Some(database_url) = test_database_url() else {
-        eprintln!("skipping Postgres KV test; set TEST_DSN or PARANOID_TEST_DATABASE_URL to run");
-        return;
-    };
+    let database_url = test_database_url();
 
     let paranoid_pool = connect_paranoid_pool_with_max_connections(&database_url, 1).await;
     let sqlx_pool = connect_sqlx_pool(&database_url).await;
@@ -778,9 +756,7 @@ async fn kv_item_delete_entire_namespace_atomically_future_abort_while_waiting_f
 #[tokio::test]
 async fn kv_item_delete_entire_namespace_atomically_future_abort_while_waiting_for_row_lock_rolls_back()
  {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let store = KvStore::new(test_database.config.clone()).expect("kv store");
     let item = KvItem::<TestKvPayload>::new_plain(

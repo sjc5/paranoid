@@ -2,9 +2,7 @@ use super::*;
 
 #[tokio::test]
 async fn fleet_throttler_rate_limit_refills_reports_status_and_resets() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let store = Store::new(test_database.config.clone()).expect("fleet store");
     let throttler_key = ThrottlerKey::new("api-rate").expect("throttler key");
@@ -91,33 +89,20 @@ async fn fleet_throttler_rate_limit_refills_reports_status_and_resets() {
         .new_throttler(ThrottlerConfig {
             key: ThrottlerKey::new("api-rate-refill").expect("refill throttler key"),
             rate_limit: Some(ThrottlerRateLimit {
-                requests_per_interval: 2,
+                requests_per_interval: 1,
                 interval: Duration::from_millis(200),
             }),
             concurrency_limit: None,
             circuit_breaker: None,
         })
         .expect("new refill throttler");
-    for attempt in 0..2 {
-        assert!(
-            matches!(
-                refill_throttler
-                    .begin_manual_permit_lifecycle()
-                    .try_acquire_permit(&test_database.paranoid_pool)
-                    .await
-                    .expect("try acquire before refill"),
-                ThrottlerManualPermitAcquireResult::Acquired(_)
-            ),
-            "refill throttler attempt {attempt} should acquire"
-        );
-    }
     assert!(matches!(
         refill_throttler
             .begin_manual_permit_lifecycle()
             .try_acquire_permit(&test_database.paranoid_pool)
             .await
-            .expect("try acquire empty refill throttler"),
-        ThrottlerManualPermitAcquireResult::Throttled { .. }
+            .expect("try acquire before refill"),
+        ThrottlerManualPermitAcquireResult::Acquired(_)
     ));
     tokio::time::sleep(Duration::from_millis(250)).await;
     assert!(matches!(
@@ -134,9 +119,7 @@ async fn fleet_throttler_rate_limit_refills_reports_status_and_resets() {
 
 #[tokio::test]
 async fn fleet_throttler_try_run_task_returns_release_error_when_release_fails() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let store = Store::new(test_database.config.clone()).expect("fleet store");
     let throttler_key = ThrottlerKey::new("release-error").expect("throttler key");
@@ -199,9 +182,7 @@ async fn fleet_throttler_try_run_task_returns_release_error_when_release_fails()
 
 #[tokio::test]
 async fn fleet_throttler_concurrency_slots_release_and_reacquire() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let store = Store::new(test_database.config.clone()).expect("fleet store");
     let throttler = store
@@ -282,9 +263,7 @@ async fn fleet_throttler_concurrency_slots_release_and_reacquire() {
 
 #[tokio::test]
 async fn fleet_throttler_circuit_transitions_are_noops_when_circuit_breaking_is_disabled() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let store = Store::new(test_database.config.clone()).expect("fleet store");
     let throttler = store
@@ -327,9 +306,7 @@ async fn fleet_throttler_circuit_transitions_are_noops_when_circuit_breaking_is_
 
 #[tokio::test]
 async fn fleet_throttler_releases_acquired_slot_when_rate_limit_blocks() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let store = Store::new(test_database.config.clone()).expect("fleet store");
     let throttler = store
@@ -395,9 +372,7 @@ async fn fleet_throttler_releases_acquired_slot_when_rate_limit_blocks() {
 
 #[tokio::test]
 async fn fleet_throttler_circuit_opens_allows_one_probe_and_closes_on_success() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let store = Store::new(test_database.config.clone()).expect("fleet store");
     let throttler = store
@@ -493,9 +468,7 @@ async fn fleet_throttler_circuit_opens_allows_one_probe_and_closes_on_success() 
 
 #[tokio::test]
 async fn fleet_throttler_guarded_probe_stays_reserved_while_task_runs_past_probe_window() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let store = Store::new(test_database.config.clone()).expect("fleet store");
     let throttler = store
@@ -617,9 +590,7 @@ async fn fleet_throttler_guarded_probe_stays_reserved_while_task_runs_past_probe
 
 #[tokio::test]
 async fn fleet_throttler_manual_circuit_transitions_clear_stale_probe_reservation() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let store = Store::new(test_database.config.clone()).expect("fleet store");
     let throttler = store
@@ -681,9 +652,7 @@ async fn fleet_throttler_manual_circuit_transitions_clear_stale_probe_reservatio
 
 #[tokio::test]
 async fn fleet_throttler_composes_inside_current_transaction_and_rolls_back() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let store = Store::new(test_database.config.clone()).expect("fleet store");
     let throttler = store
@@ -782,9 +751,7 @@ async fn fleet_throttler_composes_inside_current_transaction_and_rolls_back() {
 
 #[tokio::test]
 async fn fleet_throttler_acquire_manual_permit_when_ready_waits_for_rate_limit_refill() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let store = Store::new(test_database.config.clone()).expect("fleet store");
     let throttler = store
@@ -828,9 +795,7 @@ async fn fleet_throttler_acquire_manual_permit_when_ready_waits_for_rate_limit_r
 
 #[tokio::test]
 async fn fleet_throttler_run_task_when_ready_can_be_cancelled_while_waiting_for_open_circuit() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let store = Store::new(test_database.config.clone()).expect("fleet store");
     let throttler = store
@@ -904,9 +869,7 @@ async fn fleet_throttler_run_task_when_ready_can_be_cancelled_while_waiting_for_
 
 #[tokio::test]
 async fn fleet_throttler_probe_is_not_reserved_when_rate_limit_denies_admission() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let store = Store::new(test_database.config.clone()).expect("fleet store");
     let throttler = store

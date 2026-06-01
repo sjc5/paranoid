@@ -53,7 +53,7 @@ where
     }
 
     /// Publishes an event and returns its assigned sequence.
-    pub async fn publish(&self, pool: &Pool, event: T) -> Result<i64, Error> {
+    pub async fn publish(&self, pool: &WritePool, event: T) -> Result<i64, Error> {
         let mut tx = pool.begin_transaction().await?;
         let result = self.publish_in_current_transaction(&mut tx, event).await;
         finish_fleet_pool_transaction(FLEET_OPERATION_TOPIC_PUBLISH, tx, result).await
@@ -62,7 +62,7 @@ where
     /// Transactional variant of `publish`.
     pub async fn publish_in_current_transaction(
         &self,
-        tx: &mut Tx<'_>,
+        tx: &mut WriteTx<'_>,
         event: T,
     ) -> Result<i64, Error> {
         let mut sequence = None;
@@ -136,7 +136,7 @@ where
     }
 
     /// Deletes all retained events inside one transaction without resetting the topic sequence.
-    pub async fn purge_retained_events_atomically(&self, pool: &Pool) -> Result<u64, Error> {
+    pub async fn purge_retained_events_atomically(&self, pool: &WritePool) -> Result<u64, Error> {
         self.event_item
             .delete_entire_namespace_atomically(pool)
             .await
@@ -146,7 +146,7 @@ where
     /// Deletes all retained events inside the caller's transaction without resetting the topic sequence.
     pub async fn purge_retained_events_in_current_transaction(
         &self,
-        tx: &mut Tx<'_>,
+        tx: &mut WriteTx<'_>,
     ) -> Result<u64, Error> {
         self.event_item
             .delete_entire_namespace_in_current_transaction(tx)
@@ -177,7 +177,7 @@ where
     /// Reads new events after the persisted cursor and advances the cursor if events are found.
     pub async fn read_new_events_and_advance_cursor(
         &self,
-        pool: &Pool,
+        pool: &WritePool,
     ) -> Result<Vec<TopicEvent<T>>, Error> {
         let mut tx = pool.begin_transaction().await?;
         let result = self
@@ -194,7 +194,7 @@ where
     /// Transactional variant of `read_new_events_and_advance_cursor`.
     pub async fn read_new_events_and_advance_cursor_in_current_transaction(
         &self,
-        tx: &mut Tx<'_>,
+        tx: &mut WriteTx<'_>,
     ) -> Result<Vec<TopicEvent<T>>, Error> {
         let cursor = self.fetch_cursor_in_current_transaction(tx).await?;
         let events = self
@@ -210,7 +210,7 @@ where
     /// Polls repeatedly until `stop` resolves or the handler fails, advancing the cursor only after handler success.
     pub async fn run_polling_until_stopped_or_handler_error<Stop, E, HandlerFuture, Handler>(
         &self,
-        pool: &Pool,
+        pool: &WritePool,
         poll_interval: Duration,
         stop: Stop,
         handle_events: Handler,
@@ -268,7 +268,7 @@ where
         OnPollError,
     >(
         &self,
-        pool: &Pool,
+        pool: &WritePool,
         poll_interval: Duration,
         stop: Stop,
         handle_events: Handler,
@@ -301,7 +301,7 @@ where
         OnPollSuccess,
     >(
         &self,
-        pool: &Pool,
+        pool: &WritePool,
         poll_interval: Duration,
         stop: Stop,
         mut handle_events: Handler,
@@ -448,7 +448,7 @@ where
     /// Starts a background polling task that runs until stopped or until the handler fails.
     pub fn start_polling_until_stopped_or_handler_error<E, HandlerFuture, Handler>(
         &self,
-        pool: Pool,
+        pool: WritePool,
         poll_interval: Duration,
         handle_events: Handler,
     ) -> SubscriptionRunHandle<E>
@@ -486,7 +486,7 @@ where
         OnPollError,
     >(
         &self,
-        pool: Pool,
+        pool: WritePool,
         poll_interval: Duration,
         handle_events: Handler,
         on_poll_error: OnPollError,
@@ -578,7 +578,7 @@ where
     }
 
     /// Sets the persisted subscription cursor exactly.
-    pub async fn set_cursor(&self, pool: &Pool, sequence: i64) -> Result<(), Error> {
+    pub async fn set_cursor(&self, pool: &WritePool, sequence: i64) -> Result<(), Error> {
         validate_non_negative_topic_sequence(sequence)?;
         self.cursor_item
             .set(
@@ -594,7 +594,7 @@ where
     /// Transactional variant of `set_cursor`.
     pub async fn set_cursor_in_current_transaction(
         &self,
-        tx: &mut Tx<'_>,
+        tx: &mut WriteTx<'_>,
         sequence: i64,
     ) -> Result<(), Error> {
         validate_non_negative_topic_sequence(sequence)?;
@@ -610,7 +610,7 @@ where
     }
 
     /// Deletes the persisted subscription cursor.
-    pub async fn delete_cursor(&self, pool: &Pool) -> Result<(), Error> {
+    pub async fn delete_cursor(&self, pool: &WritePool) -> Result<(), Error> {
         match self
             .cursor_item
             .delete(pool, std::iter::empty::<&str>())
@@ -622,7 +622,10 @@ where
     }
 
     /// Transactional variant of `delete_cursor`.
-    pub async fn delete_cursor_in_current_transaction(&self, tx: &mut Tx<'_>) -> Result<(), Error> {
+    pub async fn delete_cursor_in_current_transaction(
+        &self,
+        tx: &mut WriteTx<'_>,
+    ) -> Result<(), Error> {
         match self
             .cursor_item
             .delete_in_current_transaction(tx, std::iter::empty::<&str>())
@@ -633,7 +636,7 @@ where
         }
     }
 
-    async fn advance_cursor_if_needed(&self, pool: &Pool, sequence: i64) -> Result<(), Error> {
+    async fn advance_cursor_if_needed(&self, pool: &WritePool, sequence: i64) -> Result<(), Error> {
         let mut tx = pool.begin_transaction().await?;
         let result = self
             .advance_cursor_if_needed_in_current_transaction(&mut tx, sequence)
@@ -643,7 +646,7 @@ where
 
     async fn advance_cursor_if_needed_in_current_transaction(
         &self,
-        tx: &mut Tx<'_>,
+        tx: &mut WriteTx<'_>,
         sequence: i64,
     ) -> Result<(), Error> {
         validate_non_negative_topic_sequence(sequence)?;

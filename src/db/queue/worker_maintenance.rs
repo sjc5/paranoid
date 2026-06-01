@@ -62,7 +62,7 @@ pub(super) async fn run_queue_worker_loop_with_fleet_maintenance(
 
 pub(super) fn spawn_queue_reclaim_maintenance_cron(
     queue: Store,
-    pool: Pool,
+    pool: WritePool,
     worker_shutdown_signal: RuntimeCancellationSignal,
     cron: Cron,
     stale_threshold: Duration,
@@ -98,7 +98,7 @@ pub(super) fn spawn_queue_reclaim_maintenance_cron(
 
 pub(super) fn spawn_queue_cleanup_maintenance_cron(
     queue: Store,
-    pool: Pool,
+    pool: WritePool,
     worker_shutdown_signal: RuntimeCancellationSignal,
     cron: Cron,
     config: ResolvedWorkerMaintenanceConfig,

@@ -2,9 +2,7 @@ use super::*;
 
 #[tokio::test]
 async fn queue_worker_with_fleet_maintenance_reclaims_stale_jobs_and_cleans_old_terminal_rows() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let queue = Store::new(test_database.config.clone()).expect("queue");
     let fleet_config = unique_fleet_test_config();
@@ -168,9 +166,7 @@ async fn queue_worker_with_fleet_maintenance_reclaims_stale_jobs_and_cleans_old_
 
 #[tokio::test]
 async fn queue_worker_with_fleet_maintenance_can_skip_dead_letter_cleanup_by_retention() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let queue = Store::new(test_database.config.clone()).expect("queue");
     let fleet_config = unique_fleet_test_config();
@@ -315,9 +311,7 @@ async fn queue_worker_with_fleet_maintenance_can_skip_dead_letter_cleanup_by_ret
 
 #[tokio::test]
 async fn queue_worker_with_fleet_maintenance_stop_interrupts_cleanup_between_batches() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let queue = Store::new(test_database.config.clone()).expect("queue");
     let fleet_config = unique_fleet_test_config();
@@ -435,9 +429,7 @@ async fn queue_worker_with_fleet_maintenance_stop_interrupts_cleanup_between_bat
 
 #[tokio::test]
 async fn queue_worker_with_fleet_maintenance_derives_default_cron_namespace_from_queue_tables() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let queue = Store::new(test_database.config.clone()).expect("queue");
     let fleet_config = unique_fleet_test_config();
@@ -483,9 +475,7 @@ async fn queue_worker_with_fleet_maintenance_derives_default_cron_namespace_from
 
 #[tokio::test]
 async fn queue_worker_with_fleet_maintenance_rejects_subsecond_cron_intervals_before_start() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let queue = Store::new(test_database.config.clone()).expect("queue");
     let reclaim_interval_error = queue.start_worker_with_fleet_maintenance(
@@ -525,9 +515,7 @@ async fn queue_worker_with_fleet_maintenance_rejects_subsecond_cron_intervals_be
 
 #[tokio::test]
 async fn queue_worker_with_fleet_maintenance_reports_cron_failure_and_stops_worker() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let queue = Store::new(test_database.config.clone()).expect("queue");
     let fleet_config = unique_fleet_test_config();
@@ -608,9 +596,7 @@ fn is_missing_fleet_schema_maintenance_failure(error: &Error) -> bool {
 
 #[tokio::test]
 async fn queue_worker_with_fleet_maintenance_failure_returns_in_flight_job_to_pending() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let queue = Store::new(test_database.config.clone()).expect("queue");
     let fleet_config = unique_fleet_test_config();

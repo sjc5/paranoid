@@ -2,9 +2,7 @@ use super::*;
 
 #[tokio::test]
 async fn kv_validation_rejects_wrong_value_column_type() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     drop_test_table(&test_database.sqlx_pool, &test_database.config.table_name).await;
     sqlx::query(sqlx::AssertSqlSafe(format!(
@@ -35,9 +33,7 @@ async fn kv_validation_rejects_wrong_value_column_type() {
 
 #[tokio::test]
 async fn kv_validation_rejects_missing_key_length_check_constraint() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let missing_key_length_check_config =
         KvStoreConfig::new(unique_test_table_name()).expect("kv config");
@@ -143,9 +139,7 @@ async fn kv_validation_rejects_missing_key_length_check_constraint() {
 
 #[tokio::test]
 async fn kv_validation_rejects_wrong_timestamp_column_shapes() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let wrong_expires_at_config = KvStoreConfig::new(unique_test_table_name()).expect("kv config");
     drop_test_table(
@@ -217,9 +211,7 @@ async fn kv_validation_rejects_wrong_timestamp_column_shapes() {
 
 #[tokio::test]
 async fn kv_validation_rejects_missing_text_pattern_ops_index() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     drop_test_table(&test_database.sqlx_pool, &test_database.config.table_name).await;
     sqlx::query(sqlx::AssertSqlSafe(format!(

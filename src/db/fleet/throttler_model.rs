@@ -117,7 +117,7 @@ pub struct ThrottlerPermit {
 #[must_use = "a throttler permit guard holds live Fleet coordination state; call release or run_task to observe cleanup"]
 pub struct ThrottlerPermitGuard {
     pub(super) throttler: Box<Throttler>,
-    pub(super) pool: Pool,
+    pub(super) pool: WritePool,
     pub(super) runtime_handle: RuntimeHandle,
     pub(super) permit: Option<ThrottlerPermit>,
     pub(super) drop_outcome: ThrottlerTaskOutcome,

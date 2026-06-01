@@ -2,9 +2,7 @@ use super::*;
 
 #[tokio::test]
 async fn kv_live_atomic_mutation_requires_non_expired_existing_key() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let store = KvStore::new(test_database.config.clone()).expect("kv store");
     let absent_key = KvKey::from_parts(["atomic", "live", "absent"]).expect("key");
@@ -148,9 +146,7 @@ async fn kv_live_atomic_mutation_requires_non_expired_existing_key() {
 
 #[tokio::test]
 async fn kv_pool_owned_atomic_callbacks_run_once_and_are_not_retried_after_callback_error() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let store = KvStore::new(test_database.config.clone()).expect("kv store");
     let plain_key = KvKey::from_parts(["atomic", "callback-once", "plain"]).expect("key");
@@ -251,9 +247,7 @@ async fn kv_pool_owned_atomic_callbacks_run_once_and_are_not_retried_after_callb
 
 #[tokio::test]
 async fn kv_live_or_init_atomic_mutation_initializes_once_and_then_mutates_live_value() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let store = KvStore::new(test_database.config.clone()).expect("kv store");
     let keep_initial_key = KvKey::from_parts(["atomic", "or-init", "keep"]).expect("key");

@@ -119,14 +119,14 @@ impl Store {
     }
 
     /// Creates and validates this store's schema inside one transaction.
-    pub async fn migrate_schema(&self, pool: &Pool) -> Result<(), crate::db::Error> {
+    pub async fn migrate_schema(&self, pool: &WritePool) -> Result<(), crate::db::Error> {
         migrate_schema(pool, &self.config).await
     }
 
     /// Runs schema migration inside the caller's active transaction.
     pub async fn migrate_schema_in_current_transaction(
         &self,
-        tx: &mut Tx<'_>,
+        tx: &mut WriteTx<'_>,
     ) -> Result<(), crate::db::Error> {
         migrate_schema_in_current_transaction(tx, &self.config).await
     }
@@ -423,7 +423,7 @@ fn validate_distinct_table_names(config: &StoreConfig) -> Result<(), Error> {
 
 /// Creates and validates the configured Fleet schema inside one transaction.
 pub(crate) async fn migrate_schema(
-    pool: &Pool,
+    pool: &WritePool,
     config: &StoreConfig,
 ) -> Result<(), crate::db::Error> {
     validate_distinct_table_names(config)
@@ -435,7 +435,7 @@ pub(crate) async fn migrate_schema(
 
 /// Creates and validates the configured Fleet schema inside the caller's transaction.
 pub(crate) async fn migrate_schema_in_current_transaction(
-    tx: &mut Tx<'_>,
+    tx: &mut WriteTx<'_>,
     config: &StoreConfig,
 ) -> Result<(), crate::db::Error> {
     validate_distinct_table_names(config)

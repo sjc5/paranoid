@@ -55,7 +55,7 @@ pub(super) struct ResolvedMutexGuardConfig {
 #[must_use = "a mutex guard holds live Fleet coordination state; call release or run_task to observe cleanup"]
 pub struct MutexGuard {
     pub(super) mutex: Mutex,
-    pub(super) pool: Pool,
+    pub(super) pool: WritePool,
     pub(super) runtime_handle: RuntimeHandle,
     pub(super) current_claim: Arc<tokio::sync::Mutex<Option<MutexManualRenewalClaim>>>,
     pub(super) stop_heartbeat: Arc<AtomicBool>,
@@ -149,7 +149,7 @@ pub enum MutexRunError<E> {
 
 pub(super) struct MutexHeartbeatRuntime {
     pub(super) mutex: Mutex,
-    pub(super) pool: Pool,
+    pub(super) pool: WritePool,
     pub(super) current_claim: Arc<tokio::sync::Mutex<Option<MutexManualRenewalClaim>>>,
     pub(super) stop_heartbeat: Arc<AtomicBool>,
     pub(super) stop_heartbeat_notify: Arc<Notify>,

@@ -2,12 +2,7 @@ use super::*;
 
 #[tokio::test]
 async fn kv_typed_item_operations_emit_exact_database_operation_records() {
-    let Some(database_url) = test_database_url() else {
-        eprintln!(
-            "skipping Postgres KV operation-count test; set TEST_DSN or PARANOID_TEST_DATABASE_URL to run"
-        );
-        return;
-    };
+    let database_url = test_database_url();
 
     let sqlx_pool = connect_sqlx_pool(&database_url).await;
     let table_name = unique_test_table_name();

@@ -2,9 +2,7 @@ use super::*;
 
 #[tokio::test]
 async fn kv_item_ttl_uses_statement_time_and_touch_does_not_extend_expiration() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let store = KvStore::new(test_database.config.clone()).expect("kv store");
     let item = KvItem::<TestKvPayload>::new_plain(
@@ -94,9 +92,7 @@ async fn kv_item_ttl_uses_statement_time_and_touch_does_not_extend_expiration() 
 #[tokio::test]
 async fn kv_item_delete_entire_namespace_atomically_includes_expired_rows_and_preserves_other_prefixes()
  {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let store = KvStore::new(test_database.config.clone()).expect("kv store");
     let item_a = KvItem::<TestKvPayload>::new_plain(
@@ -174,9 +170,7 @@ async fn kv_item_delete_entire_namespace_atomically_includes_expired_rows_and_pr
 
 #[tokio::test]
 async fn kv_prefix_and_namespace_deletes_are_transactional() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let store = KvStore::new(test_database.config.clone()).expect("kv store");
     let raw_prefix = KvKeyPrefix::from_parts(["tx-delete", "raw"]).expect("prefix");

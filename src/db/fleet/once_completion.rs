@@ -4,7 +4,7 @@ impl Once {
     /// Marks this task done while the claim is live, releases the claim, and commits both changes.
     pub(crate) async fn mark_done_and_release_manual_run(
         &self,
-        pool: &Pool,
+        pool: &WritePool,
         claim: &OnceManualRunClaim,
     ) -> Result<bool, Error> {
         let mut tx = pool.begin_transaction().await?;
@@ -17,7 +17,7 @@ impl Once {
     /// Transactional variant of `mark_done_and_release_manual_run`.
     pub(crate) async fn mark_done_and_release_manual_run_in_current_transaction(
         &self,
-        tx: &mut Tx<'_>,
+        tx: &mut WriteTx<'_>,
         claim: &OnceManualRunClaim,
     ) -> Result<bool, Error> {
         self.require_claim_matches_once(claim)?;
@@ -46,7 +46,7 @@ impl Once {
 
     pub(super) async fn mark_completion(
         &self,
-        pool: &Pool,
+        pool: &WritePool,
         snapshot: &OnceRunClaimSnapshot,
     ) -> Result<bool, Error> {
         let mut tx = pool.begin_transaction().await?;
@@ -62,7 +62,7 @@ impl Once {
 
     pub(super) async fn mark_completion_in_current_transaction(
         &self,
-        tx: &mut Tx<'_>,
+        tx: &mut WriteTx<'_>,
         holder_id: String,
         fencing_token: i64,
     ) -> Result<bool, Error> {
@@ -89,7 +89,7 @@ impl Once {
     /// Releases a live run-once claim without marking the task done.
     pub(crate) async fn release_manual_run_without_marking_done(
         &self,
-        pool: &Pool,
+        pool: &WritePool,
         claim: &OnceManualRunClaim,
     ) -> Result<bool, Error> {
         self.require_claim_matches_once(claim)?;
@@ -101,7 +101,7 @@ impl Once {
     /// Releases a live run-once claim without marking done inside the caller's transaction.
     pub(crate) async fn release_manual_run_without_marking_done_in_current_transaction(
         &self,
-        tx: &mut Tx<'_>,
+        tx: &mut WriteTx<'_>,
         claim: &OnceManualRunClaim,
     ) -> Result<bool, Error> {
         self.require_claim_matches_once(claim)?;
@@ -111,13 +111,13 @@ impl Once {
     }
 
     /// Attempts to delete this task's completion marker while holding its exclusion mutex.
-    pub async fn try_reset(&self, pool: &Pool) -> Result<bool, Error> {
+    pub async fn try_reset(&self, pool: &WritePool) -> Result<bool, Error> {
         let mut tx = pool.begin_transaction().await?;
         let result = self.try_reset_in_current_transaction(&mut tx).await;
         finish_fleet_pool_transaction(FLEET_OPERATION_ONCE_TRY_RESET, tx, result).await
     }
 
-    async fn try_reset_in_current_transaction(&self, tx: &mut Tx<'_>) -> Result<bool, Error> {
+    async fn try_reset_in_current_transaction(&self, tx: &mut WriteTx<'_>) -> Result<bool, Error> {
         let Some(mutex_claim) = self
             .mutex
             .try_claim_manual_renewal_in_current_transaction(tx)
@@ -167,7 +167,7 @@ impl OnceManualRunProtocol<'_> {
     /// Marks this task done while the claim is live, releases the claim, and commits both changes.
     pub async fn mark_done_and_release_run(
         &self,
-        pool: &Pool,
+        pool: &WritePool,
         claim: &OnceManualRunClaim,
     ) -> Result<bool, Error> {
         self.once
@@ -178,7 +178,7 @@ impl OnceManualRunProtocol<'_> {
     /// Marks this task done and releases the claim inside the caller's transaction.
     pub async fn mark_done_and_release_run_in_current_transaction(
         &self,
-        tx: &mut Tx<'_>,
+        tx: &mut WriteTx<'_>,
         claim: &OnceManualRunClaim,
     ) -> Result<bool, Error> {
         self.once
@@ -189,7 +189,7 @@ impl OnceManualRunProtocol<'_> {
     /// Releases a live run-once claim without marking the task done.
     pub async fn release_run_without_marking_done(
         &self,
-        pool: &Pool,
+        pool: &WritePool,
         claim: &OnceManualRunClaim,
     ) -> Result<bool, Error> {
         self.once
@@ -200,7 +200,7 @@ impl OnceManualRunProtocol<'_> {
     /// Releases a live run-once claim without marking done inside the caller's transaction.
     pub async fn release_run_without_marking_done_in_current_transaction(
         &self,
-        tx: &mut Tx<'_>,
+        tx: &mut WriteTx<'_>,
         claim: &OnceManualRunClaim,
     ) -> Result<bool, Error> {
         self.once

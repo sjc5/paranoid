@@ -3,7 +3,7 @@ use super::*;
 impl Throttler {
     pub(super) async fn extend_probe_reservation(
         &self,
-        pool: &Pool,
+        pool: &WritePool,
         permit: &ThrottlerPermit,
     ) -> Result<bool, Error> {
         let mut tx = pool.begin_transaction().await?;
@@ -15,7 +15,7 @@ impl Throttler {
 
     pub(super) async fn extend_probe_reservation_in_current_transaction(
         &self,
-        tx: &mut Tx<'_>,
+        tx: &mut WriteTx<'_>,
         permit: &ThrottlerPermit,
     ) -> Result<bool, Error> {
         self.require_permit_matches_throttler(permit)?;
@@ -71,7 +71,7 @@ impl Throttler {
 
     pub(super) async fn set_circuit_state_in_current_transaction(
         &self,
-        tx: &mut Tx<'_>,
+        tx: &mut WriteTx<'_>,
         circuit_state: ThrottlerCircuitState,
         set_opened_at: bool,
         reset_consecutive_failures: bool,

@@ -12,9 +12,7 @@ async fn create_incompatible_placeholder_table(pool: &PgPool, table_name: &PgQua
 
 #[tokio::test]
 async fn lease_migration_creates_schema_that_validation_accepts() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     drop_test_lease_tables(&test_database.sqlx_pool, &test_database.config).await;
     migrate_lease_schema(&test_database.paranoid_pool, &test_database.config)
@@ -72,9 +70,7 @@ async fn lease_migration_creates_schema_that_validation_accepts() {
 
 #[tokio::test]
 async fn lease_validate_schema_uses_one_rollback_transaction() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     drop_test_lease_tables(&test_database.sqlx_pool, &test_database.config).await;
     migrate_lease_schema(&test_database.paranoid_pool, &test_database.config)
@@ -138,9 +134,7 @@ async fn lease_validate_schema_uses_one_rollback_transaction() {
 
 #[tokio::test]
 async fn lease_migration_rolls_back_when_existing_schema_is_incompatible() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     drop_test_lease_tables(&test_database.sqlx_pool, &test_database.config).await;
     create_incompatible_placeholder_table(
@@ -188,9 +182,7 @@ async fn lease_migration_rolls_back_when_existing_schema_is_incompatible() {
 
 #[tokio::test]
 async fn lease_migration_in_current_transaction_is_usable_before_commit_and_rolls_back() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let config = LeaseStoreConfig::new(unique_test_table_name());
     let store = LeaseStore::new(config.clone());
@@ -291,9 +283,7 @@ async fn lease_migration_in_current_transaction_is_usable_before_commit_and_roll
 
 #[tokio::test]
 async fn lease_validation_rejects_wrong_token_column_type() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     drop_test_table(&test_database.sqlx_pool, &test_database.config.table_name).await;
     db_unparameterized_simple_query(sqlx::AssertSqlSafe(format!(
@@ -326,9 +316,7 @@ async fn lease_validation_rejects_wrong_token_column_type() {
 
 #[tokio::test]
 async fn lease_validation_rejects_missing_required_check_constraints() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let missing_key_length_check_config = LeaseStoreConfig::new(unique_test_table_name());
     drop_test_table(
@@ -522,9 +510,7 @@ async fn lease_validation_rejects_missing_required_check_constraints() {
 
 #[tokio::test]
 async fn lease_validation_rejects_incompatible_fencing_counter_schema() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let missing_counter_config = LeaseStoreConfig::new(unique_test_table_name());
     drop_test_lease_tables(&test_database.sqlx_pool, &missing_counter_config).await;
@@ -653,9 +639,7 @@ async fn lease_validation_rejects_incompatible_fencing_counter_schema() {
 
 #[tokio::test]
 async fn lease_validation_rejects_wrong_timestamp_column_shapes() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let wrong_expires_at_config = LeaseStoreConfig::new(unique_test_table_name());
     drop_test_table(
@@ -730,9 +714,7 @@ async fn lease_validation_rejects_wrong_timestamp_column_shapes() {
 
 #[tokio::test]
 async fn lease_validation_rejects_missing_expires_at_index() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     drop_test_table(&test_database.sqlx_pool, &test_database.config.table_name).await;
     create_test_lease_table(
@@ -759,9 +741,7 @@ async fn lease_validation_rejects_missing_expires_at_index() {
 
 #[tokio::test]
 async fn lease_validation_rejects_partial_expires_at_index() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     drop_test_table(&test_database.sqlx_pool, &test_database.config.table_name).await;
     migrate_lease_schema(&test_database.paranoid_pool, &test_database.config)
@@ -798,9 +778,7 @@ async fn lease_validation_rejects_partial_expires_at_index() {
 
 #[tokio::test]
 async fn lease_migration_accepts_existing_usable_unique_key() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     drop_test_table(&test_database.sqlx_pool, &test_database.config.table_name).await;
     create_test_lease_table(
@@ -827,9 +805,7 @@ async fn lease_migration_accepts_existing_usable_unique_key() {
 
 #[tokio::test]
 async fn lease_validation_rejects_unusable_key_uniqueness_and_non_c_collations() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let missing_unique_config = LeaseStoreConfig::new(unique_test_table_name());
     drop_test_table(&test_database.sqlx_pool, &missing_unique_config.table_name).await;
@@ -990,9 +966,7 @@ async fn lease_validation_rejects_unusable_key_uniqueness_and_non_c_collations()
 
 #[tokio::test]
 async fn lease_migration_case_distinct_tables_get_independent_indexes() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let mixed_case_table = format!(
         "__lease_rs_Case_{}",
@@ -1024,9 +998,7 @@ async fn lease_migration_case_distinct_tables_get_independent_indexes() {
 
 #[tokio::test]
 async fn lease_schema_qualified_table_names_are_migrated_and_used_without_public_schema_bleed() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let unqualified_table_name = unique_test_unqualified_table_name_text();
     let schema_name = unique_test_schema_name();

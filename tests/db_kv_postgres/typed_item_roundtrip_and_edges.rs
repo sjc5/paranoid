@@ -2,9 +2,7 @@ use super::*;
 
 #[tokio::test]
 async fn kv_item_basic_lifecycle_type_round_trips_and_raw_bytes_match_go_invariants() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let store = KvStore::new(test_database.config.clone()).expect("kv store");
     let item = KvItem::<TestKvPayload>::new_plain(
@@ -177,9 +175,7 @@ async fn kv_item_basic_lifecycle_type_round_trips_and_raw_bytes_match_go_invaria
 
 #[tokio::test]
 async fn kv_item_bulk_and_scan_edges_follow_expected_semantics() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let store = KvStore::new(test_database.config.clone()).expect("kv store");
     let item = KvItem::<TestKvPayload>::new_plain(
@@ -414,9 +410,7 @@ async fn kv_item_bulk_and_scan_edges_follow_expected_semantics() {
 
 #[tokio::test]
 async fn kv_item_public_methods_reject_invalid_key_parts_before_database_work() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let store = KvStore::new(test_database.config.clone()).expect("kv store");
     let item = KvItem::<TestKvPayload>::new_plain(
@@ -574,9 +568,7 @@ async fn kv_item_public_methods_reject_invalid_key_parts_before_database_work() 
 
 #[tokio::test]
 async fn kv_item_literal_prefix_matching_and_max_key_length_match_go_invariants() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let store = KvStore::new(test_database.config.clone()).expect("kv store");
     let literal_prefix_item = KvItem::<TestKvPayload>::new_plain(

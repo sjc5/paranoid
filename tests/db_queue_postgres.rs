@@ -4,7 +4,7 @@ use common::{
     connect_sqlx_pool_for_harness, drop_test_table as common_drop_test_table, fetch_table_exists,
     queue_test_database_url,
 };
-use paranoid::db::{PgIdentifier, PgQualifiedTableName, Pool, PoolConfig};
+use paranoid::db::{PgIdentifier, PgQualifiedTableName, PoolConfig, WritePool};
 use paranoid::fleet;
 use paranoid::fleet::CronKey;
 use paranoid::queue::{
@@ -69,40 +69,42 @@ struct TestPayload {
 }
 
 struct TestDatabase {
-    paranoid_pool: Pool,
+    paranoid_pool: WritePool,
     sqlx_pool: PgPool,
     config: StoreConfig,
 }
 
 impl TestDatabase {
-    async fn connect() -> Option<Self> {
-        let database_url = test_database_url()?;
+    async fn connect() -> Self {
+        let database_url = test_database_url();
         let paranoid_pool = connect_paranoid_pool(&database_url).await;
         let sqlx_pool = connect_sqlx_pool(&database_url).await;
-        Some(Self {
+        Self {
             paranoid_pool,
             sqlx_pool,
             config: unique_test_config(),
-        })
+        }
     }
 }
 
-fn test_database_url() -> Option<String> {
+fn test_database_url() -> String {
     queue_test_database_url()
 }
 
-async fn connect_paranoid_pool(database_url: &str) -> Pool {
+async fn connect_paranoid_pool(database_url: &str) -> WritePool {
     connect_paranoid_pool_with_max_connections(database_url, 5).await
 }
 
 async fn connect_paranoid_pool_with_max_connections(
     database_url: &str,
     max_connections: u32,
-) -> Pool {
+) -> WritePool {
     let mut config = PoolConfig::new(SecretString::from(database_url.to_owned()));
     config.max_connections = max_connections;
     config.application_name = Some("paranoid_db_queue_postgres_test".to_owned());
-    Pool::connect(config).await.expect("connect paranoid pool")
+    WritePool::connect(config)
+        .await
+        .expect("connect paranoid pool")
 }
 
 async fn connect_sqlx_pool(database_url: &str) -> PgPool {
@@ -116,7 +118,7 @@ async fn reset_queue_schema(test_database: &TestDatabase) {
         .expect("migrate queue schema");
 }
 
-async fn migrate_schema(pool: &Pool, config: &StoreConfig) -> Result<(), Error> {
+async fn migrate_schema(pool: &WritePool, config: &StoreConfig) -> Result<(), Error> {
     Store::new(config.clone())
         .expect("queue")
         .migrate_schema(pool)
@@ -124,7 +126,7 @@ async fn migrate_schema(pool: &Pool, config: &StoreConfig) -> Result<(), Error> 
 }
 
 async fn migrate_schema_in_current_transaction(
-    tx: &mut paranoid::db::Tx<'_>,
+    tx: &mut paranoid::db::WriteTx<'_>,
     config: &StoreConfig,
 ) -> Result<(), Error> {
     Store::new(config.clone())
@@ -133,7 +135,7 @@ async fn migrate_schema_in_current_transaction(
         .await
 }
 
-async fn validate_schema(pool: &Pool, config: &StoreConfig) -> Result<(), Error> {
+async fn validate_schema(pool: &WritePool, config: &StoreConfig) -> Result<(), Error> {
     Store::new(config.clone())
         .expect("queue")
         .validate_schema(pool)

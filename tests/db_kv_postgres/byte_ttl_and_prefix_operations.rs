@@ -2,9 +2,7 @@ use super::*;
 
 #[tokio::test]
 async fn kv_ttl_touch_and_expire_operations_apply_only_to_live_keys() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let store = KvStore::new(test_database.config.clone()).expect("kv store");
     let key = KvKey::from_parts(["ttl", "lifecycle"]).expect("key");
@@ -173,9 +171,7 @@ async fn kv_ttl_touch_and_expire_operations_apply_only_to_live_keys() {
 
 #[tokio::test]
 async fn kv_delete_expired_keys_once_deletes_only_expired_rows_with_bounded_batch_size() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let store = KvStore::new(test_database.config.clone()).expect("kv store");
     let expired_a = KvKey::from_parts(["cleanup", "expired-a"]).expect("key");
@@ -259,9 +255,7 @@ async fn kv_delete_expired_keys_once_deletes_only_expired_rows_with_bounded_batc
 
 #[tokio::test]
 async fn kv_delete_expired_keys_once_concurrent_cleaners_delete_each_expired_row_once() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let store = KvStore::new(test_database.config.clone()).expect("kv store");
     let total_deleted = Arc::new(AtomicUsize::new(0));
@@ -320,9 +314,7 @@ async fn kv_delete_expired_keys_once_concurrent_cleaners_delete_each_expired_row
 
 #[tokio::test]
 async fn kv_delete_expired_keys_until_empty_deletes_all_currently_expired_batches() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let store = KvStore::new(test_database.config.clone()).expect("kv store");
     let live_key = KvKey::from_parts(["cleanup-until-empty", "live"]).expect("key");
@@ -418,9 +410,7 @@ async fn kv_delete_expired_keys_until_empty_deletes_all_currently_expired_batche
 
 #[tokio::test]
 async fn kv_prefix_count_scan_and_delete_are_isolated_and_ordered() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let store = KvStore::new(test_database.config.clone()).expect("kv store");
     let prefix = KvKeyPrefix::from_parts(["tenant"]).expect("prefix");
@@ -580,9 +570,7 @@ async fn kv_prefix_count_scan_and_delete_are_isolated_and_ordered() {
 
 #[tokio::test]
 async fn kv_delete_keys_with_prefix_once_concurrent_deleters_delete_each_row_once() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let store = KvStore::new(test_database.config.clone()).expect("kv store");
     let prefix = KvKeyPrefix::from_parts(["delete-prefix-concurrent"]).expect("prefix");
@@ -664,9 +652,7 @@ async fn kv_delete_keys_with_prefix_once_concurrent_deleters_delete_each_row_onc
 
 #[tokio::test]
 async fn kv_prefix_operations_escape_like_metacharacters() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let store = KvStore::new(test_database.config.clone()).expect("kv store");
     let wildcard_looking_prefix = KvKeyPrefix::from_parts(["tenant%_\\"]).expect("prefix");
