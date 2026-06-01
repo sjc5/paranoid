@@ -117,7 +117,8 @@ It is strictly prohibited to skip tests, ever. If something a test needs to run 
 (e.g., a live Docker container or whatever), then the test must instantly and loudly fail.
 Zero exceptions. We cannot risk ever having only a subset of tests run; it would
 dangerously lead to false confidence from a suite that didn't even run fully. Printing a
-warning is NOT sufficient. The tests must fail.
+warning is NOT sufficient. The tests must fail. Similarly, the repo's full gate
+(`make gate`) must include all tests in the repo (otherwise it's not a proper full gate).
 
 ## Long, Clear Function/Method/Variable Names Are Good
 
