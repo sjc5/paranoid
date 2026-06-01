@@ -2,6 +2,8 @@
 Use at your own risk and discretion, and understand that there will be frequent breaking
 changes for the foreseeable future.
 
+---
+
 <img src="paranoid-banner.webp" alt="Paranoid banner">
 
 Paranoid is a library of misuse-resistant application security and distributed systems
