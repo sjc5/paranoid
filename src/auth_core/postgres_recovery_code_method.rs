@@ -74,9 +74,12 @@ impl PostgresRecoveryCodeMethodPlugin {
         else {
             return Ok(KnownSubjectActiveProofMethodVerification::Rejected);
         };
-        let verified_proof =
-            VerifiedActiveProof::from_summary(self.method.verified_proof_summary(), None)
-                .map_err(PostgresRecoveryCodeMethodError::Core)?;
+        let verified_proof = VerifiedActiveProof::from_summary_with_source(
+            self.method.verified_proof_summary(),
+            None,
+            recovery_code_proof_source(&recovery_code_id)?,
+        )
+        .map_err(PostgresRecoveryCodeMethodError::Core)?;
         let method_commit_work = vec![self.consume_recovery_code_commit_work(
             response.now,
             subject_id,
@@ -622,6 +625,16 @@ fn recovery_code_secret_context(
     push_len_prefixed_bytes(&mut context, subject_id.as_bytes());
     push_len_prefixed_bytes(&mut context, method.method_label().as_bytes());
     context
+}
+
+fn recovery_code_proof_source(
+    recovery_code_id: &[u8],
+) -> Result<VerifiedProofSource, PostgresRecoveryCodeMethodError> {
+    Ok(VerifiedProofSource::new(
+        VerifiedProofSourceKind::CredentialInstance,
+        VerifiedProofSourceId::from_bytes(recovery_code_id.to_vec())
+            .map_err(PostgresRecoveryCodeMethodError::Core)?,
+    ))
 }
 
 fn push_len_prefixed_bytes(target: &mut Vec<u8>, bytes: &[u8]) {

@@ -36,6 +36,27 @@ fn postgres_store_persists_stable_wire_mappings() {
         super::super::postgres_store::proof_use_from_i32(8).is_err(),
         "invalid stored proof-use ids must not be accepted"
     );
+
+    assert_eq!(
+        super::super::postgres_store::i32_from_verified_proof_source_kind(
+            VerifiedProofSourceKind::CredentialInstance,
+        ),
+        1
+    );
+    assert_eq!(
+        super::super::postgres_store::verified_proof_source_kind_from_i32(2)
+            .expect("out-of-band identifier source"),
+        VerifiedProofSourceKind::OutOfBandIdentifier
+    );
+    assert_eq!(
+        super::super::postgres_store::verified_proof_source_kind_from_i32(3)
+            .expect("external authority source"),
+        VerifiedProofSourceKind::ExternalAuthority
+    );
+    assert!(
+        super::super::postgres_store::verified_proof_source_kind_from_i32(4).is_err(),
+        "invalid stored proof-source kind ids must not be accepted"
+    );
 }
 
 #[test]

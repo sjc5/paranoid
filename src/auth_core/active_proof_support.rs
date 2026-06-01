@@ -189,7 +189,7 @@ pub(super) fn ensure_active_proof_not_already_satisfied(
     if attempt
         .satisfied_proofs
         .iter()
-        .any(|proof| proof.family == family)
+        .any(|proof| proof.family() == family)
     {
         return Err(Error::ActiveProofAlreadySatisfied);
     }

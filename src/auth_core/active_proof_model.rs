@@ -1087,7 +1087,7 @@ pub struct ActiveProofAttemptRecord {
     /// Subject already known by the flow, if any.
     pub subject_id: Option<SubjectId>,
     /// Proofs already satisfied inside this attempt.
-    pub satisfied_proofs: Vec<ProofSummary>,
+    pub satisfied_proofs: Vec<SatisfiedProof>,
     /// Failed weak proof count.
     pub weak_proof_failures: u32,
     /// Maximum failed weak proofs allowed before hard deletion.

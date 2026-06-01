@@ -145,14 +145,14 @@ pub(super) fn start_active_proof_attempt_for_current_trusted_device(
             .push(ResponseEffect::DeleteTrustedDeviceCookie);
         return Ok(transition(Outcome::NeedsFullAuthentication, plan));
     }
-    let secret_match = loaded
-        .trusted_device_secret_match
-        .as_ref()
-        .ok_or(Error::LoadedStateContradiction(
-            "trusted-device-bound active-proof start requires trusted-device secret match",
-        ))?
-        .kind();
-    super::session_lifecycle_helpers::validate_device_secret_match_consistency(
+    let secret_match =
+        loaded
+            .trusted_device_secret_match
+            .as_ref()
+            .ok_or(Error::LoadedStateContradiction(
+                "trusted-device-bound active-proof start requires trusted-device secret match",
+            ))?;
+    let secret_match = super::session_lifecycle_helpers::validate_device_secret_match_consistency(
         command.now,
         secret_match,
         cookie,
@@ -579,7 +579,8 @@ pub(super) fn complete_active_proof_challenge(
     command: CompleteActiveProofChallenge,
     loaded: &LoadedState,
 ) -> Result<Transition, Error> {
-    let (proof, supplied_subject_id) = command.verified_proof.into_parts();
+    let (satisfied_proof, supplied_subject_id) = command.verified_proof.into_parts();
+    let proof = satisfied_proof.proof().clone();
     let attempt = loaded_active_attempt(loaded)?;
     validate_active_proof_attempt_id(&command.attempt_id, attempt)?;
     ensure_active_proof_attempt_is_open(command.now, attempt)?;
@@ -652,7 +653,7 @@ pub(super) fn complete_active_proof_challenge(
     plan.mutations.push(Mutation::RecordActiveProofSucceeded {
         attempt_id: command.attempt_id.clone(),
         subject_id: subject_id_after_completion.clone(),
-        proof: proof.clone(),
+        proof: satisfied_proof,
         satisfied_at: command.now,
     });
     plan.method_commit_work.extend(command.method_commit_work);

@@ -1,6 +1,6 @@
 use super::{
-    Error, METHOD_LABEL_MAX_BYTES, ProofFamily, ProofInteraction, ProofSubjectRole, ProofSummary,
-    ProofUse, validate_auth_identifier_string,
+    Error, METHOD_LABEL_MAX_BYTES, ProofFamily, ProofInteraction, ProofSubjectRole, ProofUse,
+    SatisfiedProof, validate_auth_identifier_string,
 };
 
 /// Configurable proof-stack policy for final auth transitions.
@@ -247,7 +247,7 @@ impl ProofStackPolicy {
         Ok(())
     }
 
-    fn is_satisfied_by(&self, proofs: &[ProofSummary]) -> bool {
+    fn is_satisfied_by(&self, proofs: &[SatisfiedProof]) -> bool {
         self.accepted_stacks
             .iter()
             .any(|accepted_stack| accepted_stack.is_satisfied_by(proofs))
@@ -311,12 +311,12 @@ impl ProofRequirement {
         Ok(())
     }
 
-    fn is_satisfied_by(&self, proof: &ProofSummary) -> bool {
-        proof.family == self.family
+    fn is_satisfied_by(&self, proof: &SatisfiedProof) -> bool {
+        proof.family() == self.family
             && self
                 .method_label
                 .as_ref()
-                .is_none_or(|method_label| proof.method_label == *method_label)
+                .is_none_or(|method_label| proof.method_label() == *method_label)
     }
 }
 
@@ -383,7 +383,7 @@ impl ProofStackRequirement {
         Ok(())
     }
 
-    fn is_satisfied_by(&self, proofs: &[ProofSummary]) -> bool {
+    fn is_satisfied_by(&self, proofs: &[SatisfiedProof]) -> bool {
         self.required_proofs
             .iter()
             .all(|required_proof| proof_stack_contains_requirement(proofs, required_proof))
@@ -409,7 +409,7 @@ impl ProofStackSafetyFloor {
 
 pub(super) fn validate_satisfied_proof_stack_for_use(
     proof_policy: &ProofPolicy,
-    proofs: &[ProofSummary],
+    proofs: &[SatisfiedProof],
     proof_use: ProofUse,
 ) -> Result<(), Error> {
     validate_proofs_for_use(proofs, proof_use)?;
@@ -419,7 +419,7 @@ pub(super) fn validate_satisfied_proof_stack_for_use(
     Ok(())
 }
 
-fn validate_proofs_for_use(proofs: &[ProofSummary], proof_use: ProofUse) -> Result<(), Error> {
+fn validate_proofs_for_use(proofs: &[SatisfiedProof], proof_use: ProofUse) -> Result<(), Error> {
     if proofs.is_empty() {
         return Err(Error::MissingSatisfiedProof);
     }
@@ -429,13 +429,13 @@ fn validate_proofs_for_use(proofs: &[ProofSummary], proof_use: ProofUse) -> Resu
     Ok(())
 }
 
-fn validate_proof_for_use(proof: &ProofSummary, proof_use: ProofUse) -> Result<(), Error> {
-    if proof.method_label.is_empty() {
+fn validate_proof_for_use(proof: &SatisfiedProof, proof_use: ProofUse) -> Result<(), Error> {
+    if proof.method_label().is_empty() {
         return Err(Error::EmptyProofMethodLabel);
     }
-    if !proof.family.supports_use(proof_use) {
+    if !proof.family().supports_use(proof_use) {
         return Err(Error::ProofFamilyCannotSatisfyUse {
-            family: proof.family,
+            family: proof.family(),
             proof_use,
         });
     }
@@ -444,7 +444,7 @@ fn validate_proof_for_use(proof: &ProofSummary, proof_use: ProofUse) -> Result<(
 
 fn satisfied_proof_stack_can_satisfy_use(
     proof_policy: &ProofPolicy,
-    proofs: &[ProofSummary],
+    proofs: &[SatisfiedProof],
     proof_use: ProofUse,
 ) -> bool {
     if let Some(policy) = proof_policy.stack_policy_for_use(proof_use) {
@@ -468,20 +468,20 @@ fn satisfied_proof_stack_can_satisfy_use(
 }
 
 fn proof_stack_contains_any_family(
-    proofs: &[ProofSummary],
+    proofs: &[SatisfiedProof],
     predicate: fn(ProofFamily) -> bool,
 ) -> bool {
-    proofs.iter().any(|proof| predicate(proof.family))
+    proofs.iter().any(|proof| predicate(proof.family()))
 }
 
-fn proof_stack_contains_family(proofs: &[ProofSummary], family: ProofFamily) -> bool {
+fn proof_stack_contains_family(proofs: &[SatisfiedProof], family: ProofFamily) -> bool {
     proofs
         .iter()
         .any(|proof| ProofRequirement::any_method_label_in_family(family).is_satisfied_by(proof))
 }
 
 fn proof_stack_contains_requirement(
-    proofs: &[ProofSummary],
+    proofs: &[SatisfiedProof],
     required_proof: &ProofRequirement,
 ) -> bool {
     proofs

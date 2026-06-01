@@ -15,12 +15,13 @@ fn in_memory_commit_adapter_runs_full_session_lifecycle_script() {
         &LoadedState::default(),
     )
     .expect("start login attempt");
-    assert!(
+    assert!(matches!(
         store
             .commit_plan(start_login_attempt.commit_plan)
             .expect("login attempt commit")
-            .is_empty()
-    );
+            .as_slice(),
+        [ResponseEffect::IssueActiveProofContinuationCookie(_)]
+    ));
 
     let issue_login_challenge = reduce_command(
         &config(),

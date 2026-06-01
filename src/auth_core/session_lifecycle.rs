@@ -305,14 +305,15 @@ pub(super) fn complete_trusted_device_revival_with_active_proof(
             .push(ResponseEffect::DeleteTrustedDeviceCookie);
         return Ok(transition(Outcome::NeedsFullAuthentication, plan));
     }
-    let secret_match = loaded
-        .trusted_device_secret_match
-        .as_ref()
-        .ok_or(Error::LoadedStateContradiction(
-            "trusted-device active-proof completion requires trusted-device secret match",
-        ))?
-        .kind();
-    validate_device_secret_match_consistency(command.now, secret_match, cookie, record)?;
+    let secret_match =
+        loaded
+            .trusted_device_secret_match
+            .as_ref()
+            .ok_or(Error::LoadedStateContradiction(
+                "trusted-device active-proof completion requires trusted-device secret match",
+            ))?;
+    let secret_match =
+        validate_device_secret_match_consistency(command.now, secret_match, cookie, record)?;
     if !secret_match.is_accepted() {
         return Ok(transition(
             Outcome::NeedsFullAuthentication,

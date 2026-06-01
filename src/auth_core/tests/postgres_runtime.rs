@@ -21,7 +21,7 @@ use super::super::postgres_totp_method::{
 use crate::crypto::SecretBytes;
 use crate::db::{
     PgIdentifier, PgQualifiedTableName, PgSchemaName, Pool, PoolConfig, Tx, pooler_safe_query,
-    pooler_safe_query_scalar, unparameterized_simple_query,
+    pooler_safe_query_as, pooler_safe_query_scalar, unparameterized_simple_query,
 };
 use http::HeaderMap;
 use http::header::{COOKIE, HeaderValue};
@@ -725,9 +725,10 @@ impl TestPostgresAuthMethodPlugin {
         super::super::postgres_method_runtime::PostgresAuthMethodBuildError,
     > {
         let subject_id = self.parse_active_method_response_subject(challenge, response)?;
-        let verified_proof = VerifiedActiveProof::from_summary(
+        let verified_proof = VerifiedActiveProof::from_summary_with_source(
             challenge.proof.clone(),
             Some(subject_id),
+            test_active_method_proof_source(),
         )
         .map_err(|error| {
             super::super::postgres_method_runtime::PostgresAuthMethodBuildError::plugin_rejected(
@@ -756,6 +757,10 @@ fn test_challenge_presentation_prefix(family: ProofFamily) -> Option<&'static [u
         ),
         _ => None,
     }
+}
+
+fn test_active_method_proof_source() -> VerifiedProofSource {
+    proof_source("test-active-method-source")
 }
 
 fn test_response_challenge_prefix(family: ProofFamily) -> Option<&'static [u8]> {
@@ -1504,6 +1509,10 @@ async fn postgres_runtime_completes_message_signature_through_method_registry() 
     assert_eq!(
         count_satisfied_proofs_for_attempt(pool, store_config, &attempt_id).await,
         1
+    );
+    assert_eq!(
+        fetch_satisfied_proof_source_for_attempt(pool, store_config, &attempt_id).await,
+        Some(test_active_method_proof_source())
     );
     assert_eq!(
         count_open_challenges_for_challenge(pool, store_config, &challenge_id).await,
@@ -2427,6 +2436,14 @@ async fn postgres_runtime_completes_recovery_code_through_known_subject_method_r
     assert_eq!(
         count_satisfied_proofs_for_attempt(pool, store_config, &attempt_id).await,
         1
+    );
+    assert_eq!(
+        fetch_satisfied_proof_source_for_attempt(pool, store_config, &attempt_id).await,
+        Some(VerifiedProofSource::new(
+            VerifiedProofSourceKind::CredentialInstance,
+            VerifiedProofSourceId::from_bytes(recovery_code_id.as_slice())
+                .expect("recovery code source id"),
+        ))
     );
     assert_eq!(
         recovery_code_plugin
@@ -5599,6 +5616,36 @@ async fn count_satisfied_proofs_for_attempt(
         .fetch_one(pool.sqlx_pool())
         .await
         .expect("count satisfied proofs")
+}
+
+async fn fetch_satisfied_proof_source_for_attempt(
+    pool: &Pool,
+    store_config: &super::super::postgres_store::PostgresAuthStoreConfig,
+    attempt_id: &ActiveProofAttemptId,
+) -> Option<VerifiedProofSource> {
+    let table = store_config
+        .table_name(PostgresAuthCoreTable::ActiveProofSatisfiedProof)
+        .expect("satisfied proof table");
+    let statement = format!(
+        "SELECT proof_source_kind, proof_source_id FROM {} WHERE attempt_id = $1",
+        table.quoted()
+    );
+    let row = pooler_safe_query_as::<(Option<i32>, Option<Vec<u8>>)>(sqlx::AssertSqlSafe(
+        statement.as_str(),
+    ))
+    .bind(attempt_id.as_bytes())
+    .fetch_optional(pool.sqlx_pool())
+    .await
+    .expect("fetch satisfied proof source")?;
+    match row {
+        (None, None) => None,
+        (Some(kind), Some(source_id)) => Some(VerifiedProofSource::new(
+            super::super::postgres_store::verified_proof_source_kind_from_i32(kind)
+                .expect("parse proof source kind"),
+            VerifiedProofSourceId::from_bytes(source_id).expect("parse proof source id"),
+        )),
+        _ => panic!("satisfied proof source kind/id must both be present or both absent"),
+    }
 }
 
 async fn fetch_active_proof_attempt_subject_id(

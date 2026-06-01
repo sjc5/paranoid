@@ -28,6 +28,7 @@ fn core_storage_schema_contract_names_reducer_owned_record_families() {
             CoreStorageRecordKind::TrustedDeviceCredential,
             CoreStorageRecordKind::TrustedDeviceCredentialSecret,
             CoreStorageRecordKind::ActiveProofAttempt,
+            CoreStorageRecordKind::ActiveProofContinuationSecret,
             CoreStorageRecordKind::ActiveProofChallenge,
             CoreStorageRecordKind::SubjectAuthState,
             CoreStorageRecordKind::AuditEvent,
@@ -46,6 +47,7 @@ fn postgres_schema_contract_names_table_families() {
             PostgresAuthCoreTable::TrustedDeviceCredential,
             PostgresAuthCoreTable::TrustedDeviceCredentialSecretMac,
             PostgresAuthCoreTable::ActiveProofAttempt,
+            PostgresAuthCoreTable::ActiveProofContinuationSecretMac,
             PostgresAuthCoreTable::ActiveProofSatisfiedProof,
             PostgresAuthCoreTable::ActiveProofChallenge,
             PostgresAuthCoreTable::ActiveProofChallengeDeliveryKey,
@@ -126,6 +128,23 @@ fn postgres_schema_validation_pins_collation_and_fixed_byte_checks() {
                     && constraint.predicate() == Some(PostgresUniquePredicate::OpenRow)
             )
     );
+
+    let satisfied_proof_table =
+        postgres_table_validation(PostgresAuthCoreTable::ActiveProofSatisfiedProof);
+    let source_kind_column = satisfied_proof_table
+        .columns()
+        .iter()
+        .find(|column| column.name() == "proof_source_kind")
+        .expect("proof source kind column");
+    assert_eq!(source_kind_column.storage(), PostgresColumnStorage::Integer);
+    assert!(source_kind_column.nullable());
+    let source_id_column = satisfied_proof_table
+        .columns()
+        .iter()
+        .find(|column| column.name() == "proof_source_id")
+        .expect("proof source id column");
+    assert_eq!(source_id_column.storage(), PostgresColumnStorage::Bytea);
+    assert!(source_id_column.nullable());
 }
 
 #[test]
@@ -393,7 +412,10 @@ fn postgres_mutation_execution_distinguishes_locked_delete_and_monotonic_upsert(
         delete_attempt.write_step(),
         &PostgresMutationWriteStep::HardDeletePreviouslyLockedRow {
             target: CoreStorageTarget::ActiveProofAttempt(id("attempt")),
-            cascades_to_tables: vec![PostgresAuthCoreTable::ActiveProofChallenge],
+            cascades_to_tables: vec![
+                PostgresAuthCoreTable::ActiveProofContinuationSecretMac,
+                PostgresAuthCoreTable::ActiveProofChallenge,
+            ],
         }
     );
 
@@ -809,7 +831,10 @@ fn mutation_storage_contract_distinguishes_updates_hard_deletes_and_monotonic_up
         delete_attempt.write_requirement(),
         &StorageWriteRequirement::HardDeleteLockedRow {
             target: CoreStorageTarget::ActiveProofAttempt(id("attempt")),
-            cascades_to_record_kinds: vec![CoreStorageRecordKind::ActiveProofChallenge],
+            cascades_to_record_kinds: vec![
+                CoreStorageRecordKind::ActiveProofContinuationSecret,
+                CoreStorageRecordKind::ActiveProofChallenge,
+            ],
         }
     );
 

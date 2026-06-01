@@ -48,7 +48,7 @@ pub enum Precondition {
         /// Subject binding observed before planning.
         observed_subject_id: Option<SubjectId>,
         /// Satisfied proof stack observed before planning.
-        observed_satisfied_proofs: Vec<ProofSummary>,
+        observed_satisfied_proofs: Vec<SatisfiedProof>,
         /// Weak failure count observed before planning.
         observed_weak_proof_failures: u32,
         /// Subject whose revocation cutoff must not invalidate this attempt, if known.
@@ -136,7 +136,7 @@ pub enum Mutation {
         /// Subject id after this proof, if the attempt is now subject-bound.
         subject_id: Option<SubjectId>,
         /// Proof that was satisfied.
-        proof: ProofSummary,
+        proof: SatisfiedProof,
         /// Proof satisfaction timestamp.
         satisfied_at: UnixSeconds,
     },

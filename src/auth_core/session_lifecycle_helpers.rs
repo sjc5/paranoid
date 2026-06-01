@@ -141,13 +141,23 @@ pub(super) fn validate_session_secret_match_consistency(
 
 pub(super) fn validate_device_secret_match_consistency(
     now: UnixSeconds,
-    secret_match: StoredSecretMatch,
+    secret_match: &LoadedTrustedDeviceSecretMatch,
     cookie: &TrustedDeviceCookieDraft,
     record: &TrustedDeviceCredentialRecord,
-) -> Result<(), Error> {
+) -> Result<StoredSecretMatch, Error> {
+    if secret_match.device_credential_id() != &record.device_credential_id {
+        return Err(Error::LoadedStateContradiction(
+            "trusted-device secret match and record ids differ",
+        ));
+    }
+    if secret_match.device_credential_id() != &cookie.device_credential_id {
+        return Err(Error::LoadedStateContradiction(
+            "trusted-device secret match and cookie ids differ",
+        ));
+    }
     validate_secret_match_consistency(
         now,
-        secret_match,
+        secret_match.kind(),
         cookie.secret_version,
         record.current_secret_version,
         record.previous_secret_version,
@@ -161,7 +171,8 @@ pub(super) fn validate_device_secret_match_consistency(
             previous_within_grace_after_deadline: "trusted-device previous secret reported within grace after grace deadline",
             previous_expired_before_deadline: "trusted-device previous secret reported expired inside grace deadline",
         },
-    )
+    )?;
+    Ok(secret_match.kind())
 }
 
 #[derive(Clone, Copy)]

@@ -85,6 +85,25 @@ fn loaded_state_contradictions_reject_mismatched_cookie_record_identity() {
         device_subject_error,
         Error::LoadedStateContradiction("trusted-device cookie and record subjects differ")
     );
+
+    let mut mismatched_device_secret_match_record = loaded_trusted_device(500, 1_000);
+    mismatched_device_secret_match_record.trusted_device_secret_match = Some(
+        LoadedTrustedDeviceSecretMatch::new(id("other-device"), StoredSecretMatch::Current),
+    );
+    let device_secret_match_record_error = reduce_command(
+        &config(),
+        Command::ResolveRequest(ResolveRequest {
+            now: at(100),
+            request_kind: RequestKind::StateChanging,
+            fresh_session_id: Some(id("new-session")),
+        }),
+        &mismatched_device_secret_match_record,
+    )
+    .expect_err("trusted-device secret-match evidence must agree with the loaded record");
+    assert_eq!(
+        device_secret_match_record_error,
+        Error::LoadedStateContradiction("trusted-device secret match and record ids differ")
+    );
 }
 
 #[test]

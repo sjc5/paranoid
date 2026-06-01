@@ -57,7 +57,7 @@ fn active_proof_attempt_commit_guard_rejects_concurrent_proof_stack_update() {
             .get(&id("attempt"))
             .expect("attempt")
             .satisfied_proofs,
-        vec![proof(ProofFamily::MessageSignature)]
+        vec![satisfied_proof(proof(ProofFamily::MessageSignature))]
     );
 }
 

@@ -253,6 +253,8 @@ impl PostgresAuthCoreTableContract {
                     core_enum_column("proof_family", false),
                     validated_text_column("method_label", false, METHOD_LABEL_MAX_BYTES),
                     boolean_column("online_guessing_risk", false),
+                    core_enum_column("proof_source_kind", true),
+                    id_column("proof_source_id", true),
                     unix_seconds_column("satisfied_at", false),
                 ],
                 vec![

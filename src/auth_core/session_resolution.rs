@@ -251,14 +251,14 @@ fn resolve_loaded_trusted_device(
         return Ok(transition(Outcome::NeedsFullAuthentication, plan));
     }
 
-    let secret_match = loaded
-        .trusted_device_secret_match
-        .as_ref()
-        .ok_or(Error::LoadedStateContradiction(
-            "trusted-device secret match missing",
-        ))?
-        .kind();
-    validate_device_secret_match_consistency(now, secret_match, cookie, record)?;
+    let secret_match =
+        loaded
+            .trusted_device_secret_match
+            .as_ref()
+            .ok_or(Error::LoadedStateContradiction(
+                "trusted-device secret match missing",
+            ))?;
+    let secret_match = validate_device_secret_match_consistency(now, secret_match, cookie, record)?;
     if !secret_match.is_accepted() {
         return Ok(transition(
             Outcome::NeedsFullAuthentication,

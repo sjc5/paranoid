@@ -156,11 +156,28 @@ or code edits.
   method/plugin dispatch so subject binding happens only after method-owned verification
   or resolution. Generic and Postgres runtime tests now cover source-bound starts and
   missing-cookie no-write behavior.
-- Credential lifecycle design gap: current satisfied proofs carry proof family/method and
-  optional subject binding, but not the credential instance or recovery authority that
-  produced the proof. That is not enough for factor-independence or factor-collapse
-  analysis. Before building reset/recovery flows, the lower proof record shape likely
-  needs credential-instance provenance.
+- Credential-instance provenance recovery result: satisfied proofs now carry optional
+  runtime/plugin-derived proof-source provenance, and the Postgres satisfied-proof table
+  persists that source as a kind plus stable byte identifier. This fixes the lower record
+  shape needed by future factor-independence analysis. Reducer tests cover carrying the
+  source through proof completion, and a PgBouncer-backed Postgres runtime test covers
+  persisting a non-null source. The remaining gap is policy and method work: first-party
+  methods must produce stable source ids where the source is knowable, and credential
+  lifecycle/recovery transitions must reject source-less or non-independent proof stacks
+  where independence matters.
+- Recovery-code provenance recovery result: the first-party Postgres recovery-code method
+  now derives satisfied-proof source provenance from the locked unused `recovery_code_id`
+  before it records proof success and consumes the code. PgBouncer-backed runtime coverage
+  asserts the persisted satisfied proof source is the consumed recovery-code credential
+  instance.
+- Trusted-device provenance recovery result: trusted-device proofs are core-owned passive
+  credential evidence, not plugin-completed active proofs. The live reducer now rejects
+  trusted-device secret-match evidence unless that evidence is tied to the same
+  trusted-device credential id as the loaded record and presented cookie. Session records,
+  audit events, cookies, and trusted-device preconditions already carry the concrete
+  credential id through silent revival and active-proof revival. Future lifecycle policy
+  should consume that trusted-device credential id directly rather than expecting a
+  trusted-device row in the active-proof satisfied-proof stack.
 - Do not confuse reducer/internal command material with runtime-facing input. It is fine
   for reducer commands and tests to carry an `ActiveProofAttemptId` after the runtime has
   derived it from a continuation cookie. It is unhealthy for public or adapter-facing
@@ -270,9 +287,13 @@ or code edits.
 - Decide how subject-wide revocation interacts with credential lifecycle mutations: which
   changes revoke all sessions/devices immediately, which wait until execution, and which
   merely require step-up freshness.
-- Ensure lower-core records preserve room for credential instance ids in satisfied proofs
-  and lifecycle mutations. Without instance identity, independence analysis and
-  factor-collapse prevention will be too blunt.
+- Ensure the remaining first-party active-proof methods populate stable satisfied-proof
+  source ids where the source is knowable. Out-of-band methods should use the verified
+  identifier binding, configured shared-secret OTP should use the configured secret
+  instance, and federated or origin-bound methods should use the provider binding or
+  credential id. Without source identity, lifecycle policy must not count a proof as
+  independent for reset/recovery transitions. Recovery-code provenance and trusted-device
+  passive credential provenance are now separately covered above.
 
 ## Lifecycle And Replay
 
@@ -300,6 +321,15 @@ or code edits.
   that applications configure methods, storage, callbacks, route policy, cookie policy,
   CSRF policy, and lifecycle policy without manually sequencing proof ceremonies or
   security-sensitive response effects.
+- Design the weak-gate configuration surface:
+    - native Hashcash-style proof of work;
+    - human-challenge adapters such as Turnstile, reCAPTCHA, or self-hosted CAPTCHA;
+    - application risk-engine adapters;
+    - progressive friction rules;
+    - ceremony-scoped weak budgets;
+    - out-of-band delivery cooldown/dedupe policies;
+    - operator guidance for external load-balancer/CDN/reverse-proxy rate limiting as
+      defense in depth.
 
 ## Audit And Tests
 
@@ -311,7 +341,14 @@ or code edits.
 - Build the audit-event coverage matrix.
 - Add method-family tests for weak failure budgets:
     - no account lockout;
+    - no identifier-level lockout that lets attackers deny a legitimate user access;
     - no consuming initiating strong proof on weak failure;
     - failed recovery-code submissions do not consume codes;
     - weak-gate failures do not create write amplification.
+- Add challenge-issue and out-of-band delivery abuse tests:
+    - unauthenticated challenge issue requires configured preflight evidence before
+      writes;
+    - resend requires a valid challenge cookie before state work;
+    - delivery dedupe/cooldown bounds harassment without revealing identifier existence;
+    - exhausted ceremony budgets invalidate only the ceremony, not the subject.
 - Add cookie-budget and false-negative tests for challenge-bound TOTP Bloom filters.

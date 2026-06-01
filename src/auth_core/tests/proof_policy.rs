@@ -133,7 +133,7 @@ fn method_declarations_expose_core_derived_semantics_without_plugin_override() {
 #[test]
 fn satisfied_proof_stack_policy_distinguishes_full_authentication_from_contextual_proof() {
     let proof_policy = default_proof_policy();
-    let totp = proof(ProofFamily::SharedSecretOtp);
+    let totp = satisfied_proof(proof(ProofFamily::SharedSecretOtp));
 
     assert_eq!(
         proof_policy::validate_satisfied_proof_stack_for_use(
@@ -164,7 +164,7 @@ fn satisfied_proof_stack_policy_distinguishes_full_authentication_from_contextua
     assert!(
         proof_policy::validate_satisfied_proof_stack_for_use(
             &proof_policy,
-            &[proof(ProofFamily::MessageSignature)],
+            &[satisfied_proof(proof(ProofFamily::MessageSignature))],
             ProofUse::ContributeToFullAuthentication,
         )
         .is_ok()
@@ -174,7 +174,8 @@ fn satisfied_proof_stack_policy_distinguishes_full_authentication_from_contextua
 #[test]
 fn safe_default_proof_policy_requires_configured_exact_method_labels() {
     let proof_policy = default_proof_policy();
-    let sms_otp = ProofSummary::new(ProofFamily::OutOfBandCode, "sms_otp").expect("proof");
+    let sms_otp =
+        satisfied_proof(ProofSummary::new(ProofFamily::OutOfBandCode, "sms_otp").expect("proof"));
 
     assert_eq!(
         proof_policy::validate_satisfied_proof_stack_for_use(
@@ -402,7 +403,7 @@ fn fixed_proof_uses_require_their_core_owned_proof_families() {
     assert!(
         proof_policy::validate_satisfied_proof_stack_for_use(
             &proof_policy,
-            &[proof(ProofFamily::OutOfBandCode)],
+            &[satisfied_proof(proof(ProofFamily::OutOfBandCode))],
             ProofUse::BindSubjectToActiveProofAttempt,
         )
         .is_ok()
@@ -410,7 +411,7 @@ fn fixed_proof_uses_require_their_core_owned_proof_families() {
     assert!(
         proof_policy::validate_satisfied_proof_stack_for_use(
             &proof_policy,
-            &[proof(ProofFamily::MessageSignature)],
+            &[satisfied_proof(proof(ProofFamily::MessageSignature))],
             ProofUse::BindSubjectToActiveProofAttempt,
         )
         .is_ok()
@@ -418,7 +419,7 @@ fn fixed_proof_uses_require_their_core_owned_proof_families() {
     assert!(
         proof_policy::validate_satisfied_proof_stack_for_use(
             &proof_policy,
-            &[proof(ProofFamily::OriginBoundPublicKey)],
+            &[satisfied_proof(proof(ProofFamily::OriginBoundPublicKey))],
             ProofUse::BindSubjectToActiveProofAttempt,
         )
         .is_ok()
@@ -426,7 +427,9 @@ fn fixed_proof_uses_require_their_core_owned_proof_families() {
     assert!(
         proof_policy::validate_satisfied_proof_stack_for_use(
             &proof_policy,
-            &[proof(ProofFamily::FederatedIdentityAssertion)],
+            &[satisfied_proof(proof(
+                ProofFamily::FederatedIdentityAssertion,
+            ))],
             ProofUse::BindSubjectToActiveProofAttempt,
         )
         .is_ok()
@@ -434,7 +437,7 @@ fn fixed_proof_uses_require_their_core_owned_proof_families() {
     assert_eq!(
         proof_policy::validate_satisfied_proof_stack_for_use(
             &proof_policy,
-            &[proof(ProofFamily::SharedSecretOtp)],
+            &[satisfied_proof(proof(ProofFamily::SharedSecretOtp))],
             ProofUse::BindSubjectToActiveProofAttempt,
         ),
         Err(Error::ProofFamilyCannotSatisfyUse {
@@ -453,7 +456,7 @@ fn fixed_proof_uses_require_their_core_owned_proof_families() {
     assert!(
         proof_policy::validate_satisfied_proof_stack_for_use(
             &proof_policy,
-            &[proof(ProofFamily::TrustedDevice)],
+            &[satisfied_proof(proof(ProofFamily::TrustedDevice))],
             ProofUse::SilentlyReviveTrustedDeviceSession,
         )
         .is_ok()
@@ -461,7 +464,7 @@ fn fixed_proof_uses_require_their_core_owned_proof_families() {
     assert!(
         proof_policy::validate_satisfied_proof_stack_for_use(
             &proof_policy,
-            &[proof(ProofFamily::TrustedDevice)],
+            &[satisfied_proof(proof(ProofFamily::TrustedDevice))],
             ProofUse::ReduceAuthenticationRequirement,
         )
         .is_ok()
@@ -469,7 +472,7 @@ fn fixed_proof_uses_require_their_core_owned_proof_families() {
     assert_eq!(
         proof_policy::validate_satisfied_proof_stack_for_use(
             &proof_policy,
-            &[proof(ProofFamily::OutOfBandCode)],
+            &[satisfied_proof(proof(ProofFamily::OutOfBandCode))],
             ProofUse::SilentlyReviveTrustedDeviceSession,
         ),
         Err(Error::ProofFamilyCannotSatisfyUse {
@@ -480,7 +483,7 @@ fn fixed_proof_uses_require_their_core_owned_proof_families() {
     assert!(
         proof_policy::validate_satisfied_proof_stack_for_use(
             &proof_policy,
-            &[proof(ProofFamily::RecoveryCode)],
+            &[satisfied_proof(proof(ProofFamily::RecoveryCode))],
             ProofUse::RecoverOrReplaceCredential,
         )
         .is_ok()
@@ -488,7 +491,7 @@ fn fixed_proof_uses_require_their_core_owned_proof_families() {
     assert_eq!(
         proof_policy::validate_satisfied_proof_stack_for_use(
             &proof_policy,
-            &[proof(ProofFamily::MessageSignature)],
+            &[satisfied_proof(proof(ProofFamily::MessageSignature))],
             ProofUse::RecoverOrReplaceCredential,
         ),
         Err(Error::ProofFamilyCannotSatisfyUse {

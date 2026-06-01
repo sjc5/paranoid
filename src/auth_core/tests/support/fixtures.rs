@@ -253,7 +253,10 @@ pub(super) fn active_attempt_with_satisfied_proofs(
     satisfied_proofs: Vec<ProofSummary>,
 ) -> ActiveProofAttemptRecord {
     ActiveProofAttemptRecord {
-        satisfied_proofs,
+        satisfied_proofs: satisfied_proofs
+            .into_iter()
+            .map(SatisfiedProof::new_without_source)
+            .collect(),
         ..active_attempt(proof_use)
     }
 }
@@ -345,6 +348,14 @@ pub(super) fn proof(family: ProofFamily) -> ProofSummary {
     proof_method(family).verified_proof_summary()
 }
 
+pub(super) fn satisfied_proof(proof: ProofSummary) -> SatisfiedProof {
+    SatisfiedProof::new_without_source(proof)
+}
+
+pub(super) fn proof_source(value: &str) -> VerifiedProofSource {
+    VerifiedProofSource::new(VerifiedProofSourceKind::CredentialInstance, id(value))
+}
+
 pub(super) fn proof_method(family: ProofFamily) -> ProofMethodDeclaration {
     let method_label = match family {
         ProofFamily::OutOfBandCode => "email_otp",
@@ -372,6 +383,15 @@ pub(super) fn proof_method_matching(proof: &ProofSummary) -> ProofMethodDeclarat
 
 pub(super) fn verified(proof: ProofSummary, subject_id: Option<SubjectId>) -> VerifiedActiveProof {
     VerifiedActiveProof::from_summary(proof, subject_id).expect("verified proof")
+}
+
+pub(super) fn verified_with_source(
+    proof: ProofSummary,
+    subject_id: Option<SubjectId>,
+    source: VerifiedProofSource,
+) -> VerifiedActiveProof {
+    VerifiedActiveProof::from_summary_with_source(proof, subject_id, source)
+        .expect("verified proof")
 }
 
 pub(super) fn verified_proof(

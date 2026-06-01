@@ -461,7 +461,7 @@ fn issue_and_resend_out_of_band_challenge_reject_already_satisfied_out_of_band_p
         .as_mut()
         .expect("attempt")
         .satisfied_proofs
-        .push(proof(ProofFamily::OutOfBandCode));
+        .push(satisfied_proof(proof(ProofFamily::OutOfBandCode)));
 
     let resend_error = reduce_command(
         &config(),
@@ -553,7 +553,7 @@ fn completing_out_of_band_challenge_closes_challenge_family_and_records_proof() 
             && *closed_at == at(40)
             && *attempt_id == id("attempt")
             && *subject_id == Some(id("subject"))
-            && *proof == completed_proof
+            && proof.proof() == &completed_proof
             && *satisfied_at == at(40)
     ));
 }
@@ -582,7 +582,7 @@ fn completing_active_proof_carries_method_commit_work_atomically() {
     assert!(matches!(
         transition.commit_plan.mutations.as_slice(),
         [Mutation::RecordActiveProofSucceeded { proof: succeeded_proof, .. }]
-            if *succeeded_proof == proof(ProofFamily::RecoveryCode)
+            if succeeded_proof.proof() == &proof(ProofFamily::RecoveryCode)
     ));
 }
 

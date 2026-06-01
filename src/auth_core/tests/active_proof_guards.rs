@@ -108,6 +108,7 @@ fn completing_active_proof_challenge_rejects_subject_mismatch() {
 fn completing_active_proof_challenge_can_bind_unbound_attempt_to_resolved_subject() {
     let completed_proof =
         ProofSummary::new(ProofFamily::OutOfBandCode, "email_otp").expect("proof");
+    let completed_source = proof_source("email-identifier");
     let mut loaded = loaded_attempt_and_challenge_state(ProofUse::ContributeToFullAuthentication);
     loaded.active_proof_attempt_record = Some(unbound_active_attempt(
         ProofUse::ContributeToFullAuthentication,
@@ -119,7 +120,11 @@ fn completing_active_proof_challenge_can_bind_unbound_attempt_to_resolved_subjec
             now: at(40),
             attempt_id: id("attempt"),
             challenge_id: Some(id("challenge")),
-            verified_proof: verified(completed_proof.clone(), Some(id("subject"))),
+            verified_proof: verified_with_source(
+                completed_proof.clone(),
+                Some(id("subject")),
+                completed_source.clone(),
+            ),
             stateless_fast_fail: verified_stateless_fast_fail(),
             weak_proof_gate: WeakProofGateStatus::NotRequired,
             method_commit_work: Vec::new(),
@@ -140,7 +145,8 @@ fn completing_active_proof_challenge_can_bind_unbound_attempt_to_resolved_subjec
             },
         ] if *attempt_id == id("attempt")
             && *subject_id == Some(id("subject"))
-            && *proof == completed_proof
+            && proof.proof() == &completed_proof
+            && proof.source() == Some(&completed_source)
             && *satisfied_at == at(40)
     ));
 }
@@ -187,7 +193,7 @@ fn completing_webauthn_or_oidc_can_bind_unbound_attempt_to_resolved_subject() {
                 },
             ] if *attempt_id == id("attempt")
                 && *subject_id == Some(id("subject"))
-                && *completed_proof == proof
+                && completed_proof.proof() == &proof
                 && *satisfied_at == at(40)
         ));
     }

@@ -386,7 +386,7 @@ application cannot safely answer by convention:
 
 The lower layers being built now should therefore preserve room for:
 
-- credential-instance identifiers in verified proof records;
+- credential-instance/source identifiers in satisfied proof records;
 - method-owned credential lifecycle state and core-visible lifecycle metadata;
 - pending-action records with delayed execution;
 - durable effects tied to lifecycle transitions;
@@ -397,8 +397,9 @@ The lower layers being built now should therefore preserve room for:
 
 The current reducer already has some early vocabulary for this, such as
 `ProofUse::RecoverOrReplaceCredential`, subject-wide auth-state revocation, method commit
-work, durable effects, and active-proof attempts. That is not enough. It is scaffolding
-for a credential lifecycle policy layer that still needs explicit design and tests.
+work, durable effects, active-proof attempts, and satisfied-proof source provenance. That
+is not enough. It is scaffolding for a credential lifecycle policy layer that still needs
+explicit design and tests.
 
 ## Fast-Fail Transition Matrix
 
@@ -546,11 +547,55 @@ often call this proof-of-work, but the core concept is broader: a pre-state-load
 human, or risk gate whose verified evidence is minted by the runtime, not supplied by the
 caller as a naked fact.
 
-There must be no account-level lockouts. Failed weak attempts may consume only the
-in-flight attempt budget. Reaching the budget invalidates the attempt. It must not consume
-or destroy the initiating strong proof, trusted-device credential, or account.
+There must be no account-level lockouts. Account lockout is an attacker-controlled denial
+of service primitive: if an attacker can name a subject or identifier and make the
+legitimate user unable to authenticate, the auth system has handed availability to the
+attacker.
 
-Weak-gate failures before state loading should not create write amplification.
+Paranoid-owned anti-abuse policy should instead use ceremony-scoped controls:
+
+- reject malformed, expired, impossible, or stateless-fast-fail-negative requests before
+  authoritative state;
+- require weak gates before write-amplifying unauthenticated challenge starts and
+  online-guessable proof checks;
+- count weak failures against the in-flight active-proof attempt, not the account;
+- close or invalidate the current attempt when its weak budget is exhausted;
+- require a new ceremony, stronger gate, or longer proof-of-work after repeated cheap
+  failures;
+- limit or dedupe expensive side effects such as email, SMS, webhook, or push delivery;
+- preserve legitimate user recovery paths even while an attack is ongoing.
+
+Weak-gate failures before state loading should not create write amplification. A rejected
+gate should be cheap to verify and should not require updating an account, identifier, or
+attempt row. Stateful budgets are acceptable only after the request has presented enough
+Paranoid-owned continuation material to deserve stateful work, such as a valid active
+proof continuation cookie or challenge cookie.
+
+Challenge issuance is the main unauthenticated write-amplification risk. Fused
+attempt-start plus challenge-issue paths must require cheap preflight evidence before
+creating attempt/challenge rows or durable delivery commands. Existing-attempt challenge
+issue and resend paths must first validate the continuation or challenge cookie before
+loading state.
+
+Side-effect rate limiting is different from account lockout. Out-of-band delivery must
+have durable dedupe and resend/cooldown rules so attackers cannot cheaply harass an
+identifier or drain delivery budget. Those rules should bound sends and ceremonies without
+making the named subject permanently or globally unable to log in.
+
+Weak gates are configurable method/policy components. Paranoid should provide a native
+Hashcash-style proof-of-work gate because it is app-owned, providerless, and fits the
+fast-fail philosophy. Paranoid should also support human/risk gates through clear
+runtime-owned integrations: Cloudflare Turnstile, Google reCAPTCHA, self-hosted CAPTCHA,
+or an application risk engine can be adapters that verify provider evidence and mint a
+Paranoid-owned `VerifiedWeakProofGateBeforeStateLoad`-style fact. Applications choose the
+gate policy in config; they should not hand the core a naked "captcha passed" boolean.
+
+Infrastructure rate limiting remains useful defense in depth. Operators should normally
+rate-limit auth endpoints at a load balancer, reverse proxy, CDN, DNS edge, or similar
+layer to absorb volumetric floods before application code runs. That infrastructure limit
+is not the auth model's correctness mechanism: Paranoid must still be safe and
+availability-preserving without Redis, without account lockouts, and without trusting
+applications to implement auth-specific abuse controls.
 
 ## Durable Effects
 
@@ -613,6 +658,9 @@ The reducer model currently includes:
 - out-of-band challenge issue, resend, and completion;
 - configured-secret proof handling;
 - weak-proof failure accounting;
+- optional source provenance on satisfied proofs;
+- recovery-code satisfied-proof provenance from the consumed credential instance;
+- trusted-device passive credential provenance through core-owned credential ids;
 - logout;
 - session revocation;
 - trusted-device revocation;

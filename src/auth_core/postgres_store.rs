@@ -1282,7 +1282,8 @@ async fn load_active_proof_attempt(
 
     let satisfied_statement = format!(
         r#"
-        SELECT proof_family, method_label, online_guessing_risk, satisfied_at
+        SELECT proof_family, method_label, online_guessing_risk,
+               proof_source_kind, proof_source_id, satisfied_at
         FROM {}
         WHERE attempt_id = $1
         ORDER BY satisfied_at ASC, proof_family ASC, method_label ASC
@@ -1296,20 +1297,35 @@ async fn load_active_proof_attempt(
         "auth_core.load.active_proof_satisfied_proofs",
         Some(satisfied_statement.as_str()),
     );
-    let proof_rows = pooler_safe_query_as::<(i32, String, bool, i64)>(sqlx::AssertSqlSafe(
-        satisfied_statement.as_str(),
-    ))
-    .bind(attempt_id.as_bytes())
-    .fetch_all(tx.sqlx_transaction().as_mut())
-    .await
-    .map_err(DbError::query)?;
+    let proof_rows =
+        pooler_safe_query_as::<(i32, String, bool, Option<i32>, Option<Vec<u8>>, i64)>(
+            sqlx::AssertSqlSafe(satisfied_statement.as_str()),
+        )
+        .bind(attempt_id.as_bytes())
+        .fetch_all(tx.sqlx_transaction().as_mut())
+        .await
+        .map_err(DbError::query)?;
     let mut satisfied_proofs = Vec::with_capacity(proof_rows.len());
-    for (family_id, method_label, online_guessing_risk, _) in proof_rows {
-        satisfied_proofs.push(ProofSummary::new_with_online_guessing_risk(
+    for (family_id, method_label, online_guessing_risk, source_kind, source_id, _) in proof_rows {
+        let proof = ProofSummary::new_with_online_guessing_risk(
             proof_family_from_i32(family_id)?,
             method_label,
             online_guessing_risk_from_bool(online_guessing_risk),
-        )?);
+        )?;
+        let source = match (source_kind, source_id) {
+            (Some(kind), Some(source_id)) => Some(VerifiedProofSource::new(
+                verified_proof_source_kind_from_i32(kind)?,
+                VerifiedProofSourceId::from_bytes(source_id)
+                    .map_err(PostgresAuthStoreError::Core)?,
+            )),
+            (None, None) => None,
+            _ => {
+                return Err(PostgresAuthStoreError::InvalidStoredData(
+                    "satisfied proof source kind/id must both be null or both be present",
+                ));
+            }
+        };
+        satisfied_proofs.push(SatisfiedProof::new(proof, source));
     }
 
     loaded.active_proof_attempt_record = Some(ActiveProofAttemptRecord {
@@ -2395,15 +2411,16 @@ async fn insert_satisfied_proof(
     tx: &mut Tx<'_>,
     table_names: &AuthCoreTableNames,
     attempt_id: &ActiveProofAttemptId,
-    proof: &ProofSummary,
+    proof: &SatisfiedProof,
     satisfied_at: UnixSeconds,
 ) -> Result<(), PostgresAuthStoreError> {
     let statement = format!(
         r#"
         INSERT INTO {} (
-            attempt_id, proof_family, method_label, online_guessing_risk, satisfied_at
+            attempt_id, proof_family, method_label, online_guessing_risk,
+            proof_source_kind, proof_source_id, satisfied_at
         )
-        VALUES ($1,$2,$3,$4,$5)
+        VALUES ($1,$2,$3,$4,$5,$6,$7)
         "#,
         table_names
             .get(PostgresAuthCoreTable::ActiveProofSatisfiedProof)
@@ -2419,6 +2436,12 @@ async fn insert_satisfied_proof(
         .bind(i32_from_proof_family(proof.family()))
         .bind(proof.method_label())
         .bind(bool_from_online_guessing_risk(proof.online_guessing_risk()))
+        .bind(
+            proof
+                .source()
+                .map(|source| i32_from_verified_proof_source_kind(source.kind())),
+        )
+        .bind(proof.source().map(|source| source.source_id().as_bytes()))
         .bind(i64_from_unix_seconds(satisfied_at)?)
         .execute(tx.sqlx_transaction().as_mut())
         .await
@@ -3076,6 +3099,27 @@ pub(super) fn proof_family_from_i32(value: i32) -> Result<ProofFamily, PostgresA
 
 pub(super) fn i32_from_proof_family(value: ProofFamily) -> i32 {
     i32::from(proof_family_wire_id(value))
+}
+
+pub(super) fn verified_proof_source_kind_from_i32(
+    value: i32,
+) -> Result<VerifiedProofSourceKind, PostgresAuthStoreError> {
+    match value {
+        1 => Ok(VerifiedProofSourceKind::CredentialInstance),
+        2 => Ok(VerifiedProofSourceKind::OutOfBandIdentifier),
+        3 => Ok(VerifiedProofSourceKind::ExternalAuthority),
+        _ => Err(PostgresAuthStoreError::InvalidStoredData(
+            "invalid verified proof source kind",
+        )),
+    }
+}
+
+pub(super) fn i32_from_verified_proof_source_kind(value: VerifiedProofSourceKind) -> i32 {
+    match value {
+        VerifiedProofSourceKind::CredentialInstance => 1,
+        VerifiedProofSourceKind::OutOfBandIdentifier => 2,
+        VerifiedProofSourceKind::ExternalAuthority => 3,
+    }
 }
 
 fn online_guessing_risk_from_bool(value: bool) -> OnlineGuessingRisk {

@@ -337,8 +337,8 @@ impl ProofMethodDeclaration {
 /// Proof accepted by a method/plugin after method-specific verification succeeds.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct VerifiedActiveProof {
-    /// Verified proof family and concrete method label.
-    proof: ProofSummary,
+    /// Satisfied proof record.
+    satisfied_proof: SatisfiedProof,
     /// Subject resolved by this proof, when the proof family is allowed to bind one.
     subject_id: Option<SubjectId>,
 }
@@ -353,12 +353,36 @@ impl VerifiedActiveProof {
                 family: proof.family(),
             });
         }
-        Ok(Self { proof, subject_id })
+        Ok(Self {
+            satisfied_proof: SatisfiedProof::new_without_source(proof),
+            subject_id,
+        })
+    }
+
+    pub(crate) fn from_summary_with_source(
+        proof: ProofSummary,
+        subject_id: Option<SubjectId>,
+        source: VerifiedProofSource,
+    ) -> Result<Self, Error> {
+        if subject_id.is_some() && !proof.family().can_bind_subject_from_verified_proof() {
+            return Err(Error::ProofFamilyCannotCarryVerifiedSubject {
+                family: proof.family(),
+            });
+        }
+        Ok(Self {
+            satisfied_proof: SatisfiedProof::new(proof, Some(source)),
+            subject_id,
+        })
     }
 
     /// Returns the verified proof summary.
     pub fn proof(&self) -> &ProofSummary {
-        &self.proof
+        self.satisfied_proof.proof()
+    }
+
+    /// Returns the source that produced the verified proof, if available.
+    pub fn source(&self) -> Option<&VerifiedProofSource> {
+        self.satisfied_proof.source()
     }
 
     /// Returns the subject resolved by the proof, if any.
@@ -366,8 +390,99 @@ impl VerifiedActiveProof {
         self.subject_id.as_ref()
     }
 
-    pub(super) fn into_parts(self) -> (ProofSummary, Option<SubjectId>) {
-        (self.proof, self.subject_id)
+    pub(super) fn into_parts(self) -> (SatisfiedProof, Option<SubjectId>) {
+        (self.satisfied_proof, self.subject_id)
+    }
+}
+
+/// Source that produced a satisfied proof.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct VerifiedProofSource {
+    /// Kind of authority or credential that produced the proof.
+    kind: VerifiedProofSourceKind,
+    /// Stable method-owned source id.
+    source_id: VerifiedProofSourceId,
+}
+
+impl VerifiedProofSource {
+    /// Creates a verified proof source from a kind and stable source id.
+    pub fn new(kind: VerifiedProofSourceKind, source_id: VerifiedProofSourceId) -> Self {
+        Self { kind, source_id }
+    }
+
+    /// Returns the source kind.
+    pub const fn kind(&self) -> VerifiedProofSourceKind {
+        self.kind
+    }
+
+    /// Returns the stable source id.
+    pub const fn source_id(&self) -> &VerifiedProofSourceId {
+        &self.source_id
+    }
+}
+
+/// Kind of credential or authority that produced a satisfied proof.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum VerifiedProofSourceKind {
+    /// A Paranoid-auth credential instance owned by the subject.
+    CredentialInstance,
+    /// An out-of-band identifier such as an email address or phone number.
+    OutOfBandIdentifier,
+    /// An external identity authority or provider assertion.
+    ExternalAuthority,
+}
+
+/// Proof recorded inside an active-proof attempt after successful verification.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SatisfiedProof {
+    /// Verified proof family and concrete method label.
+    proof: ProofSummary,
+    /// Credential or authority source that produced this proof, when known.
+    source: Option<VerifiedProofSource>,
+}
+
+impl SatisfiedProof {
+    /// Creates a satisfied proof with source provenance.
+    pub fn new(proof: ProofSummary, source: Option<VerifiedProofSource>) -> Self {
+        Self { proof, source }
+    }
+
+    pub(crate) fn new_without_source(proof: ProofSummary) -> Self {
+        Self::new(proof, None)
+    }
+
+    /// Returns the verified proof summary.
+    pub const fn proof(&self) -> &ProofSummary {
+        &self.proof
+    }
+
+    /// Returns the source that produced this proof, if available.
+    pub const fn source(&self) -> Option<&VerifiedProofSource> {
+        self.source.as_ref()
+    }
+
+    /// Returns the core-known proof family.
+    pub const fn family(&self) -> ProofFamily {
+        self.proof.family()
+    }
+
+    /// Returns the concrete method label.
+    pub fn method_label(&self) -> &str {
+        self.proof.method_label()
+    }
+
+    /// Returns the concrete method's online-guessing risk.
+    pub const fn online_guessing_risk(&self) -> OnlineGuessingRisk {
+        self.proof.online_guessing_risk()
+    }
+
+    /// Returns whether failed attempts for this proof consume the weak-proof budget.
+    pub const fn uses_weak_attempt_failure_budget(&self) -> bool {
+        self.proof.uses_weak_attempt_failure_budget()
+    }
+
+    pub(super) fn validate(&self) -> Result<(), Error> {
+        self.proof.validate()
     }
 }
 

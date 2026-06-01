@@ -64,6 +64,10 @@ pub enum ActiveProofAttemptIdKind {}
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum ActiveProofChallengeIdKind {}
 
+/// Semantic marker for verified proof source identifiers.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub enum VerifiedProofSourceIdKind {}
+
 /// Opaque auth subject id.
 pub type SubjectId = Id<SubjectIdKind>;
 
@@ -78,6 +82,9 @@ pub type ActiveProofAttemptId = Id<ActiveProofAttemptIdKind>;
 
 /// Opaque active-proof challenge id.
 pub type ActiveProofChallengeId = Id<ActiveProofChallengeIdKind>;
+
+/// Opaque identifier for the credential or external authority that produced a proof.
+pub type VerifiedProofSourceId = Id<VerifiedProofSourceIdKind>;
 
 /// Unix timestamp in whole seconds.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]

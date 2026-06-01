@@ -587,7 +587,7 @@ pub enum PostgresPreconditionValidationStep {
         /// Observed subject binding.
         observed_subject_id: Option<SubjectId>,
         /// Observed satisfied proof stack.
-        observed_satisfied_proofs: Vec<ProofSummary>,
+        observed_satisfied_proofs: Vec<SatisfiedProof>,
         /// Observed weak proof failure count.
         observed_weak_proof_failures: u32,
         /// Observed creation time.
