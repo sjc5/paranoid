@@ -1,10 +1,8 @@
 # Paranoid
 
-**WARNING:**
-
-- Paranoid is in an alpha state and has not undergone a formal security audit. Use only at
-  your own risk and discretion, and understand that there will be frequent breaking
-  changes for the foreseeable future.
+**WARNING:** Paranoid is in an alpha state and has not undergone a formal security audit.
+Use at your own risk and discretion, and understand that there will be frequent breaking
+changes for the foreseeable future.
 
 <img src="paranoid-banner.webp" alt="Paranoid banner">
 
