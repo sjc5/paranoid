@@ -17,33 +17,27 @@ pub(super) async fn abort_blocked_task<T>(handle: tokio::task::JoinHandle<T>, ta
 }
 
 pub(super) struct TestDatabase {
-    pub(super) paranoid_pool: Pool,
+    pub(super) paranoid_pool: WritePool,
     pub(super) sqlx_pool: PgPool,
     pub(super) config: LeaseStoreConfig,
 }
 
 impl TestDatabase {
-    pub(super) async fn connect() -> Option<Self> {
-        let Some(database_url) = test_database_url() else {
-            eprintln!(
-                "skipping Postgres lease test; set TEST_DSN or PARANOID_TEST_DATABASE_URL to run"
-            );
-            return None;
-        };
-
+    pub(super) async fn connect() -> Self {
+        let database_url = test_database_url();
         let paranoid_pool = connect_paranoid_pool(&database_url).await;
         let sqlx_pool = connect_sqlx_pool(&database_url).await;
         let config = LeaseStoreConfig::new(unique_test_table_name());
 
-        Some(Self {
+        Self {
             paranoid_pool,
             sqlx_pool,
             config,
-        })
+        }
     }
 }
 
-pub(super) fn test_database_url() -> Option<String> {
+pub(super) fn test_database_url() -> String {
     ["TEST_DSN", "PARANOID_TEST_DATABASE_URL"]
         .into_iter()
         .find_map(|env_name| {
@@ -55,20 +49,23 @@ pub(super) fn test_database_url() -> Option<String> {
                 Some(trimmed.to_owned())
             }
         })
+        .expect("required Postgres test database URL missing; set TEST_DSN or PARANOID_TEST_DATABASE_URL")
 }
 
-pub(super) async fn connect_paranoid_pool(database_url: &str) -> Pool {
+pub(super) async fn connect_paranoid_pool(database_url: &str) -> WritePool {
     connect_paranoid_pool_with_max_connections(database_url, 2).await
 }
 
 pub(super) async fn connect_paranoid_pool_with_max_connections(
     database_url: &str,
     max_connections: u32,
-) -> Pool {
+) -> WritePool {
     let mut config = PoolConfig::new(SecretString::from(database_url.to_owned()));
     config.max_connections = max_connections;
     config.application_name = Some("paranoid_db_lease_postgres_test".to_owned());
-    Pool::connect(config).await.expect("connect paranoid pool")
+    WritePool::connect(config)
+        .await
+        .expect("connect paranoid pool")
 }
 
 pub(super) async fn connect_sqlx_pool(database_url: &str) -> PgPool {

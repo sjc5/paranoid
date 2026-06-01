@@ -2,9 +2,7 @@ use super::*;
 
 #[tokio::test]
 async fn queue_migration_creates_schema_that_validation_accepts() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     drop_queue_test_tables(&test_database.sqlx_pool, &test_database.config).await;
     migrate_schema(&test_database.paranoid_pool, &test_database.config)
@@ -74,9 +72,7 @@ async fn fetch_schema_ledger_fingerprint(
 
 #[tokio::test]
 async fn queue_migration_in_current_transaction_is_usable_before_commit_and_rolls_back() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let config = unique_test_config();
     let queue = Store::new(config.clone()).expect("queue");
@@ -151,9 +147,7 @@ async fn queue_migration_in_current_transaction_is_usable_before_commit_and_roll
 
 #[tokio::test]
 async fn queue_public_migration_rolls_back_created_tables_when_late_validation_fails() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let config = unique_test_config();
     drop_queue_test_tables(&test_database.sqlx_pool, &config).await;
@@ -188,9 +182,7 @@ async fn queue_public_migration_rolls_back_created_tables_when_late_validation_f
 
 #[tokio::test]
 async fn queue_schema_qualified_table_names_are_migrated_and_used_without_public_schema_bleed() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let suffix = paranoid::queue::JobId::new()
         .expect("new job id")

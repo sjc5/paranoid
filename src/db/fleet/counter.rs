@@ -7,7 +7,7 @@ impl Counter {
     }
 
     /// Atomically adds `delta` and returns the new value.
-    pub async fn add(&self, pool: &Pool, delta: i64) -> Result<i64, Error> {
+    pub async fn add(&self, pool: &WritePool, delta: i64) -> Result<i64, Error> {
         let mut tx = pool.begin_transaction().await?;
         let result = self.add_in_current_transaction(&mut tx, delta).await;
         finish_fleet_pool_transaction(FLEET_OPERATION_COUNTER_ADD, tx, result).await
@@ -16,7 +16,7 @@ impl Counter {
     /// Atomically adds `delta` inside the caller's transaction.
     pub async fn add_in_current_transaction(
         &self,
-        tx: &mut Tx<'_>,
+        tx: &mut WriteTx<'_>,
         delta: i64,
     ) -> Result<i64, Error> {
         let mut next_value = None;
@@ -64,7 +64,7 @@ impl Counter {
     }
 
     /// Stores an exact counter value.
-    pub async fn set_value(&self, pool: &Pool, value: i64) -> Result<(), Error> {
+    pub async fn set_value(&self, pool: &WritePool, value: i64) -> Result<(), Error> {
         self.item
             .set(
                 pool,
@@ -79,7 +79,7 @@ impl Counter {
     /// Stores an exact counter value inside the caller's transaction.
     pub async fn set_value_in_current_transaction(
         &self,
-        tx: &mut Tx<'_>,
+        tx: &mut WriteTx<'_>,
         value: i64,
     ) -> Result<(), Error> {
         self.item

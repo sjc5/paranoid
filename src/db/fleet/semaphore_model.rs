@@ -29,7 +29,7 @@ pub struct SemaphoreClaim {
 #[must_use = "a semaphore claim guard holds live Fleet coordination state; call release, try_release, or run_task to observe cleanup"]
 pub struct SemaphoreClaimGuard {
     pub(super) semaphore: Semaphore,
-    pub(super) pool: Pool,
+    pub(super) pool: WritePool,
     pub(super) runtime_handle: RuntimeHandle,
     pub(super) claim: Option<SemaphoreClaim>,
 }

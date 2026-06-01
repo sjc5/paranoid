@@ -1,7 +1,7 @@
 use super::{
     ComponentSchemaVersion, DatabaseOperationKind, DatabaseOperationObserver, DbError,
-    PgQualifiedTableName, Pool, SchemaLedgerConfig, Tx, finish_db_pool_transaction,
-    finish_db_pool_validation_transaction,
+    PgQualifiedTableName, Pool, SchemaLedgerConfig, Tx, WritePool, WriteTx,
+    finish_db_pool_transaction, finish_db_pool_validation_transaction,
     finish_pool_owned_rollback_only_transaction_and_preserve_rollback_error,
     finish_pool_owned_write_transaction_and_preserve_rollback_error,
     normalize_check_constraint_expression, pg_table_name_set_could_contain_same_relation,
@@ -324,7 +324,7 @@ pub struct SetIfNotExistsResult {
 
 async fn finish_kv_pool_transaction<T>(
     operation: &'static str,
-    tx: Tx<'_>,
+    tx: WriteTx<'_>,
     result: Result<T, Error>,
 ) -> Result<T, Error> {
     finish_pool_owned_write_transaction_and_preserve_rollback_error(
@@ -362,7 +362,7 @@ async fn finish_kv_read_transaction<T>(
 
 async fn finish_kv_callback_pool_transaction<T, E>(
     operation: &'static str,
-    tx: Tx<'_>,
+    tx: WriteTx<'_>,
     result: Result<T, E>,
 ) -> Result<T, E>
 where

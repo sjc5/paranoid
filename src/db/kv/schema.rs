@@ -2,7 +2,7 @@ use super::*;
 
 /// Creates and validates the configured KV schema inside one transaction.
 pub(crate) async fn migrate_schema(
-    pool: &Pool,
+    pool: &WritePool,
     config: &StoreConfig,
 ) -> Result<(), crate::db::Error> {
     validate_distinct_table_names(config)
@@ -14,7 +14,7 @@ pub(crate) async fn migrate_schema(
 
 /// Creates and validates the configured KV schema inside the caller's transaction.
 pub(crate) async fn migrate_schema_in_current_transaction(
-    tx: &mut Tx<'_>,
+    tx: &mut WriteTx<'_>,
     config: &StoreConfig,
 ) -> Result<(), crate::db::Error> {
     validate_distinct_table_names(config)

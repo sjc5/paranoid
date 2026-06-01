@@ -4,7 +4,7 @@ impl Store {
     /// Claims and processes one batch of due jobs under a logical worker name.
     pub async fn process_available_jobs_once_for_worker(
         &self,
-        pool: &Pool,
+        pool: &WritePool,
         task_registry: &TaskRegistry,
         worker_name: impl AsRef<str>,
         config: WorkerConfig,
@@ -24,7 +24,7 @@ impl Store {
     /// Starts a long-running worker task under a logical worker name.
     pub fn start_worker(
         &self,
-        pool: Pool,
+        pool: WritePool,
         task_registry: TaskRegistry,
         worker_name: impl AsRef<str>,
         config: WorkerConfig,
@@ -50,7 +50,7 @@ impl Store {
     /// Starts a long-running worker task with Fleet-backed reclaim and cleanup maintenance under a logical worker name.
     pub fn start_worker_with_fleet_maintenance(
         &self,
-        pool: Pool,
+        pool: WritePool,
         fleet_store: crate::fleet::Store,
         task_registry: TaskRegistry,
         worker_name: impl AsRef<str>,

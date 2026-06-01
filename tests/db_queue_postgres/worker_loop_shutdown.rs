@@ -2,9 +2,7 @@ use super::*;
 
 #[tokio::test]
 async fn queue_worker_run_loop_stop_signal_retries_in_flight_job_and_clears_worker_ownership() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let queue = Store::new(test_database.config.clone()).expect("queue");
     reset_queue_schema(&test_database).await;
@@ -93,9 +91,7 @@ async fn queue_worker_run_loop_stop_signal_retries_in_flight_job_and_clears_work
 
 #[tokio::test]
 async fn queue_worker_run_loop_shutdown_grace_returns_noncooperative_job_without_retrying() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let queue = Store::new(test_database.config.clone()).expect("queue");
     reset_queue_schema(&test_database).await;
@@ -188,9 +184,7 @@ async fn queue_worker_run_loop_shutdown_grace_returns_noncooperative_job_without
 
 #[tokio::test]
 async fn queue_worker_run_loop_shutdown_grace_waits_for_cooperative_handler_before_finishing() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let queue = Store::new(test_database.config.clone()).expect("queue");
     reset_queue_schema(&test_database).await;
@@ -289,9 +283,7 @@ async fn queue_worker_run_loop_shutdown_grace_waits_for_cooperative_handler_befo
 
 #[tokio::test]
 async fn queue_worker_run_loop_heartbeat_ownership_loss_cancels_handler_and_frees_capacity() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let queue = Store::new(test_database.config.clone()).expect("queue");
     reset_queue_schema(&test_database).await;
@@ -417,7 +409,7 @@ async fn queue_worker_run_loop_heartbeat_ownership_loss_cancels_handler_and_free
 
 async fn force_requeue_running_job_by_id_retrying_concurrent_row_locks(
     queue: &Store,
-    pool: &Pool,
+    pool: &WritePool,
     job_id: paranoid::queue::JobId,
     timeout: Duration,
 ) {

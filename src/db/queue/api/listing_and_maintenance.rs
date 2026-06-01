@@ -62,7 +62,7 @@ impl Store {
     /// Requeues one dead-letter job as a new pending job.
     pub async fn requeue_dead_letter_job(
         &self,
-        pool: &Pool,
+        pool: &WritePool,
         dead_letter_job_id: JobId,
         run_at_or_after: Option<JobRunAtOrAfter>,
     ) -> Result<JobId, Error> {
@@ -80,7 +80,7 @@ impl Store {
     /// Requeues one dead-letter job inside the caller's active transaction.
     pub async fn requeue_dead_letter_job_in_current_transaction(
         &self,
-        tx: &mut Tx<'_>,
+        tx: &mut WriteTx<'_>,
         dead_letter_job_id: JobId,
         run_at_or_after: Option<JobRunAtOrAfter>,
     ) -> Result<JobId, Error> {
@@ -98,7 +98,7 @@ impl Store {
     /// Deletes one dead-letter row.
     pub async fn delete_dead_letter_job(
         &self,
-        pool: &Pool,
+        pool: &WritePool,
         dead_letter_job_id: JobId,
     ) -> Result<(), Error> {
         let mut tx = pool.begin_transaction().await.map_err(Error::from)?;
@@ -111,7 +111,7 @@ impl Store {
     /// Deletes one dead-letter row inside the caller's active transaction.
     pub async fn delete_dead_letter_job_in_current_transaction(
         &self,
-        tx: &mut Tx<'_>,
+        tx: &mut WriteTx<'_>,
         dead_letter_job_id: JobId,
     ) -> Result<(), Error> {
         let database_operation_observer = tx.database_operation_observer().cloned();
@@ -127,7 +127,7 @@ impl Store {
     /// Deletes one bounded batch of available completed jobs older than `older_than`.
     pub async fn cleanup_available_completed_jobs_older_than_once(
         &self,
-        pool: &Pool,
+        pool: &WritePool,
         older_than: Duration,
         batch_size: u32,
     ) -> Result<u64, Error> {
@@ -143,7 +143,7 @@ impl Store {
     /// Deletes available completed jobs older than `older_than` in bounded batches until no full batch remains.
     pub async fn cleanup_available_completed_jobs_older_than_until_empty(
         &self,
-        pool: &Pool,
+        pool: &WritePool,
         older_than: Duration,
         batch_size: u32,
         delay_between_batches: Duration,
@@ -161,7 +161,7 @@ impl Store {
 
     pub(in crate::db::queue) async fn cleanup_available_completed_jobs_older_than_until_empty_or_cancelled(
         &self,
-        pool: &Pool,
+        pool: &WritePool,
         older_than: Duration,
         batch_size: u32,
         delay_between_batches: Duration,
@@ -182,7 +182,7 @@ impl Store {
     /// Deletes one bounded completed-job cleanup batch inside the caller's transaction.
     pub async fn cleanup_available_completed_jobs_older_than_once_in_current_transaction(
         &self,
-        tx: &mut Tx<'_>,
+        tx: &mut WriteTx<'_>,
         older_than: Duration,
         batch_size: u32,
     ) -> Result<u64, Error> {
@@ -201,7 +201,7 @@ impl Store {
     /// Deletes one bounded batch of available failed jobs older than `older_than`.
     pub async fn cleanup_available_failed_jobs_older_than_once(
         &self,
-        pool: &Pool,
+        pool: &WritePool,
         older_than: Duration,
         batch_size: u32,
     ) -> Result<u64, Error> {
@@ -217,7 +217,7 @@ impl Store {
     /// Deletes available failed jobs older than `older_than` in bounded batches until no full batch remains.
     pub async fn cleanup_available_failed_jobs_older_than_until_empty(
         &self,
-        pool: &Pool,
+        pool: &WritePool,
         older_than: Duration,
         batch_size: u32,
         delay_between_batches: Duration,
@@ -235,7 +235,7 @@ impl Store {
 
     pub(in crate::db::queue) async fn cleanup_available_failed_jobs_older_than_until_empty_or_cancelled(
         &self,
-        pool: &Pool,
+        pool: &WritePool,
         older_than: Duration,
         batch_size: u32,
         delay_between_batches: Duration,
@@ -256,7 +256,7 @@ impl Store {
     /// Deletes one bounded failed-job cleanup batch inside the caller's transaction.
     pub async fn cleanup_available_failed_jobs_older_than_once_in_current_transaction(
         &self,
-        tx: &mut Tx<'_>,
+        tx: &mut WriteTx<'_>,
         older_than: Duration,
         batch_size: u32,
     ) -> Result<u64, Error> {
@@ -275,7 +275,7 @@ impl Store {
     /// Deletes one bounded batch of available dead-letter jobs older than `older_than`.
     pub async fn cleanup_available_dead_letter_jobs_older_than_once(
         &self,
-        pool: &Pool,
+        pool: &WritePool,
         older_than: Duration,
         batch_size: u32,
     ) -> Result<u64, Error> {
@@ -291,7 +291,7 @@ impl Store {
     /// Deletes available dead-letter jobs older than `older_than` in bounded batches until no full batch remains.
     pub async fn cleanup_available_dead_letter_jobs_older_than_until_empty(
         &self,
-        pool: &Pool,
+        pool: &WritePool,
         older_than: Duration,
         batch_size: u32,
         delay_between_batches: Duration,
@@ -308,7 +308,7 @@ impl Store {
 
     pub(in crate::db::queue) async fn cleanup_available_dead_letter_jobs_older_than_until_empty_or_cancelled(
         &self,
-        pool: &Pool,
+        pool: &WritePool,
         older_than: Duration,
         batch_size: u32,
         delay_between_batches: Duration,
@@ -328,7 +328,7 @@ impl Store {
     /// Deletes one bounded dead-letter cleanup batch inside the caller's transaction.
     pub async fn cleanup_available_dead_letter_jobs_older_than_once_in_current_transaction(
         &self,
-        tx: &mut Tx<'_>,
+        tx: &mut WriteTx<'_>,
         older_than: Duration,
         batch_size: u32,
     ) -> Result<u64, Error> {
@@ -346,7 +346,7 @@ impl Store {
     /// Reclaims available stale running jobs in one pass.
     pub async fn reclaim_available_stale_running_jobs_once(
         &self,
-        pool: &Pool,
+        pool: &WritePool,
         stale_threshold: Duration,
         reclaim_batch_size: u32,
         move_expired_max_retry_jobs_to_dead_letter: bool,
@@ -366,7 +366,7 @@ impl Store {
     /// Reclaims available stale running jobs inside the caller's active transaction.
     pub async fn reclaim_available_stale_running_jobs_once_in_current_transaction(
         &self,
-        tx: &mut Tx<'_>,
+        tx: &mut WriteTx<'_>,
         stale_threshold: Duration,
         reclaim_batch_size: u32,
         move_expired_max_retry_jobs_to_dead_letter: bool,

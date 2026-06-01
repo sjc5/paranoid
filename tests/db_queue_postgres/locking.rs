@@ -2,12 +2,7 @@ use super::*;
 
 #[tokio::test]
 async fn queue_enqueue_future_abort_while_waiting_for_pool_connection_does_not_write_later() {
-    let Some(database_url) = test_database_url() else {
-        eprintln!(
-            "skipping Postgres queue test; set TEST_DATABASE_URL, TEST_DSN, or PARANOID_TEST_DATABASE_URL to run"
-        );
-        return;
-    };
+    let database_url = test_database_url();
 
     let paranoid_pool = connect_paranoid_pool_with_max_connections(&database_url, 1).await;
     let sqlx_pool = connect_sqlx_pool(&database_url).await;
@@ -58,9 +53,7 @@ async fn queue_enqueue_future_abort_while_waiting_for_pool_connection_does_not_w
 
 #[tokio::test]
 async fn queue_cancel_pending_job_returns_locked_without_waiting_for_row_lock() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let queue = Store::new(test_database.config.clone()).expect("queue");
     reset_queue_schema(&test_database).await;
@@ -114,9 +107,7 @@ async fn queue_cancel_pending_job_returns_locked_without_waiting_for_row_lock() 
 
 #[tokio::test]
 async fn queue_by_id_operator_mutations_return_locked_without_mutating_locked_rows() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let queue = Store::new(test_database.config.clone()).expect("queue");
     reset_queue_schema(&test_database).await;
@@ -298,9 +289,7 @@ async fn queue_by_id_operator_mutations_return_locked_without_mutating_locked_ro
 
 #[tokio::test]
 async fn queue_bulk_retry_and_dead_letter_skip_locked_rows_and_apply_after_release() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let queue = Store::new(test_database.config.clone()).expect("queue");
     reset_queue_schema(&test_database).await;

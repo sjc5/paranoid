@@ -2,9 +2,7 @@ use super::*;
 
 #[tokio::test]
 async fn fleet_migration_creates_and_validates_backing_kv_and_lease_schema() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     drop_fleet_test_tables(&test_database.sqlx_pool, &test_database.config).await;
 
@@ -70,9 +68,7 @@ async fn fleet_migration_creates_and_validates_backing_kv_and_lease_schema() {
 
 #[tokio::test]
 async fn fleet_validation_rejects_default_collation_backing_text_columns() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     for (table_name, column_name) in fleet_correctness_text_columns(&test_database.config) {
         drop_fleet_test_tables(&test_database.sqlx_pool, &test_database.config).await;

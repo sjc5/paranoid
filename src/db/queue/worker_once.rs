@@ -2,7 +2,7 @@ use super::*;
 
 pub(super) async fn process_available_jobs_once_for_worker(
     queue: Store,
-    pool: Pool,
+    pool: WritePool,
     task_registry: TaskRegistry,
     worker_owner_id: WorkerOwnerId,
     resolved_config: ResolvedWorkerConfig,
@@ -108,7 +108,7 @@ struct BestEffortClaimedJobsCleanupOnDrop {
 
 struct ClaimedJobsCleanup {
     queue: Store,
-    pool: Pool,
+    pool: WritePool,
     runtime_handle: RuntimeHandle,
     worker_owner_id: WorkerOwnerId,
     database_operation_timeout: Duration,
@@ -117,7 +117,7 @@ struct ClaimedJobsCleanup {
 impl BestEffortClaimedJobsCleanupOnDrop {
     fn new(
         queue: Store,
-        pool: Pool,
+        pool: WritePool,
         worker_owner_id: WorkerOwnerId,
         database_operation_timeout: Duration,
         armed: bool,

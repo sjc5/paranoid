@@ -9,7 +9,7 @@ impl Store {
     /// Claims due pending jobs for the supplied registered task names.
     pub(crate) async fn claim_available_jobs_for_worker(
         &self,
-        pool: &Pool,
+        pool: &WritePool,
         registered_task_names: &[String],
         claim_limit: u32,
         worker_id: impl AsRef<str>,
@@ -32,7 +32,7 @@ impl Store {
     /// Claims due pending jobs inside the caller's active transaction.
     pub(crate) async fn claim_available_jobs_for_worker_in_current_transaction(
         &self,
-        tx: &mut Tx<'_>,
+        tx: &mut WriteTx<'_>,
         registered_task_names: &[String],
         claim_limit: u32,
         worker_id: impl AsRef<str>,
@@ -55,7 +55,7 @@ impl Store {
     /// Marks an owned running job as started.
     pub(crate) async fn mark_owned_running_job_started(
         &self,
-        pool: &Pool,
+        pool: &WritePool,
         job_id: JobId,
         worker_id: impl AsRef<str>,
     ) -> Result<(), Error> {
@@ -70,7 +70,7 @@ impl Store {
     /// Marks an owned running job as started inside the caller's active transaction.
     pub(crate) async fn mark_owned_running_job_started_in_current_transaction(
         &self,
-        tx: &mut Tx<'_>,
+        tx: &mut WriteTx<'_>,
         job_id: JobId,
         worker_id: impl AsRef<str>,
     ) -> Result<(), Error> {
@@ -94,7 +94,7 @@ impl Store {
     /// Marks an owned running job as completed.
     pub(crate) async fn mark_owned_running_job_completed(
         &self,
-        pool: &Pool,
+        pool: &WritePool,
         job_id: JobId,
         worker_id: impl AsRef<str>,
     ) -> Result<(), Error> {
@@ -109,7 +109,7 @@ impl Store {
     /// Marks an owned running job as completed inside the caller's active transaction.
     pub(crate) async fn mark_owned_running_job_completed_in_current_transaction(
         &self,
-        tx: &mut Tx<'_>,
+        tx: &mut WriteTx<'_>,
         job_id: JobId,
         worker_id: impl AsRef<str>,
     ) -> Result<(), Error> {
@@ -133,7 +133,7 @@ impl Store {
     /// Records an execution heartbeat for an owned running job.
     pub(crate) async fn touch_owned_running_job_execution_heartbeat(
         &self,
-        pool: &Pool,
+        pool: &WritePool,
         job_id: JobId,
         worker_id: impl AsRef<str>,
     ) -> Result<(), Error> {
@@ -150,7 +150,7 @@ impl Store {
     /// Records an execution heartbeat inside the caller's active transaction.
     pub(crate) async fn touch_owned_running_job_execution_heartbeat_in_current_transaction(
         &self,
-        tx: &mut Tx<'_>,
+        tx: &mut WriteTx<'_>,
         job_id: JobId,
         worker_id: impl AsRef<str>,
     ) -> Result<(), Error> {
@@ -174,7 +174,7 @@ impl Store {
     /// Schedules an owned running job for retry and clears worker ownership.
     pub(crate) async fn schedule_owned_running_job_retry(
         &self,
-        pool: &Pool,
+        pool: &WritePool,
         job_id: JobId,
         worker_id: impl AsRef<str>,
         new_retry_count: u32,
@@ -199,7 +199,7 @@ impl Store {
     /// Schedules an owned running job for retry inside the caller's active transaction.
     pub(crate) async fn schedule_owned_running_job_retry_in_current_transaction(
         &self,
-        tx: &mut Tx<'_>,
+        tx: &mut WriteTx<'_>,
         job_id: JobId,
         worker_id: impl AsRef<str>,
         new_retry_count: u32,
@@ -230,7 +230,7 @@ impl Store {
     /// Marks an owned running job as failed.
     pub(crate) async fn mark_owned_running_job_failed(
         &self,
-        pool: &Pool,
+        pool: &WritePool,
         job_id: JobId,
         worker_id: impl AsRef<str>,
         error_message: impl AsRef<str>,
@@ -253,7 +253,7 @@ impl Store {
     /// Marks an owned running job as failed inside the caller's active transaction.
     pub(crate) async fn mark_owned_running_job_failed_in_current_transaction(
         &self,
-        tx: &mut Tx<'_>,
+        tx: &mut WriteTx<'_>,
         job_id: JobId,
         worker_id: impl AsRef<str>,
         error_message: impl AsRef<str>,
@@ -276,7 +276,7 @@ impl Store {
     /// Moves an owned running job into dead-letter storage.
     pub(crate) async fn move_owned_running_job_to_dead_letter(
         &self,
-        pool: &Pool,
+        pool: &WritePool,
         job_id: JobId,
         worker_id: impl AsRef<str>,
         error_message: impl AsRef<str>,
@@ -301,7 +301,7 @@ impl Store {
     /// Moves an owned running job into dead-letter storage inside the caller's active transaction.
     pub(crate) async fn move_owned_running_job_to_dead_letter_in_current_transaction(
         &self,
-        tx: &mut Tx<'_>,
+        tx: &mut WriteTx<'_>,
         job_id: JobId,
         worker_id: impl AsRef<str>,
         error_message: impl AsRef<str>,
@@ -328,7 +328,7 @@ impl Store {
     /// Returns an owned running job to pending only if handler execution never started.
     pub(crate) async fn return_owned_unstarted_running_job_to_pending(
         &self,
-        pool: &Pool,
+        pool: &WritePool,
         job_id: JobId,
         worker_id: impl AsRef<str>,
     ) -> Result<(), Error> {
@@ -346,7 +346,7 @@ impl Store {
     /// Returns an owned unstarted running job to pending inside the caller's active transaction.
     pub(crate) async fn return_owned_unstarted_running_job_to_pending_in_current_transaction(
         &self,
-        tx: &mut Tx<'_>,
+        tx: &mut WriteTx<'_>,
         job_id: JobId,
         worker_id: impl AsRef<str>,
     ) -> Result<(), Error> {
@@ -372,7 +372,7 @@ impl Store {
     /// Returns an owned running job to pending only if handler execution started.
     pub(crate) async fn return_owned_started_running_job_to_pending(
         &self,
-        pool: &Pool,
+        pool: &WritePool,
         job_id: JobId,
         worker_id: impl AsRef<str>,
     ) -> Result<(), Error> {
@@ -390,7 +390,7 @@ impl Store {
     /// Returns an owned started running job to pending inside the caller's active transaction.
     pub(crate) async fn return_owned_started_running_job_to_pending_in_current_transaction(
         &self,
-        tx: &mut Tx<'_>,
+        tx: &mut WriteTx<'_>,
         job_id: JobId,
         worker_id: impl AsRef<str>,
     ) -> Result<(), Error> {
@@ -416,7 +416,7 @@ impl Store {
     /// Returns currently available unstarted running jobs owned by a worker to pending.
     pub(crate) async fn return_available_owned_unstarted_running_jobs_to_pending(
         &self,
-        pool: &Pool,
+        pool: &WritePool,
         worker_id: impl AsRef<str>,
     ) -> Result<u64, Error> {
         validate_worker_owner_id(worker_id.as_ref())?;
@@ -437,7 +437,7 @@ impl Store {
     /// Returns available unstarted running jobs inside the caller's active transaction.
     pub(crate) async fn return_available_owned_unstarted_running_jobs_to_pending_in_current_transaction(
         &self,
-        tx: &mut Tx<'_>,
+        tx: &mut WriteTx<'_>,
         worker_id: impl AsRef<str>,
     ) -> Result<u64, Error> {
         validate_worker_owner_id(worker_id.as_ref())?;
@@ -456,7 +456,7 @@ impl Store {
     /// Returns currently available started running jobs owned by a worker to pending.
     pub(crate) async fn return_available_owned_started_running_jobs_to_pending(
         &self,
-        pool: &Pool,
+        pool: &WritePool,
         worker_id: impl AsRef<str>,
     ) -> Result<u64, Error> {
         validate_worker_owner_id(worker_id.as_ref())?;
@@ -477,7 +477,7 @@ impl Store {
     /// Returns available started running jobs inside the caller's active transaction.
     pub(crate) async fn return_available_owned_started_running_jobs_to_pending_in_current_transaction(
         &self,
-        tx: &mut Tx<'_>,
+        tx: &mut WriteTx<'_>,
         worker_id: impl AsRef<str>,
     ) -> Result<u64, Error> {
         validate_worker_owner_id(worker_id.as_ref())?;
@@ -498,7 +498,7 @@ impl ManualWorkerProtocol<'_> {
     /// Claims due pending jobs for the supplied registered task names and worker owner ID.
     pub async fn claim_available_jobs_for_worker_owner(
         &self,
-        pool: &Pool,
+        pool: &WritePool,
         registered_task_names: &[String],
         claim_limit: u32,
         worker_owner_id: &WorkerOwnerId,
@@ -516,7 +516,7 @@ impl ManualWorkerProtocol<'_> {
     /// Claims due pending jobs for a worker owner ID inside the caller's active transaction.
     pub async fn claim_available_jobs_for_worker_owner_in_current_transaction(
         &self,
-        tx: &mut Tx<'_>,
+        tx: &mut WriteTx<'_>,
         registered_task_names: &[String],
         claim_limit: u32,
         worker_owner_id: &WorkerOwnerId,
@@ -534,7 +534,7 @@ impl ManualWorkerProtocol<'_> {
     /// Marks an owned running job as started.
     pub async fn mark_owned_running_job_started(
         &self,
-        pool: &Pool,
+        pool: &WritePool,
         job_id: JobId,
         worker_owner_id: &WorkerOwnerId,
     ) -> Result<(), Error> {
@@ -546,7 +546,7 @@ impl ManualWorkerProtocol<'_> {
     /// Marks an owned running job as started inside the caller's active transaction.
     pub async fn mark_owned_running_job_started_in_current_transaction(
         &self,
-        tx: &mut Tx<'_>,
+        tx: &mut WriteTx<'_>,
         job_id: JobId,
         worker_owner_id: &WorkerOwnerId,
     ) -> Result<(), Error> {
@@ -562,7 +562,7 @@ impl ManualWorkerProtocol<'_> {
     /// Marks an owned running job as completed.
     pub async fn mark_owned_running_job_completed(
         &self,
-        pool: &Pool,
+        pool: &WritePool,
         job_id: JobId,
         worker_owner_id: &WorkerOwnerId,
     ) -> Result<(), Error> {
@@ -574,7 +574,7 @@ impl ManualWorkerProtocol<'_> {
     /// Marks an owned running job as completed inside the caller's active transaction.
     pub async fn mark_owned_running_job_completed_in_current_transaction(
         &self,
-        tx: &mut Tx<'_>,
+        tx: &mut WriteTx<'_>,
         job_id: JobId,
         worker_owner_id: &WorkerOwnerId,
     ) -> Result<(), Error> {
@@ -590,7 +590,7 @@ impl ManualWorkerProtocol<'_> {
     /// Records an execution heartbeat for an owned running job.
     pub async fn touch_owned_running_job_execution_heartbeat(
         &self,
-        pool: &Pool,
+        pool: &WritePool,
         job_id: JobId,
         worker_owner_id: &WorkerOwnerId,
     ) -> Result<(), Error> {
@@ -602,7 +602,7 @@ impl ManualWorkerProtocol<'_> {
     /// Records an execution heartbeat inside the caller's active transaction.
     pub async fn touch_owned_running_job_execution_heartbeat_in_current_transaction(
         &self,
-        tx: &mut Tx<'_>,
+        tx: &mut WriteTx<'_>,
         job_id: JobId,
         worker_owner_id: &WorkerOwnerId,
     ) -> Result<(), Error> {
@@ -618,7 +618,7 @@ impl ManualWorkerProtocol<'_> {
     /// Schedules an owned running job for retry and clears worker ownership.
     pub async fn schedule_owned_running_job_retry(
         &self,
-        pool: &Pool,
+        pool: &WritePool,
         job_id: JobId,
         worker_owner_id: &WorkerOwnerId,
         new_retry_count: u32,
@@ -640,7 +640,7 @@ impl ManualWorkerProtocol<'_> {
     /// Schedules an owned running job for retry inside the caller's active transaction.
     pub async fn schedule_owned_running_job_retry_in_current_transaction(
         &self,
-        tx: &mut Tx<'_>,
+        tx: &mut WriteTx<'_>,
         job_id: JobId,
         worker_owner_id: &WorkerOwnerId,
         new_retry_count: u32,
@@ -662,7 +662,7 @@ impl ManualWorkerProtocol<'_> {
     /// Marks an owned running job as failed.
     pub async fn mark_owned_running_job_failed(
         &self,
-        pool: &Pool,
+        pool: &WritePool,
         job_id: JobId,
         worker_owner_id: &WorkerOwnerId,
         error_message: impl AsRef<str>,
@@ -682,7 +682,7 @@ impl ManualWorkerProtocol<'_> {
     /// Marks an owned running job as failed inside the caller's active transaction.
     pub async fn mark_owned_running_job_failed_in_current_transaction(
         &self,
-        tx: &mut Tx<'_>,
+        tx: &mut WriteTx<'_>,
         job_id: JobId,
         worker_owner_id: &WorkerOwnerId,
         error_message: impl AsRef<str>,
@@ -702,7 +702,7 @@ impl ManualWorkerProtocol<'_> {
     /// Moves an owned running job into dead-letter storage.
     pub async fn move_owned_running_job_to_dead_letter(
         &self,
-        pool: &Pool,
+        pool: &WritePool,
         job_id: JobId,
         worker_owner_id: &WorkerOwnerId,
         error_message: impl AsRef<str>,
@@ -724,7 +724,7 @@ impl ManualWorkerProtocol<'_> {
     /// Moves an owned running job into dead-letter storage inside the caller's active transaction.
     pub async fn move_owned_running_job_to_dead_letter_in_current_transaction(
         &self,
-        tx: &mut Tx<'_>,
+        tx: &mut WriteTx<'_>,
         job_id: JobId,
         worker_owner_id: &WorkerOwnerId,
         error_message: impl AsRef<str>,
@@ -746,7 +746,7 @@ impl ManualWorkerProtocol<'_> {
     /// Returns an owned running job to pending only if handler execution never started.
     pub async fn return_owned_unstarted_running_job_to_pending(
         &self,
-        pool: &Pool,
+        pool: &WritePool,
         job_id: JobId,
         worker_owner_id: &WorkerOwnerId,
     ) -> Result<(), Error> {
@@ -758,7 +758,7 @@ impl ManualWorkerProtocol<'_> {
     /// Returns an owned unstarted running job to pending inside the caller's active transaction.
     pub async fn return_owned_unstarted_running_job_to_pending_in_current_transaction(
         &self,
-        tx: &mut Tx<'_>,
+        tx: &mut WriteTx<'_>,
         job_id: JobId,
         worker_owner_id: &WorkerOwnerId,
     ) -> Result<(), Error> {
@@ -774,7 +774,7 @@ impl ManualWorkerProtocol<'_> {
     /// Returns an owned running job to pending only if handler execution started.
     pub async fn return_owned_started_running_job_to_pending(
         &self,
-        pool: &Pool,
+        pool: &WritePool,
         job_id: JobId,
         worker_owner_id: &WorkerOwnerId,
     ) -> Result<(), Error> {
@@ -786,7 +786,7 @@ impl ManualWorkerProtocol<'_> {
     /// Returns an owned started running job to pending inside the caller's active transaction.
     pub async fn return_owned_started_running_job_to_pending_in_current_transaction(
         &self,
-        tx: &mut Tx<'_>,
+        tx: &mut WriteTx<'_>,
         job_id: JobId,
         worker_owner_id: &WorkerOwnerId,
     ) -> Result<(), Error> {
@@ -802,7 +802,7 @@ impl ManualWorkerProtocol<'_> {
     /// Returns currently available unstarted running jobs owned by a worker to pending.
     pub async fn return_available_owned_unstarted_running_jobs_to_pending(
         &self,
-        pool: &Pool,
+        pool: &WritePool,
         worker_owner_id: &WorkerOwnerId,
     ) -> Result<u64, Error> {
         self.queue
@@ -816,7 +816,7 @@ impl ManualWorkerProtocol<'_> {
     /// Returns available unstarted running jobs inside the caller's active transaction.
     pub async fn return_available_owned_unstarted_running_jobs_to_pending_in_current_transaction(
         &self,
-        tx: &mut Tx<'_>,
+        tx: &mut WriteTx<'_>,
         worker_owner_id: &WorkerOwnerId,
     ) -> Result<u64, Error> {
         self.queue
@@ -830,7 +830,7 @@ impl ManualWorkerProtocol<'_> {
     /// Returns currently available started running jobs owned by a worker to pending.
     pub async fn return_available_owned_started_running_jobs_to_pending(
         &self,
-        pool: &Pool,
+        pool: &WritePool,
         worker_owner_id: &WorkerOwnerId,
     ) -> Result<u64, Error> {
         self.queue
@@ -841,7 +841,7 @@ impl ManualWorkerProtocol<'_> {
     /// Returns available started running jobs inside the caller's active transaction.
     pub async fn return_available_owned_started_running_jobs_to_pending_in_current_transaction(
         &self,
-        tx: &mut Tx<'_>,
+        tx: &mut WriteTx<'_>,
         worker_owner_id: &WorkerOwnerId,
     ) -> Result<u64, Error> {
         self.queue

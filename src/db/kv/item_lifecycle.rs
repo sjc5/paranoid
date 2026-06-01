@@ -5,7 +5,7 @@ where
     T: Plaintext,
 {
     /// Deletes a typed item.
-    pub async fn delete<S, I>(&self, pool: &Pool, key_parts: I) -> Result<(), Error>
+    pub async fn delete<S, I>(&self, pool: &WritePool, key_parts: I) -> Result<(), Error>
     where
         S: AsRef<str>,
         I: IntoIterator<Item = S>,
@@ -17,7 +17,7 @@ where
     /// Deletes a typed item inside the caller's current transaction.
     pub async fn delete_in_current_transaction<S, I>(
         &self,
-        tx: &mut Tx<'_>,
+        tx: &mut WriteTx<'_>,
         key_parts: I,
     ) -> Result<(), Error>
     where
@@ -29,7 +29,7 @@ where
     }
 
     /// Updates `updated_at` for a live typed item.
-    pub async fn touch<S, I>(&self, pool: &Pool, key_parts: I) -> Result<(), Error>
+    pub async fn touch<S, I>(&self, pool: &WritePool, key_parts: I) -> Result<(), Error>
     where
         S: AsRef<str>,
         I: IntoIterator<Item = S>,
@@ -41,7 +41,7 @@ where
     /// Updates `updated_at` for a live typed item inside the caller's transaction.
     pub async fn touch_in_current_transaction<S, I>(
         &self,
-        tx: &mut Tx<'_>,
+        tx: &mut WriteTx<'_>,
         key_parts: I,
     ) -> Result<(), Error>
     where
@@ -53,7 +53,7 @@ where
     }
 
     /// Replaces the expiration for a live typed item.
-    pub async fn set_ttl<S, I>(&self, pool: &Pool, key_parts: I, ttl: Ttl) -> Result<(), Error>
+    pub async fn set_ttl<S, I>(&self, pool: &WritePool, key_parts: I, ttl: Ttl) -> Result<(), Error>
     where
         S: AsRef<str>,
         I: IntoIterator<Item = S>,
@@ -65,7 +65,7 @@ where
     /// Replaces the expiration for a live typed item inside the caller's transaction.
     pub async fn set_ttl_in_current_transaction<S, I>(
         &self,
-        tx: &mut Tx<'_>,
+        tx: &mut WriteTx<'_>,
         key_parts: I,
         ttl: Ttl,
     ) -> Result<(), Error>
@@ -80,7 +80,7 @@ where
     }
 
     /// Marks a live typed item as expired.
-    pub async fn expire<S, I>(&self, pool: &Pool, key_parts: I) -> Result<(), Error>
+    pub async fn expire<S, I>(&self, pool: &WritePool, key_parts: I) -> Result<(), Error>
     where
         S: AsRef<str>,
         I: IntoIterator<Item = S>,
@@ -92,7 +92,7 @@ where
     /// Marks a live typed item as expired inside the caller's transaction.
     pub async fn expire_in_current_transaction<S, I>(
         &self,
-        tx: &mut Tx<'_>,
+        tx: &mut WriteTx<'_>,
         key_parts: I,
     ) -> Result<(), Error>
     where
@@ -104,7 +104,7 @@ where
     }
 
     /// Physically deletes all rows under this item prefix inside one transaction.
-    pub async fn delete_entire_namespace_atomically(&self, pool: &Pool) -> Result<u64, Error> {
+    pub async fn delete_entire_namespace_atomically(&self, pool: &WritePool) -> Result<u64, Error> {
         let mut tx = pool.begin_transaction().await?;
         let result = self
             .delete_entire_namespace_in_current_transaction(&mut tx)
@@ -115,7 +115,7 @@ where
     /// Physically deletes all rows under this item prefix inside a transaction.
     pub async fn delete_entire_namespace_in_current_transaction(
         &self,
-        tx: &mut Tx<'_>,
+        tx: &mut WriteTx<'_>,
     ) -> Result<u64, Error> {
         let mut total_deleted = 0;
         loop {
@@ -137,7 +137,7 @@ where
     /// Acquires one expired or absent suffix slot and stores a typed value in it.
     pub async fn acquire_slot<S>(
         &self,
-        pool: &Pool,
+        pool: &WritePool,
         candidate_suffixes: &[S],
         value: &T,
         ttl: Ttl,
@@ -160,7 +160,7 @@ where
     /// Acquires one expired or absent suffix slot inside the caller's transaction.
     pub async fn acquire_slot_in_current_transaction<S>(
         &self,
-        tx: &mut Tx<'_>,
+        tx: &mut WriteTx<'_>,
         candidate_suffixes: &[S],
         value: &T,
         ttl: Ttl,

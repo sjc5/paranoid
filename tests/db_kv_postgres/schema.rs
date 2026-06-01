@@ -2,9 +2,7 @@ use super::*;
 
 #[tokio::test]
 async fn kv_migration_creates_schema_that_validation_accepts() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     drop_test_table(&test_database.sqlx_pool, &test_database.config.table_name).await;
     migrate_kv_schema(&test_database.paranoid_pool, &test_database.config)
@@ -58,9 +56,7 @@ async fn kv_migration_creates_schema_that_validation_accepts() {
 
 #[tokio::test]
 async fn kv_validation_rejects_missing_schema_ledger_row() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     drop_test_table(&test_database.sqlx_pool, &test_database.config.table_name).await;
     migrate_kv_schema(&test_database.paranoid_pool, &test_database.config)
@@ -89,9 +85,7 @@ async fn kv_validation_rejects_missing_schema_ledger_row() {
 
 #[tokio::test]
 async fn kv_migration_rejects_conflicting_schema_ledger_row_without_overwriting_it() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     drop_test_table(&test_database.sqlx_pool, &test_database.config.table_name).await;
     migrate_kv_schema(&test_database.paranoid_pool, &test_database.config)
@@ -138,9 +132,7 @@ async fn kv_migration_rejects_conflicting_schema_ledger_row_without_overwriting_
 
 #[tokio::test]
 async fn kv_migration_rejects_default_collation_schema_ledger_text_columns() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     for default_collation_column in ["component", "instance_key", "schema_fingerprint"] {
         let mut config = KvStoreConfig::new(unique_test_table_name()).expect("kv config");
@@ -175,9 +167,7 @@ async fn kv_migration_rejects_default_collation_schema_ledger_text_columns() {
 
 #[tokio::test]
 async fn kv_schema_ledger_migration_is_safe_under_concurrent_startup() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let configs = (0..12)
         .map(|_| KvStoreConfig::new(unique_test_table_name()).expect("kv config"))
@@ -268,9 +258,7 @@ fn schema_ledger_test_collation(default_collation_column: &str, column_name: &st
 
 #[tokio::test]
 async fn kv_migration_in_current_transaction_is_usable_before_commit_and_rolls_back() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let config = KvStoreConfig::new(unique_test_table_name()).expect("kv config");
     let store = KvStore::new(config.clone()).expect("kv store");
@@ -367,9 +355,7 @@ async fn kv_migration_in_current_transaction_is_usable_before_commit_and_rolls_b
 
 #[tokio::test]
 async fn kv_operations_report_database_errors_for_missing_table() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let store = KvStore::new(test_database.config.clone()).expect("kv store");
     let key = KvKey::from_parts(["missing-table", "key"]).expect("key");

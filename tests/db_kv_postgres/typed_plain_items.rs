@@ -2,9 +2,7 @@ use super::*;
 
 #[tokio::test]
 async fn kv_plain_item_round_trips_scans_lifecycle_and_deletes_namespace() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let store = KvStore::new(test_database.config.clone()).expect("kv store");
     let item = KvItem::<TestKvPayload>::new_plain(
@@ -265,9 +263,7 @@ async fn kv_plain_item_round_trips_scans_lifecycle_and_deletes_namespace() {
 
 #[tokio::test]
 async fn kv_item_database_timestamp_returning_methods_follow_conditional_semantics() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let store = KvStore::new(test_database.config.clone()).expect("kv store");
     let item = KvItem::<TestKvPayload>::new_plain(
@@ -396,9 +392,7 @@ async fn kv_item_database_timestamp_returning_methods_follow_conditional_semanti
 
 #[tokio::test]
 async fn kv_item_decode_failures_are_reported_for_get_multi_scan_and_atomic_mutation() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let store = KvStore::new(test_database.config.clone()).expect("kv store");
     let prefix = KvKeyPrefix::from_parts(["item", "decode-failure"]).expect("prefix");
@@ -470,9 +464,7 @@ async fn kv_item_decode_failures_are_reported_for_get_multi_scan_and_atomic_muta
 
 #[tokio::test]
 async fn kv_encrypted_item_round_trips_binds_ciphertext_to_key_and_acquires_slots() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let store = KvStore::new(test_database.config.clone()).expect("kv store");
     let prefix = KvKeyPrefix::from_parts(["item", "encrypted"]).expect("prefix");
@@ -644,9 +636,7 @@ async fn kv_encrypted_item_round_trips_binds_ciphertext_to_key_and_acquires_slot
 
 #[tokio::test]
 async fn kv_encrypted_item_bulk_paths_resolve_keyset_once_per_operation() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let store = KvStore::new(test_database.config.clone()).expect("kv store");
     let prefix = KvKeyPrefix::from_parts(["item", "encrypted-keyset-calls"]).expect("prefix");
@@ -767,9 +757,7 @@ async fn kv_encrypted_item_bulk_paths_resolve_keyset_once_per_operation() {
 
 #[tokio::test]
 async fn kv_encrypted_item_reports_keyset_errors_before_database_writes() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let store = KvStore::new(test_database.config.clone()).expect("kv store");
     let prefix = KvKeyPrefix::from_parts(["item", "encrypted-keyset-error"]).expect("prefix");
@@ -811,9 +799,7 @@ async fn kv_encrypted_item_reports_keyset_errors_before_database_writes() {
 
 #[tokio::test]
 async fn kv_encrypted_acquire_slot_encode_failure_does_not_leave_claimed_slot() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let store = KvStore::new(test_database.config.clone()).expect("kv store");
     let prefix = KvKeyPrefix::from_parts(["item", "encrypted-slot-error"]).expect("prefix");

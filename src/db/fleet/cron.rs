@@ -28,7 +28,7 @@ impl Cron {
     /// Attempts to run the task once without waiting for leadership.
     pub async fn try_run_once<T, E, TaskFuture, Task>(
         &self,
-        pool: &Pool,
+        pool: &WritePool,
         task: Task,
     ) -> Result<CronTryRunOnceResult<T>, CronRunError<E>>
     where
@@ -53,7 +53,7 @@ impl Cron {
     /// Runs the task once, waiting until leadership is available.
     pub async fn run_once<T, E, TaskFuture, Task>(
         &self,
-        pool: &Pool,
+        pool: &WritePool,
         task: Task,
     ) -> Result<T, CronRunError<E>>
     where
@@ -72,7 +72,7 @@ impl Cron {
     /// Runs the task immediately and then every interval while leadership is held, until `stop` resolves or the task fails.
     pub async fn run_until_stopped_or_task_error<Stop, E, TaskFuture, Task>(
         &self,
-        pool: &Pool,
+        pool: &WritePool,
         stop: Stop,
         task: Task,
     ) -> Result<(), CronRunError<E>>
@@ -91,7 +91,7 @@ impl Cron {
     /// Starts a background task that runs this cron until stopped, leadership is lost, or the task fails.
     pub fn start_until_stopped_or_task_error<E, TaskFuture, Task>(
         &self,
-        pool: Pool,
+        pool: WritePool,
         task: Task,
     ) -> CronRunHandle<E>
     where
@@ -120,7 +120,7 @@ impl Cron {
     /// Runs the task immediately and then every interval while leadership is held, applying an explicit task-error policy.
     pub async fn run_until_stopped_with_task_error_policy<Stop, E, TaskFuture, Task, OnTaskError>(
         &self,
-        pool: &Pool,
+        pool: &WritePool,
         stop: Stop,
         mut task: Task,
         mut on_task_error: OnTaskError,
@@ -150,7 +150,7 @@ impl Cron {
     /// Runs the task on this process whenever it holds leadership, reacquiring leadership after benign loss until stopped or the task fails.
     pub async fn run_continuously_until_stopped_or_task_error<Stop, E, TaskFuture, Task>(
         &self,
-        pool: &Pool,
+        pool: &WritePool,
         stop: Stop,
         task: Task,
     ) -> Result<(), CronRunError<E>>
@@ -175,7 +175,7 @@ impl Cron {
         OnTaskError,
     >(
         &self,
-        pool: &Pool,
+        pool: &WritePool,
         stop: Stop,
         mut task: Task,
         mut on_task_error: OnTaskError,
@@ -218,7 +218,7 @@ impl Cron {
     /// Starts a background task that continuously reacquires leadership until stopped or the task fails.
     pub fn start_continuously_until_stopped_or_task_error<E, TaskFuture, Task>(
         &self,
-        pool: Pool,
+        pool: WritePool,
         task: Task,
     ) -> CronRunHandle<E>
     where
@@ -252,7 +252,7 @@ impl Cron {
         OnTaskError,
     >(
         &self,
-        pool: Pool,
+        pool: WritePool,
         task: Task,
         on_task_error: OnTaskError,
     ) -> CronRunHandle<E>
@@ -289,7 +289,7 @@ impl Cron {
         OnTaskError,
     >(
         &self,
-        pool: &Pool,
+        pool: &WritePool,
         mut stop: Pin<&mut Stop>,
         task: &mut Task,
         on_task_error: &mut OnTaskError,
@@ -373,7 +373,7 @@ impl Cron {
     /// Starts a background task that applies an explicit task-error policy while this cron holds leadership.
     pub fn start_until_stopped_with_task_error_policy<E, TaskFuture, Task, OnTaskError>(
         &self,
-        pool: Pool,
+        pool: WritePool,
         task: Task,
         on_task_error: OnTaskError,
     ) -> CronRunHandle<E>

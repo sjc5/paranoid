@@ -2,9 +2,7 @@ use super::*;
 
 #[tokio::test]
 async fn fleet_topic_publish_subscribe_and_cursor_persistence() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
     struct TestEvent {
@@ -101,9 +99,7 @@ async fn fleet_topic_publish_subscribe_and_cursor_persistence() {
 
 #[tokio::test]
 async fn fleet_topic_multiple_subscribers_and_fetch_events_after_are_independent() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
     struct TestEvent {
@@ -187,9 +183,7 @@ async fn fleet_topic_multiple_subscribers_and_fetch_events_after_are_independent
 
 #[tokio::test]
 async fn fleet_subscription_set_delete_cursor_and_default_poll_limit() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
     struct TestEvent {
@@ -271,9 +265,7 @@ async fn fleet_subscription_set_delete_cursor_and_default_poll_limit() {
 
 #[tokio::test]
 async fn fleet_topic_event_ttl_and_purge_do_not_reset_sequence() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
     struct TestEvent {
@@ -355,9 +347,7 @@ async fn fleet_topic_event_ttl_and_purge_do_not_reset_sequence() {
 
 #[tokio::test]
 async fn fleet_subscription_poll_limit_and_sequence_validation() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
     struct TestEvent;
@@ -459,9 +449,7 @@ async fn fleet_topic_publish_rolls_back_sequence_when_event_serialization_fails(
         }
     }
 
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let store = Store::new(test_database.config.clone()).expect("fleet store");
     let topic = store
@@ -498,9 +486,7 @@ async fn fleet_topic_publish_rolls_back_sequence_when_event_serialization_fails(
 
 #[tokio::test]
 async fn fleet_topic_publish_rejects_incompatible_persisted_sequence_state() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
     struct TestEvent;
@@ -552,9 +538,7 @@ async fn fleet_topic_publish_rejects_incompatible_persisted_sequence_state() {
 #[tokio::test]
 async fn fleet_subscription_read_new_events_and_advance_cursor_in_current_transaction_returns_event_scan_error()
  {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
     struct TestEvent;
@@ -618,9 +602,7 @@ async fn fleet_subscription_read_new_events_and_advance_cursor_in_current_transa
 #[tokio::test]
 async fn fleet_subscription_read_new_events_and_advance_cursor_in_current_transaction_returns_cursor_advance_error()
  {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
     struct TestEvent;
@@ -690,9 +672,7 @@ async fn fleet_subscription_read_new_events_and_advance_cursor_in_current_transa
 
 #[tokio::test]
 async fn fleet_subscription_rejects_corrupted_negative_persisted_cursor() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
     struct TestEvent;

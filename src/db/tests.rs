@@ -490,13 +490,14 @@ fn in_current_transaction_function_names_require_transaction_parameter() {
         let source = fs::read_to_string(&path)
             .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
         for signature in rust_function_signatures(&source) {
-            if signature.contains("_in_current_transaction(") && !signature.contains("&mut Tx<'_>")
+            if signature.contains("_in_current_transaction(")
+                && !signature_uses_neutral_or_write_tx(signature)
             {
                 let relative = path
                     .strip_prefix(env!("CARGO_MANIFEST_DIR"))
                     .unwrap_or(&path);
                 violations.push(format!(
-                    "{} has transaction-named function without &mut Tx<'_>: {}",
+                    "{} has transaction-named function without a transaction handle: {}",
                     relative.display(),
                     signature.replace('\n', " ")
                 ));
@@ -618,7 +619,7 @@ fn pool_owned_schema_wrapper_finisher_violations(
             .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
         for function in rust_function_blocks(&source) {
             if rust_function_name(function.signature) != Some(function_name)
-                || !function.signature.contains("pool: &Pool")
+                || !function_signature_has_pool_parameter(function.signature)
                 || !function.body.contains("pool.begin_transaction()")
             {
                 continue;
@@ -1216,7 +1217,8 @@ fn db_retry_loops_are_limited_to_acquisition_database_or_explicit_runtime_semant
 }
 
 fn function_opens_pool_owned_transaction(function: RustFunctionBlock<'_>) -> bool {
-    function.signature.contains("pool: &Pool") && function.body.contains(".begin_transaction()")
+    function_signature_has_pool_parameter(function.signature)
+        && function.body.contains(".begin_transaction()")
 }
 
 fn function_uses_centralized_transaction_finisher(function: RustFunctionBlock<'_>) -> bool {
@@ -1232,10 +1234,15 @@ fn function_uses_centralized_transaction_finisher(function: RustFunctionBlock<'_
         "finish_queue_pool_transaction(",
         "finish_queue_read_transaction(",
         "finish_queue_validation_transaction(",
+        "finish_pool_owned_write_rollback_only_transaction_and_preserve_rollback_error(",
         "finish_worker_database_operation(",
     ]
     .iter()
     .any(|finisher| function.body.contains(finisher))
+}
+
+fn function_signature_has_pool_parameter(signature: &str) -> bool {
+    signature.contains("pool: &Pool") || signature.contains("pool: &WritePool")
 }
 
 fn rust_function_signatures(source: &str) -> Vec<&str> {
@@ -1501,6 +1508,10 @@ fn path_is_db_test_or_public_pool_definition(path: &Path) -> bool {
             .unwrap_or(path)
             .to_string_lossy()
             .ends_with("src/db/pool.rs")
+}
+
+fn signature_uses_neutral_or_write_tx(signature: &str) -> bool {
+    signature.contains("&mut Tx<'_>") || signature.contains("&mut WriteTx<'_>")
 }
 
 fn path_allows_direct_transaction_finish_calls(path: &Path) -> bool {

@@ -43,7 +43,7 @@ impl<T: Serialize> RegisteredJsonTask<T> {
     /// Enqueues this task's JSON payload.
     pub async fn enqueue(
         &self,
-        pool: &Pool,
+        pool: &WritePool,
         payload: &T,
         options: EnqueueOptions,
     ) -> Result<EnqueueResult, Error> {
@@ -55,7 +55,7 @@ impl<T: Serialize> RegisteredJsonTask<T> {
     /// Enqueues this task's JSON payload inside the caller's active transaction.
     pub async fn enqueue_in_current_transaction(
         &self,
-        tx: &mut Tx<'_>,
+        tx: &mut WriteTx<'_>,
         payload: &T,
         options: EnqueueOptions,
     ) -> Result<EnqueueResult, Error> {
@@ -67,7 +67,7 @@ impl<T: Serialize> RegisteredJsonTask<T> {
     /// Enqueues multiple payloads for this task in one statement.
     pub async fn enqueue_batch(
         &self,
-        pool: &Pool,
+        pool: &WritePool,
         payloads: &[T],
         options: EnqueueBatchOptions,
     ) -> Result<Vec<EnqueueResult>, Error> {
@@ -79,7 +79,7 @@ impl<T: Serialize> RegisteredJsonTask<T> {
     /// Enqueues multiple payloads for this task inside the caller's active transaction.
     pub async fn enqueue_batch_in_current_transaction(
         &self,
-        tx: &mut Tx<'_>,
+        tx: &mut WriteTx<'_>,
         payloads: &[T],
         options: EnqueueBatchOptions,
     ) -> Result<Vec<EnqueueResult>, Error> {
@@ -149,27 +149,27 @@ impl Store {
     }
 
     /// Runs idempotent schema migration and validates the result.
-    pub async fn migrate_schema(&self, pool: &Pool) -> Result<(), Error> {
+    pub async fn migrate_schema(&self, pool: &WritePool) -> Result<(), Error> {
         migrate_schema(pool, &self.config).await
     }
 
     /// Runs schema migration inside the caller's active transaction.
     pub async fn migrate_schema_in_current_transaction(
         &self,
-        tx: &mut Tx<'_>,
+        tx: &mut WriteTx<'_>,
     ) -> Result<(), Error> {
         migrate_schema_in_current_transaction(tx, &self.config).await
     }
 
     /// Validates that the existing schema matches the queue contract.
-    pub async fn validate_schema(&self, pool: &Pool) -> Result<(), Error> {
+    pub async fn validate_schema(&self, pool: &WritePool) -> Result<(), Error> {
         validate_schema(pool, &self.config).await
     }
 
     /// Validates schema inside the caller's active transaction.
     pub async fn validate_schema_in_current_transaction(
         &self,
-        tx: &mut Tx<'_>,
+        tx: &mut WriteTx<'_>,
     ) -> Result<(), Error> {
         validate_schema_in_current_transaction(tx, &self.config).await
     }
@@ -177,7 +177,7 @@ impl Store {
     /// Enqueues a JSON-serializable payload.
     pub async fn enqueue_json<T: Serialize + ?Sized>(
         &self,
-        pool: &Pool,
+        pool: &WritePool,
         task_name: impl AsRef<str>,
         payload: &T,
         options: EnqueueOptions,
@@ -197,7 +197,7 @@ impl Store {
     /// Enqueues a JSON-serializable payload inside the caller's active transaction.
     pub async fn enqueue_json_in_current_transaction<T: Serialize + ?Sized>(
         &self,
-        tx: &mut Tx<'_>,
+        tx: &mut WriteTx<'_>,
         task_name: impl AsRef<str>,
         payload: &T,
         options: EnqueueOptions,
@@ -214,7 +214,7 @@ impl Store {
     /// Enqueues multiple JSON-serializable payloads for one task in one statement.
     pub async fn enqueue_json_batch<T: Serialize>(
         &self,
-        pool: &Pool,
+        pool: &WritePool,
         task_name: impl AsRef<str>,
         payloads: &[T],
         options: EnqueueBatchOptions,
@@ -240,7 +240,7 @@ impl Store {
     /// Enqueues multiple JSON-serializable payloads inside the caller's active transaction.
     pub async fn enqueue_json_batch_in_current_transaction<T: Serialize>(
         &self,
-        tx: &mut Tx<'_>,
+        tx: &mut WriteTx<'_>,
         task_name: impl AsRef<str>,
         payloads: &[T],
         options: EnqueueBatchOptions,
@@ -412,14 +412,17 @@ impl Store {
     }
 
     /// Pauses all enqueues and claims for this queue.
-    pub async fn pause_queue(&self, pool: &Pool) -> Result<(), Error> {
+    pub async fn pause_queue(&self, pool: &WritePool) -> Result<(), Error> {
         let mut tx = pool.begin_transaction().await.map_err(Error::from)?;
         let result = self.pause_queue_in_current_transaction(&mut tx).await;
         finish_queue_pool_transaction("pause queue", tx, result).await
     }
 
     /// Pauses all enqueues and claims inside the caller's active transaction.
-    pub async fn pause_queue_in_current_transaction(&self, tx: &mut Tx<'_>) -> Result<(), Error> {
+    pub async fn pause_queue_in_current_transaction(
+        &self,
+        tx: &mut WriteTx<'_>,
+    ) -> Result<(), Error> {
         let database_operation_observer = tx.database_operation_observer().cloned();
         upsert_pause_key(
             tx.inner.as_mut(),
@@ -432,14 +435,17 @@ impl Store {
     }
 
     /// Resumes all enqueues and claims for this queue.
-    pub async fn resume_queue(&self, pool: &Pool) -> Result<(), Error> {
+    pub async fn resume_queue(&self, pool: &WritePool) -> Result<(), Error> {
         let mut tx = pool.begin_transaction().await.map_err(Error::from)?;
         let result = self.resume_queue_in_current_transaction(&mut tx).await;
         finish_queue_pool_transaction("resume queue", tx, result).await
     }
 
     /// Resumes all enqueues and claims inside the caller's active transaction.
-    pub async fn resume_queue_in_current_transaction(&self, tx: &mut Tx<'_>) -> Result<(), Error> {
+    pub async fn resume_queue_in_current_transaction(
+        &self,
+        tx: &mut WriteTx<'_>,
+    ) -> Result<(), Error> {
         let database_operation_observer = tx.database_operation_observer().cloned();
         delete_pause_key(
             tx.inner.as_mut(),
@@ -475,7 +481,11 @@ impl Store {
     }
 
     /// Pauses enqueues and claims for one task.
-    pub async fn pause_task(&self, pool: &Pool, task_name: impl AsRef<str>) -> Result<(), Error> {
+    pub async fn pause_task(
+        &self,
+        pool: &WritePool,
+        task_name: impl AsRef<str>,
+    ) -> Result<(), Error> {
         let task_name = task_name.as_ref();
         validate_task_name(task_name)?;
         let mut tx = pool.begin_transaction().await.map_err(Error::from)?;
@@ -486,7 +496,11 @@ impl Store {
     }
 
     /// Resumes enqueues and claims for one task.
-    pub async fn resume_task(&self, pool: &Pool, task_name: impl AsRef<str>) -> Result<(), Error> {
+    pub async fn resume_task(
+        &self,
+        pool: &WritePool,
+        task_name: impl AsRef<str>,
+    ) -> Result<(), Error> {
         let task_name = task_name.as_ref();
         validate_task_name(task_name)?;
         let mut tx = pool.begin_transaction().await.map_err(Error::from)?;
@@ -499,7 +513,7 @@ impl Store {
     /// Pauses enqueues and claims for one task inside the caller's active transaction.
     pub async fn pause_task_in_current_transaction(
         &self,
-        tx: &mut Tx<'_>,
+        tx: &mut WriteTx<'_>,
         task_name: impl AsRef<str>,
     ) -> Result<(), Error> {
         let task_name = task_name.as_ref();
@@ -519,7 +533,7 @@ impl Store {
     /// Resumes enqueues and claims for one task inside the caller's active transaction.
     pub async fn resume_task_in_current_transaction(
         &self,
-        tx: &mut Tx<'_>,
+        tx: &mut WriteTx<'_>,
         task_name: impl AsRef<str>,
     ) -> Result<(), Error> {
         let task_name = task_name.as_ref();

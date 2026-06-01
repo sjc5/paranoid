@@ -78,7 +78,7 @@ pub(super) fn resolve_queue_worker_default_job_timeout(
 
 pub(super) async fn claim_available_jobs_for_worker_with_database_operation_timeout(
     queue: &Store,
-    pool: &Pool,
+    pool: &WritePool,
     registered_task_names: &[String],
     claim_limit: u32,
     worker_id: &str,
@@ -99,7 +99,7 @@ pub(super) async fn claim_available_jobs_for_worker_with_database_operation_time
 
 pub(super) async fn mark_owned_running_job_started_with_database_operation_timeout(
     queue: &Store,
-    pool: &Pool,
+    pool: &WritePool,
     job_id: JobId,
     worker_id: &str,
     timeout: Duration,
@@ -114,7 +114,7 @@ pub(super) async fn mark_owned_running_job_started_with_database_operation_timeo
 
 pub(super) async fn mark_owned_running_job_completed_with_database_operation_timeout(
     queue: &Store,
-    pool: &Pool,
+    pool: &WritePool,
     job_id: JobId,
     worker_id: &str,
     timeout: Duration,
@@ -129,7 +129,7 @@ pub(super) async fn mark_owned_running_job_completed_with_database_operation_tim
 
 pub(super) async fn touch_owned_running_job_execution_heartbeat_with_database_operation_timeout(
     queue: &Store,
-    pool: &Pool,
+    pool: &WritePool,
     job_id: JobId,
     worker_id: &str,
     timeout: Duration,
@@ -146,7 +146,7 @@ pub(super) async fn touch_owned_running_job_execution_heartbeat_with_database_op
 
 pub(super) async fn schedule_owned_running_job_retry_with_database_operation_timeout(
     queue: &Store,
-    pool: &Pool,
+    pool: &WritePool,
     retry_persistence: OwnedRunningJobRetryPersistence<'_>,
     timeout: Duration,
 ) -> Result<i64, Error> {
@@ -174,7 +174,7 @@ pub(super) async fn schedule_owned_running_job_retry_with_database_operation_tim
 
 pub(super) async fn move_owned_running_job_to_dead_letter_with_database_operation_timeout(
     queue: &Store,
-    pool: &Pool,
+    pool: &WritePool,
     dead_letter_persistence: OwnedRunningJobDeadLetterPersistence<'_>,
     timeout: Duration,
 ) -> Result<JobId, Error> {
@@ -202,7 +202,7 @@ pub(super) async fn move_owned_running_job_to_dead_letter_with_database_operatio
 
 pub(super) async fn mark_owned_running_job_failed_with_database_operation_timeout(
     queue: &Store,
-    pool: &Pool,
+    pool: &WritePool,
     job_id: JobId,
     worker_id: &str,
     error_message: &str,
@@ -225,7 +225,7 @@ pub(super) async fn mark_owned_running_job_failed_with_database_operation_timeou
 
 pub(super) async fn return_owned_started_running_job_to_pending_with_database_operation_timeout(
     queue: &Store,
-    pool: &Pool,
+    pool: &WritePool,
     job_id: JobId,
     worker_id: &str,
     timeout: Duration,
@@ -242,7 +242,7 @@ pub(super) async fn return_owned_started_running_job_to_pending_with_database_op
 
 pub(super) async fn return_available_owned_unstarted_running_jobs_to_pending_with_database_operation_timeout(
     queue: &Store,
-    pool: &Pool,
+    pool: &WritePool,
     worker_id: &str,
     timeout: Duration,
 ) -> Result<u64, Error> {
@@ -258,7 +258,7 @@ pub(super) async fn return_available_owned_unstarted_running_jobs_to_pending_wit
 
 pub(super) async fn return_available_owned_started_running_jobs_to_pending_with_database_operation_timeout(
     queue: &Store,
-    pool: &Pool,
+    pool: &WritePool,
     worker_id: &str,
     timeout: Duration,
 ) -> Result<u64, Error> {
@@ -274,7 +274,7 @@ pub(super) async fn return_available_owned_started_running_jobs_to_pending_with_
 
 pub(super) async fn count_worker_owned_running_jobs_with_database_operation_timeout(
     queue: &Store,
-    pool: &Pool,
+    pool: &WritePool,
     worker_id: &str,
     timeout: Duration,
 ) -> Result<i64, Error> {
@@ -327,10 +327,10 @@ where
 }
 
 async fn begin_worker_database_operation<'a>(
-    pool: &'a Pool,
+    pool: &'a WritePool,
     operation: &'static str,
     operation_timeout: Duration,
-) -> Result<Tx<'a>, Error> {
+) -> Result<WriteTx<'a>, Error> {
     let started_at = std::time::Instant::now();
     let mut tx = tokio::time::timeout(operation_timeout, pool.begin_transaction())
         .await
@@ -379,7 +379,7 @@ pub(in crate::db::queue) fn remaining_worker_database_operation_timeout(
 }
 
 async fn finish_worker_database_operation<T>(
-    tx: Tx<'_>,
+    tx: WriteTx<'_>,
     operation: &'static str,
     timeout: Duration,
     result: Result<T, Error>,

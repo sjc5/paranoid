@@ -2,6 +2,7 @@ use super::{DatabaseOperationKind, DatabaseOperationObserver, Error};
 use secrecy::{ExposeSecret, SecretString};
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use sqlx::{PgPool, Postgres};
+use std::ops::{Deref, DerefMut};
 use std::str::FromStr;
 use std::time::Duration;
 
@@ -41,10 +42,28 @@ pub struct PoolConfig {
 /// use [`Pool::sqlx_pool`] for app-owned SQL that should share the same pool,
 /// and may use Paranoid's portable query constructors
 /// when app-owned SQL should follow the same portable Postgres execution style.
+///
+/// `Pool` does not imply any particular database privileges. It is the neutral
+/// Paranoid DB handle type.
 #[derive(Clone)]
 pub struct Pool {
     pub(crate) inner: PgPool,
     pub(crate) operation_observer: Option<DatabaseOperationObserver>,
+}
+
+/// Paranoid-owned Postgres pool for APIs that require write authority.
+///
+/// `WritePool` is a Rust API marker over the credentials used to connect. It
+/// does not inspect, reduce, or enforce Postgres privileges. Construct it with a
+/// connection URL whose database role has the privileges required by the write
+/// APIs you intend to call.
+///
+/// A `WritePool` can be passed to APIs that take [`Pool`] because a
+/// write-marked handle is also a valid neutral DB handle. A plain [`Pool`]
+/// cannot be passed to APIs that require `WritePool`.
+#[derive(Clone)]
+pub struct WritePool {
+    pub(crate) pool: Pool,
 }
 
 /// Paranoid-owned, SQLx-backed Postgres transaction.
@@ -54,9 +73,21 @@ pub struct Pool {
 /// transaction. Paranoid's portable query constructors are
 /// optional helpers for app-owned SQL that should stay portable to
 /// transaction-mode connection poolers.
+///
+/// `Tx` does not imply any particular database privileges. It is the neutral
+/// Paranoid transaction handle type.
 pub struct Tx<'tx> {
     pub(crate) inner: sqlx::Transaction<'tx, Postgres>,
     pub(crate) operation_observer: Option<DatabaseOperationObserver>,
+}
+
+/// Paranoid-owned Postgres transaction for APIs that require write authority.
+///
+/// Like [`WritePool`], this is a Rust API marker over the connection
+/// credentials that created the transaction. It does not inspect or enforce
+/// Postgres privileges.
+pub struct WriteTx<'tx> {
+    pub(crate) tx: Tx<'tx>,
 }
 
 /// TLS mode for Paranoid-owned Postgres connections.
@@ -156,6 +187,47 @@ impl Pool {
     }
 }
 
+impl WritePool {
+    /// Opens a Paranoid-owned Postgres pool for APIs that require write authority.
+    pub async fn connect(config: PoolConfig) -> Result<Self, Error> {
+        Ok(Self {
+            pool: Pool::connect(config).await?,
+        })
+    }
+
+    /// Returns the SQLx Postgres pool managed by Paranoid.
+    pub fn sqlx_pool(&self) -> &PgPool {
+        self.pool.sqlx_pool()
+    }
+
+    /// Starts an explicit Postgres transaction for write-requiring APIs.
+    pub async fn begin_transaction(&self) -> Result<WriteTx<'_>, Error> {
+        Ok(WriteTx {
+            tx: self.pool.begin_transaction().await?,
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn clone_with_database_operation_observer(
+        &self,
+        operation_observer: DatabaseOperationObserver,
+    ) -> Self {
+        Self {
+            pool: self
+                .pool
+                .clone_with_database_operation_observer(operation_observer),
+        }
+    }
+}
+
+impl Deref for WritePool {
+    type Target = Pool;
+
+    fn deref(&self) -> &Self::Target {
+        &self.pool
+    }
+}
+
 impl<'tx> Tx<'tx> {
     /// Returns the SQLx Postgres transaction managed by Paranoid.
     ///
@@ -198,6 +270,53 @@ impl<'tx> Tx<'tx> {
             None,
         );
         self.inner.rollback().await.map_err(Error::transaction)
+    }
+}
+
+impl<'tx> WriteTx<'tx> {
+    /// Returns the SQLx Postgres transaction managed by Paranoid.
+    ///
+    /// This is a supported integration point for app-owned SQL that should
+    /// commit or roll back with Paranoid-owned operations.
+    pub fn sqlx_transaction(&mut self) -> &mut sqlx::Transaction<'tx, Postgres> {
+        self.tx.sqlx_transaction()
+    }
+
+    pub(crate) fn database_operation_observer(&self) -> Option<&DatabaseOperationObserver> {
+        self.tx.database_operation_observer()
+    }
+
+    pub(crate) fn record_database_operation(
+        &self,
+        kind: DatabaseOperationKind,
+        label: &'static str,
+        statement: Option<&str>,
+    ) {
+        self.tx.record_database_operation(kind, label, statement);
+    }
+
+    /// Commits this transaction.
+    pub async fn commit(self) -> Result<(), Error> {
+        self.tx.commit().await
+    }
+
+    /// Rolls this transaction back.
+    pub async fn rollback(self) -> Result<(), Error> {
+        self.tx.rollback().await
+    }
+}
+
+impl<'tx> Deref for WriteTx<'tx> {
+    type Target = Tx<'tx>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.tx
+    }
+}
+
+impl<'tx> DerefMut for WriteTx<'tx> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.tx
     }
 }
 

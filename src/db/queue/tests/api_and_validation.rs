@@ -129,8 +129,8 @@ fn queue_public_primitives_are_available_through_namespaced_modules() {
 
     async fn exercise_queue_public_method_surface(
         queue: crate::queue::Store,
-        pool: &crate::db::Pool,
-        tx: &mut crate::db::Tx<'_>,
+        pool: &crate::db::WritePool,
+        tx: &mut crate::db::WriteTx<'_>,
         fleet_store: crate::fleet::Store,
         registry: &crate::queue::TaskRegistry,
         job_id: crate::queue::JobId,

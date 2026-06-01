@@ -2,9 +2,7 @@ use super::*;
 
 #[tokio::test]
 async fn fleet_coalescing_cache_set_fetch_and_compute_on_miss() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let store = Store::new(test_database.config.clone()).expect("fleet store");
     let cache = store
@@ -75,13 +73,8 @@ async fn fleet_coalescing_cache_set_fetch_and_compute_on_miss() {
 
 #[tokio::test]
 async fn fleet_coalescing_cache_stale_entry_reads_epoch_once_before_and_once_after_lock() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
-    let Some(direct_database_url) = direct_test_database_url() else {
-        eprintln!("skipping exact cache epoch read-count probe; set TEST_DSN_DIRECT to run");
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
+    let direct_database_url = direct_test_database_url();
 
     let store = Store::new(test_database.config.clone()).expect("fleet store");
     let cache_key = CoalescingCacheKey::new("stale-epoch-shape").expect("cache key");
@@ -150,9 +143,7 @@ async fn fleet_coalescing_cache_stale_entry_reads_epoch_once_before_and_once_aft
 
 #[tokio::test]
 async fn fleet_coalescing_cache_root_keys_isolate_values_in_shared_tables() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let first_store = Store::new(
         StoreConfig::new(
@@ -236,9 +227,7 @@ async fn fleet_coalescing_cache_root_keys_isolate_values_in_shared_tables() {
 
 #[tokio::test]
 async fn fleet_coalescing_cache_ttl_expiration_recomputes_value() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let store = Store::new(test_database.config.clone()).expect("fleet store");
     let cache = store
@@ -289,9 +278,7 @@ async fn fleet_coalescing_cache_ttl_expiration_recomputes_value() {
 
 #[tokio::test]
 async fn fleet_coalescing_cache_concurrent_misses_share_one_computation() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let store = Store::new(test_database.config.clone()).expect("fleet store");
     let cache = Arc::new(
@@ -344,9 +331,7 @@ async fn fleet_coalescing_cache_concurrent_misses_share_one_computation() {
 
 #[tokio::test]
 async fn fleet_coalescing_cache_compute_errors_and_timeouts_are_not_cached() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let store = Store::new(test_database.config.clone()).expect("fleet store");
     let cache = store
@@ -428,9 +413,7 @@ async fn fleet_coalescing_cache_compute_errors_and_timeouts_are_not_cached() {
 
 #[tokio::test]
 async fn fleet_coalescing_cache_waiting_fetch_can_be_cancelled_without_poisoning_cache() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let store = Store::new(test_database.config.clone()).expect("fleet store");
     let cache = store
@@ -494,9 +477,7 @@ async fn fleet_coalescing_cache_waiting_fetch_can_be_cancelled_without_poisoning
 
 #[tokio::test]
 async fn fleet_coalescing_cache_set_and_invalidate_report_lock_wait_timeout() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let store = Store::new(test_database.config.clone()).expect("fleet store");
     let cache = store
@@ -561,9 +542,7 @@ async fn fleet_coalescing_cache_set_and_invalidate_report_lock_wait_timeout() {
 
 #[tokio::test]
 async fn fleet_coalescing_cache_returns_computed_value_when_cache_write_fails() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let store = Store::new(test_database.config.clone()).expect("fleet store");
     let cache = store
@@ -634,9 +613,7 @@ async fn fleet_coalescing_cache_returns_computed_value_when_cache_write_fails() 
 
 #[tokio::test]
 async fn fleet_coalescing_cache_set_reports_epoch_lookup_failure() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let store = Store::new(test_database.config.clone()).expect("fleet store");
     let cache = store
@@ -677,9 +654,7 @@ async fn fleet_coalescing_cache_set_reports_epoch_lookup_failure() {
 
 #[tokio::test]
 async fn fleet_coalescing_cache_fetch_reports_fresh_cached_value_decode_error() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let store = Store::new(test_database.config.clone()).expect("fleet store");
     let cache_key = CoalescingCacheKey::new("fresh-read-error").expect("cache key");
@@ -740,9 +715,7 @@ async fn fleet_coalescing_cache_fetch_reports_fresh_cached_value_decode_error() 
 
 #[tokio::test]
 async fn fleet_coalescing_cache_fetch_reports_locked_double_check_decode_error() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let store = Store::new(test_database.config.clone()).expect("fleet store");
     let cache_key = CoalescingCacheKey::new("double-check-error").expect("cache key");
@@ -843,9 +816,7 @@ async fn fleet_coalescing_cache_fetch_reports_locked_double_check_decode_error()
 
 #[tokio::test]
 async fn fleet_coalescing_cache_fetch_returns_release_error_when_release_fails() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let store = Store::new(test_database.config.clone()).expect("fleet store");
     let cache = store
@@ -888,9 +859,7 @@ async fn fleet_coalescing_cache_fetch_returns_release_error_when_release_fails()
 
 #[tokio::test]
 async fn fleet_coalescing_cache_set_returns_release_error_when_release_fails() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let store = Store::new(test_database.config.clone()).expect("fleet store");
     let cache = store
@@ -928,9 +897,7 @@ async fn fleet_coalescing_cache_set_returns_release_error_when_release_fails() {
 
 #[tokio::test]
 async fn fleet_coalescing_cache_invalidate_returns_release_error_when_release_fails() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let store = Store::new(test_database.config.clone()).expect("fleet store");
     let cache = store
@@ -976,9 +943,7 @@ async fn fleet_coalescing_cache_compute_panic_releases_compute_mutex() {
         panic!("cache compute panic")
     }
 
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let store = Store::new(test_database.config.clone()).expect("fleet store");
     let cache = store
@@ -1021,9 +986,7 @@ async fn fleet_coalescing_cache_compute_panic_releases_compute_mutex() {
 
 #[tokio::test]
 async fn fleet_coalescing_cache_invalidate_and_invalidate_all_use_epoch_semantics() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let store = Store::new(test_database.config.clone()).expect("fleet store");
     let cache = store
@@ -1122,9 +1085,7 @@ async fn fleet_coalescing_cache_invalidate_and_invalidate_all_use_epoch_semantic
 
 #[tokio::test]
 async fn fleet_coalescing_cache_concurrent_invalidate_all_is_epoch_safe() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let store = Store::new(test_database.config.clone()).expect("fleet store");
     let cache = Arc::new(
@@ -1181,9 +1142,7 @@ async fn fleet_coalescing_cache_concurrent_invalidate_all_is_epoch_safe() {
 
 #[tokio::test]
 async fn fleet_coalescing_cache_no_expiration_values_remain_cached() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let store = Store::new(test_database.config.clone()).expect("fleet store");
     let cache = store
@@ -1234,9 +1193,7 @@ async fn fleet_coalescing_cache_no_expiration_values_remain_cached() {
 
 #[tokio::test]
 async fn fleet_coalescing_cache_supports_empty_and_multiple_key_part_shapes() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let store = Store::new(test_database.config.clone()).expect("fleet store");
     let cache = store
@@ -1325,9 +1282,7 @@ async fn fleet_coalescing_cache_supports_empty_and_multiple_key_part_shapes() {
 
 #[tokio::test]
 async fn fleet_coalescing_cache_handles_complex_values_and_key_part_validation() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
     struct CachedProfile {

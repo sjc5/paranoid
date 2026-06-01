@@ -3,9 +3,7 @@ use super::*;
 
 #[tokio::test]
 async fn queue_worker_run_once_processes_success_retry_permanent_and_exhausted_outcomes() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let queue = Store::new(test_database.config.clone()).expect("queue");
     reset_queue_schema(&test_database).await;
@@ -170,9 +168,7 @@ async fn queue_worker_run_once_processes_success_retry_permanent_and_exhausted_o
 
 #[tokio::test]
 async fn queue_worker_handler_panic_is_job_level_permanent_failure_not_worker_failure() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let queue = Store::new(test_database.config.clone()).expect("queue");
     reset_queue_schema(&test_database).await;
@@ -272,9 +268,7 @@ async fn queue_worker_handler_panic_is_job_level_permanent_failure_not_worker_fa
 
 #[tokio::test]
 async fn queue_worker_internal_task_panic_after_start_returns_job_to_pending() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let queue = Store::new(test_database.config.clone()).expect("queue");
     reset_queue_schema(&test_database).await;
@@ -350,9 +344,7 @@ async fn queue_worker_internal_task_panic_after_start_returns_job_to_pending() {
 
 #[tokio::test]
 async fn queue_worker_run_once_can_fail_without_dead_letter_and_handlers_can_touch_heartbeat() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let queue = Store::new(test_database.config.clone()).expect("queue");
     reset_queue_schema(&test_database).await;
@@ -420,9 +412,7 @@ async fn queue_worker_run_once_can_fail_without_dead_letter_and_handlers_can_tou
 
 #[tokio::test]
 async fn queue_worker_stops_heartbeating_before_completion_and_clears_runtime_columns() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let queue = Store::new(test_database.config.clone()).expect("queue");
     reset_queue_schema(&test_database).await;
@@ -494,9 +484,7 @@ async fn queue_worker_stops_heartbeating_before_completion_and_clears_runtime_co
 
 #[tokio::test]
 async fn queue_worker_ignores_unexpected_heartbeat_write_errors_until_terminal_transition() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let queue = Store::new(test_database.config.clone()).expect("queue");
     reset_queue_schema(&test_database).await;
@@ -567,9 +555,7 @@ async fn queue_worker_ignores_unexpected_heartbeat_write_errors_until_terminal_t
 
 #[tokio::test]
 async fn queue_worker_dead_letter_write_failure_returns_job_to_pending_and_surfaces_error() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let queue = Store::new(test_database.config.clone()).expect("queue");
     reset_queue_schema(&test_database).await;
@@ -691,9 +677,7 @@ async fn queue_worker_dead_letter_write_failure_returns_job_to_pending_and_surfa
 
 #[tokio::test]
 async fn queue_worker_terminal_write_failures_return_started_jobs_to_pending() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let queue = Store::new(test_database.config.clone()).expect("queue");
     reset_queue_schema(&test_database).await;
@@ -839,9 +823,7 @@ async fn queue_worker_terminal_write_failures_return_started_jobs_to_pending() {
 
 #[tokio::test]
 async fn queue_worker_manual_heartbeat_caller_timeout_does_not_leave_job_stuck() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let queue = Store::new(test_database.config.clone()).expect("queue");
     reset_queue_schema(&test_database).await;
@@ -919,9 +901,7 @@ async fn queue_worker_manual_heartbeat_caller_timeout_does_not_leave_job_stuck()
 
 #[tokio::test]
 async fn queue_worker_return_to_pending_write_failure_surfaces_without_panicking() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let queue = Store::new(test_database.config.clone()).expect("queue");
     reset_queue_schema(&test_database).await;
@@ -1009,9 +989,7 @@ async fn queue_worker_return_to_pending_write_failure_surfaces_without_panicking
 
 #[tokio::test]
 async fn queue_workers_with_same_logical_name_use_distinct_owner_ids_for_cleanup() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let queue = Store::new(test_database.config.clone()).expect("queue");
     reset_queue_schema(&test_database).await;
@@ -1178,9 +1156,7 @@ async fn queue_workers_with_same_logical_name_use_distinct_owner_ids_for_cleanup
 
 #[tokio::test]
 async fn queue_worker_start_write_failure_returns_unstarted_job_to_pending() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let queue = Store::new(test_database.config.clone()).expect("queue");
     reset_queue_schema(&test_database).await;

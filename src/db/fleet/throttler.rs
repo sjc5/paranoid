@@ -14,7 +14,7 @@ impl Throttler {
     /// Attempts to acquire permission to run.
     pub(crate) async fn try_acquire_manual_permit(
         &self,
-        pool: &Pool,
+        pool: &WritePool,
     ) -> Result<ThrottlerManualPermitAcquireResult, Error> {
         let holder_id = self.generate_holder_id_if_needed()?;
         self.try_acquire_with_optional_holder(pool, holder_id.as_ref())
@@ -24,7 +24,7 @@ impl Throttler {
     /// Attempts to acquire an owned permit guard.
     pub async fn try_acquire_guard(
         &self,
-        pool: &Pool,
+        pool: &WritePool,
     ) -> Result<ThrottlerGuardAcquireResult, Error> {
         let holder_id = self.generate_holder_id_if_needed()?;
         self.try_acquire_guard_with_optional_holder(pool, holder_id.as_ref())
@@ -34,7 +34,7 @@ impl Throttler {
     /// Waits until permission is acquired.
     pub(crate) async fn acquire_manual_permit_when_ready(
         &self,
-        pool: &Pool,
+        pool: &WritePool,
     ) -> Result<ThrottlerPermit, Error> {
         let holder_id = self.generate_holder_id_if_needed()?;
         self.acquire_with_optional_holder_when_ready(pool, holder_id.as_ref())
@@ -44,7 +44,7 @@ impl Throttler {
     /// Waits until an owned permit guard is acquired.
     pub async fn acquire_guard_when_ready(
         &self,
-        pool: &Pool,
+        pool: &WritePool,
     ) -> Result<ThrottlerPermitGuard, Error> {
         let holder_id = self.generate_holder_id_if_needed()?;
         self.acquire_guard_with_optional_holder_when_ready(pool, holder_id.as_ref())
@@ -54,7 +54,7 @@ impl Throttler {
     /// Attempts to acquire permission and run a guarded task.
     pub async fn try_run_task<T, E, Fut, F>(
         &self,
-        pool: &Pool,
+        pool: &WritePool,
         task: F,
     ) -> Result<ThrottlerTryRunTaskResult<T, E>, Error>
     where
@@ -75,7 +75,7 @@ impl Throttler {
     /// Waits for permission and runs a guarded task.
     pub async fn run_task_when_ready<T, E, Fut, F>(
         &self,
-        pool: &Pool,
+        pool: &WritePool,
         task: F,
     ) -> Result<ThrottlerGuardedTaskResult<T, E>, Error>
     where
@@ -89,7 +89,7 @@ impl Throttler {
     /// Attempts to acquire permission with an explicit holder identifier.
     pub(crate) async fn try_acquire_manual_permit_for_holder(
         &self,
-        pool: &Pool,
+        pool: &WritePool,
         holder_id: &HolderId,
     ) -> Result<ThrottlerManualPermitAcquireResult, Error> {
         self.try_acquire_with_optional_holder(pool, Some(holder_id))
@@ -99,7 +99,7 @@ impl Throttler {
     /// Attempts to acquire an owned permit guard with an explicit holder identifier.
     pub async fn try_acquire_guard_for_holder(
         &self,
-        pool: &Pool,
+        pool: &WritePool,
         holder_id: &HolderId,
     ) -> Result<ThrottlerGuardAcquireResult, Error> {
         self.try_acquire_guard_with_optional_holder(pool, Some(holder_id))
@@ -109,7 +109,7 @@ impl Throttler {
     /// Waits until permission is acquired with an explicit holder identifier.
     pub(crate) async fn acquire_manual_permit_for_holder_when_ready(
         &self,
-        pool: &Pool,
+        pool: &WritePool,
         holder_id: &HolderId,
     ) -> Result<ThrottlerPermit, Error> {
         self.acquire_with_optional_holder_when_ready(pool, Some(holder_id))
@@ -119,7 +119,7 @@ impl Throttler {
     /// Waits until an owned permit guard is acquired with an explicit holder identifier.
     pub async fn acquire_guard_for_holder_when_ready(
         &self,
-        pool: &Pool,
+        pool: &WritePool,
         holder_id: &HolderId,
     ) -> Result<ThrottlerPermitGuard, Error> {
         self.acquire_guard_with_optional_holder_when_ready(pool, Some(holder_id))
@@ -129,7 +129,7 @@ impl Throttler {
     /// Attempts to acquire permission with an explicit holder identifier and run a guarded task.
     pub async fn try_run_task_for_holder<T, E, Fut, F>(
         &self,
-        pool: &Pool,
+        pool: &WritePool,
         holder_id: &HolderId,
         task: F,
     ) -> Result<ThrottlerTryRunTaskResult<T, E>, Error>
@@ -151,7 +151,7 @@ impl Throttler {
     /// Waits for permission with an explicit holder identifier and runs a guarded task.
     pub async fn run_task_for_holder_when_ready<T, E, Fut, F>(
         &self,
-        pool: &Pool,
+        pool: &WritePool,
         holder_id: &HolderId,
         task: F,
     ) -> Result<ThrottlerGuardedTaskResult<T, E>, Error>
@@ -168,7 +168,7 @@ impl Throttler {
     /// Attempts to acquire permission inside the caller's transaction.
     pub(crate) async fn try_acquire_manual_permit_in_current_transaction(
         &self,
-        tx: &mut Tx<'_>,
+        tx: &mut WriteTx<'_>,
     ) -> Result<ThrottlerManualPermitAcquireResult, Error> {
         let holder_id = self.generate_holder_id_if_needed()?;
         self.try_acquire_with_optional_holder_in_current_transaction(tx, holder_id.as_ref())
@@ -178,7 +178,7 @@ impl Throttler {
     /// Attempts to acquire permission with an explicit holder identifier inside a transaction.
     pub(crate) async fn try_acquire_manual_permit_for_holder_in_current_transaction(
         &self,
-        tx: &mut Tx<'_>,
+        tx: &mut WriteTx<'_>,
         holder_id: &HolderId,
     ) -> Result<ThrottlerManualPermitAcquireResult, Error> {
         self.try_acquire_with_optional_holder_in_current_transaction(tx, Some(holder_id))
@@ -188,7 +188,7 @@ impl Throttler {
     /// Releases a permit after a successful task.
     pub(crate) async fn release_manual_permit_after_success(
         &self,
-        pool: &Pool,
+        pool: &WritePool,
         permit: &ThrottlerPermit,
     ) -> Result<ThrottlerReleaseResult, Error> {
         self.release_manual_permit_after_task_outcome(pool, permit, ThrottlerTaskOutcome::Succeeded)
@@ -198,7 +198,7 @@ impl Throttler {
     /// Releases a permit after a failed task.
     pub(crate) async fn release_manual_permit_after_failure(
         &self,
-        pool: &Pool,
+        pool: &WritePool,
         permit: &ThrottlerPermit,
     ) -> Result<ThrottlerReleaseResult, Error> {
         self.release_manual_permit_after_task_outcome(pool, permit, ThrottlerTaskOutcome::Failed)
@@ -208,7 +208,7 @@ impl Throttler {
     /// Releases a permit when the protected task did not run.
     pub(crate) async fn release_manual_permit_without_task_outcome(
         &self,
-        pool: &Pool,
+        pool: &WritePool,
         permit: &ThrottlerPermit,
     ) -> Result<ThrottlerReleaseResult, Error> {
         self.release_manual_permit_after_task_outcome(
@@ -222,7 +222,7 @@ impl Throttler {
     /// Releases a permit and applies the supplied task outcome.
     pub(crate) async fn release_manual_permit_after_task_outcome(
         &self,
-        pool: &Pool,
+        pool: &WritePool,
         permit: &ThrottlerPermit,
         outcome: ThrottlerTaskOutcome,
     ) -> Result<ThrottlerReleaseResult, Error> {
@@ -243,7 +243,7 @@ impl Throttler {
     /// Releases a permit and applies a task outcome inside the caller's transaction.
     pub(crate) async fn release_manual_permit_after_task_outcome_in_current_transaction(
         &self,
-        tx: &mut Tx<'_>,
+        tx: &mut WriteTx<'_>,
         permit: &ThrottlerPermit,
         outcome: ThrottlerTaskOutcome,
     ) -> Result<ThrottlerReleaseResult, Error> {
@@ -314,7 +314,7 @@ impl Throttler {
     }
 
     /// Deletes all throttler state.
-    pub async fn reset(&self, pool: &Pool) -> Result<(), Error> {
+    pub async fn reset(&self, pool: &WritePool) -> Result<(), Error> {
         match self
             .state_item
             .delete(pool, [FLEET_THROTTLER_STATE_KEY_PART])
@@ -326,7 +326,7 @@ impl Throttler {
     }
 
     /// Deletes all throttler state inside the caller's transaction.
-    pub async fn reset_in_current_transaction(&self, tx: &mut Tx<'_>) -> Result<(), Error> {
+    pub async fn reset_in_current_transaction(&self, tx: &mut WriteTx<'_>) -> Result<(), Error> {
         match self
             .state_item
             .delete_in_current_transaction(tx, [FLEET_THROTTLER_STATE_KEY_PART])
@@ -338,27 +338,33 @@ impl Throttler {
     }
 
     /// Opens the circuit when circuit breaking is enabled.
-    pub async fn open_circuit(&self, pool: &Pool) -> Result<(), Error> {
+    pub async fn open_circuit(&self, pool: &WritePool) -> Result<(), Error> {
         let mut tx = pool.begin_transaction().await?;
         let result = self.open_circuit_in_current_transaction(&mut tx).await;
         finish_fleet_pool_transaction(FLEET_OPERATION_THROTTLER_OPEN_CIRCUIT, tx, result).await
     }
 
     /// Opens the circuit inside the caller's transaction when circuit breaking is enabled.
-    pub async fn open_circuit_in_current_transaction(&self, tx: &mut Tx<'_>) -> Result<(), Error> {
+    pub async fn open_circuit_in_current_transaction(
+        &self,
+        tx: &mut WriteTx<'_>,
+    ) -> Result<(), Error> {
         self.set_circuit_state_in_current_transaction(tx, ThrottlerCircuitState::Open, true, false)
             .await
     }
 
     /// Closes the circuit and resets failure count when circuit breaking is enabled.
-    pub async fn close_circuit(&self, pool: &Pool) -> Result<(), Error> {
+    pub async fn close_circuit(&self, pool: &WritePool) -> Result<(), Error> {
         let mut tx = pool.begin_transaction().await?;
         let result = self.close_circuit_in_current_transaction(&mut tx).await;
         finish_fleet_pool_transaction(FLEET_OPERATION_THROTTLER_CLOSE_CIRCUIT, tx, result).await
     }
 
     /// Closes the circuit inside the caller's transaction when circuit breaking is enabled.
-    pub async fn close_circuit_in_current_transaction(&self, tx: &mut Tx<'_>) -> Result<(), Error> {
+    pub async fn close_circuit_in_current_transaction(
+        &self,
+        tx: &mut WriteTx<'_>,
+    ) -> Result<(), Error> {
         self.set_circuit_state_in_current_transaction(
             tx,
             ThrottlerCircuitState::Closed,
@@ -394,20 +400,23 @@ impl ThrottlerManualPermitProtocol<'_> {
     /// Attempts to acquire a throttler permit through the manual permit protocol.
     pub async fn try_acquire_permit(
         &self,
-        pool: &Pool,
+        pool: &WritePool,
     ) -> Result<ThrottlerManualPermitAcquireResult, Error> {
         self.throttler.try_acquire_manual_permit(pool).await
     }
 
     /// Waits until a throttler permit is acquired through the manual permit protocol.
-    pub async fn acquire_permit_when_ready(&self, pool: &Pool) -> Result<ThrottlerPermit, Error> {
+    pub async fn acquire_permit_when_ready(
+        &self,
+        pool: &WritePool,
+    ) -> Result<ThrottlerPermit, Error> {
         self.throttler.acquire_manual_permit_when_ready(pool).await
     }
 
     /// Attempts to acquire a throttler permit for an explicit holder through the manual permit protocol.
     pub async fn try_acquire_permit_for_holder(
         &self,
-        pool: &Pool,
+        pool: &WritePool,
         holder_id: &HolderId,
     ) -> Result<ThrottlerManualPermitAcquireResult, Error> {
         self.throttler
@@ -418,7 +427,7 @@ impl ThrottlerManualPermitProtocol<'_> {
     /// Waits until a throttler permit is acquired for an explicit holder through the manual permit protocol.
     pub async fn acquire_permit_for_holder_when_ready(
         &self,
-        pool: &Pool,
+        pool: &WritePool,
         holder_id: &HolderId,
     ) -> Result<ThrottlerPermit, Error> {
         self.throttler
@@ -429,7 +438,7 @@ impl ThrottlerManualPermitProtocol<'_> {
     /// Attempts to acquire a throttler permit through the manual permit protocol inside the caller's transaction.
     pub async fn try_acquire_permit_in_current_transaction(
         &self,
-        tx: &mut Tx<'_>,
+        tx: &mut WriteTx<'_>,
     ) -> Result<ThrottlerManualPermitAcquireResult, Error> {
         self.throttler
             .try_acquire_manual_permit_in_current_transaction(tx)
@@ -439,7 +448,7 @@ impl ThrottlerManualPermitProtocol<'_> {
     /// Attempts to acquire a throttler permit for an explicit holder through the manual permit protocol inside the caller's transaction.
     pub async fn try_acquire_permit_for_holder_in_current_transaction(
         &self,
-        tx: &mut Tx<'_>,
+        tx: &mut WriteTx<'_>,
         holder_id: &HolderId,
     ) -> Result<ThrottlerManualPermitAcquireResult, Error> {
         self.throttler
@@ -450,7 +459,7 @@ impl ThrottlerManualPermitProtocol<'_> {
     /// Releases a permit acquired through the manual permit protocol after a successful task.
     pub async fn release_permit_after_success(
         &self,
-        pool: &Pool,
+        pool: &WritePool,
         permit: &ThrottlerPermit,
     ) -> Result<ThrottlerReleaseResult, Error> {
         self.throttler
@@ -461,7 +470,7 @@ impl ThrottlerManualPermitProtocol<'_> {
     /// Releases a permit acquired through the manual permit protocol after a failed task.
     pub async fn release_permit_after_failure(
         &self,
-        pool: &Pool,
+        pool: &WritePool,
         permit: &ThrottlerPermit,
     ) -> Result<ThrottlerReleaseResult, Error> {
         self.throttler
@@ -472,7 +481,7 @@ impl ThrottlerManualPermitProtocol<'_> {
     /// Releases a permit acquired through the manual permit protocol when the protected task did not run.
     pub async fn release_permit_without_task_outcome(
         &self,
-        pool: &Pool,
+        pool: &WritePool,
         permit: &ThrottlerPermit,
     ) -> Result<ThrottlerReleaseResult, Error> {
         self.throttler
@@ -483,7 +492,7 @@ impl ThrottlerManualPermitProtocol<'_> {
     /// Releases a permit acquired through the manual permit protocol and applies the supplied task outcome.
     pub async fn release_permit_after_task_outcome(
         &self,
-        pool: &Pool,
+        pool: &WritePool,
         permit: &ThrottlerPermit,
         outcome: ThrottlerTaskOutcome,
     ) -> Result<ThrottlerReleaseResult, Error> {
@@ -495,7 +504,7 @@ impl ThrottlerManualPermitProtocol<'_> {
     /// Releases a permit acquired through the manual permit protocol and applies the supplied task outcome inside the caller's transaction.
     pub async fn release_permit_after_task_outcome_in_current_transaction(
         &self,
-        tx: &mut Tx<'_>,
+        tx: &mut WriteTx<'_>,
         permit: &ThrottlerPermit,
         outcome: ThrottlerTaskOutcome,
     ) -> Result<ThrottlerReleaseResult, Error> {

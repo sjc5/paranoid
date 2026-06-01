@@ -20,7 +20,7 @@ impl Mutex {
     /// Attempts to claim the mutex for manual renewal.
     pub(crate) async fn try_claim_manual_renewal(
         &self,
-        pool: &Pool,
+        pool: &WritePool,
     ) -> Result<Option<MutexManualRenewalClaim>, Error> {
         let holder_id = generate_holder_id()?;
         self.try_claim_manual_renewal_for_holder(pool, &holder_id)
@@ -30,7 +30,7 @@ impl Mutex {
     /// Attempts to claim the mutex for manual renewal inside the caller's transaction.
     pub(crate) async fn try_claim_manual_renewal_in_current_transaction(
         &self,
-        tx: &mut Tx<'_>,
+        tx: &mut WriteTx<'_>,
     ) -> Result<Option<MutexManualRenewalClaim>, Error> {
         let holder_id = generate_holder_id()?;
         self.try_claim_manual_renewal_for_holder_in_current_transaction(tx, &holder_id)
@@ -40,7 +40,7 @@ impl Mutex {
     /// Attempts to claim the mutex for an explicit holder for manual renewal.
     pub(crate) async fn try_claim_manual_renewal_for_holder(
         &self,
-        pool: &Pool,
+        pool: &WritePool,
         holder_id: &HolderId,
     ) -> Result<Option<MutexManualRenewalClaim>, Error> {
         let lease_claim = self
@@ -53,7 +53,7 @@ impl Mutex {
     /// Attempts to claim the mutex with a generated holder identifier and returns a renewing guard.
     pub async fn try_claim_guard(
         &self,
-        pool: &Pool,
+        pool: &WritePool,
         config: MutexGuardConfig,
     ) -> Result<Option<MutexGuard>, Error> {
         let holder_id = generate_holder_id()?;
@@ -64,7 +64,7 @@ impl Mutex {
     /// Attempts to claim the mutex with an explicit holder identifier and returns a renewing guard.
     pub async fn try_claim_guard_for_holder(
         &self,
-        pool: &Pool,
+        pool: &WritePool,
         holder_id: &HolderId,
         config: MutexGuardConfig,
     ) -> Result<Option<MutexGuard>, Error> {
@@ -81,7 +81,7 @@ impl Mutex {
     /// Waits until the mutex can be claimed with a generated holder identifier and returns a renewing guard.
     pub async fn claim_guard_when_available(
         &self,
-        pool: &Pool,
+        pool: &WritePool,
         config: MutexGuardConfig,
     ) -> Result<MutexGuard, Error> {
         let holder_id = generate_holder_id()?;
@@ -92,7 +92,7 @@ impl Mutex {
     /// Waits until the mutex can be claimed with an explicit holder identifier and returns a renewing guard.
     pub async fn claim_guard_for_holder_when_available(
         &self,
-        pool: &Pool,
+        pool: &WritePool,
         holder_id: &HolderId,
         config: MutexGuardConfig,
     ) -> Result<MutexGuard, Error> {
@@ -118,7 +118,7 @@ impl Mutex {
     /// Attempts to acquire the mutex, run the task under a renewing guard, and release the guard.
     pub async fn try_run_task<T, E, TaskFuture, Task>(
         &self,
-        pool: &Pool,
+        pool: &WritePool,
         config: MutexGuardConfig,
         task: Task,
     ) -> Result<MutexTryRunTaskResult<T>, MutexRunError<E>>
@@ -143,7 +143,7 @@ impl Mutex {
     /// Attempts to acquire the mutex for an explicit holder, run the task under a renewing guard, and release the guard.
     pub async fn try_run_task_for_holder<T, E, TaskFuture, Task>(
         &self,
-        pool: &Pool,
+        pool: &WritePool,
         holder_id: &HolderId,
         config: MutexGuardConfig,
         task: Task,
@@ -169,7 +169,7 @@ impl Mutex {
     /// Waits for the mutex, runs the task under a renewing guard, and releases the guard.
     pub async fn run_task_when_available<T, E, TaskFuture, Task>(
         &self,
-        pool: &Pool,
+        pool: &WritePool,
         config: MutexGuardConfig,
         task: Task,
     ) -> Result<T, MutexRunError<E>>
@@ -188,7 +188,7 @@ impl Mutex {
     /// Waits for the mutex with an explicit holder, runs the task under a renewing guard, and releases the guard.
     pub async fn run_task_for_holder_when_available<T, E, TaskFuture, Task>(
         &self,
-        pool: &Pool,
+        pool: &WritePool,
         holder_id: &HolderId,
         config: MutexGuardConfig,
         task: Task,
@@ -208,7 +208,7 @@ impl Mutex {
     /// Attempts to claim the mutex for an explicit holder for manual renewal inside the caller's transaction.
     pub(crate) async fn try_claim_manual_renewal_for_holder_in_current_transaction(
         &self,
-        tx: &mut Tx<'_>,
+        tx: &mut WriteTx<'_>,
         holder_id: &HolderId,
     ) -> Result<Option<MutexManualRenewalClaim>, Error> {
         let lease_claim = self
@@ -226,7 +226,7 @@ impl Mutex {
     /// Attempts to renew a live mutex claim through the manual-renewal protocol once.
     pub(crate) async fn try_renew_manual_renewal_claim(
         &self,
-        pool: &Pool,
+        pool: &WritePool,
         claim: &MutexManualRenewalClaim,
     ) -> Result<Option<MutexManualRenewalClaim>, Error> {
         self.require_claim_matches_mutex(claim)?;
@@ -240,7 +240,7 @@ impl Mutex {
     /// Attempts to renew a live mutex claim through the manual-renewal protocol once inside the caller's transaction.
     pub(crate) async fn try_renew_manual_renewal_claim_in_current_transaction(
         &self,
-        tx: &mut Tx<'_>,
+        tx: &mut WriteTx<'_>,
         claim: &MutexManualRenewalClaim,
     ) -> Result<Option<MutexManualRenewalClaim>, Error> {
         self.require_claim_matches_mutex(claim)?;
@@ -254,7 +254,7 @@ impl Mutex {
     /// Releases a live mutex claim through the manual-renewal protocol.
     pub(crate) async fn release_manual_renewal_claim(
         &self,
-        pool: &Pool,
+        pool: &WritePool,
         claim: &MutexManualRenewalClaim,
     ) -> Result<bool, Error> {
         self.require_claim_matches_mutex(claim)?;
@@ -267,7 +267,7 @@ impl Mutex {
     /// Releases a live mutex claim through the manual-renewal protocol inside the caller's transaction.
     pub(crate) async fn release_manual_renewal_claim_in_current_transaction(
         &self,
-        tx: &mut Tx<'_>,
+        tx: &mut WriteTx<'_>,
         claim: &MutexManualRenewalClaim,
     ) -> Result<bool, Error> {
         self.require_claim_matches_mutex(claim)?;
@@ -323,7 +323,7 @@ impl Mutex {
 
     pub(super) fn guard_from_claim(
         &self,
-        pool: &Pool,
+        pool: &WritePool,
         claim: MutexManualRenewalClaim,
         config: ResolvedMutexGuardConfig,
     ) -> MutexGuard {
@@ -374,14 +374,17 @@ impl Mutex {
 
 impl MutexManualRenewalProtocol<'_> {
     /// Attempts to claim the mutex through the manual-renewal protocol.
-    pub async fn try_claim(&self, pool: &Pool) -> Result<Option<MutexManualRenewalClaim>, Error> {
+    pub async fn try_claim(
+        &self,
+        pool: &WritePool,
+    ) -> Result<Option<MutexManualRenewalClaim>, Error> {
         self.mutex.try_claim_manual_renewal(pool).await
     }
 
     /// Attempts to claim the mutex through the manual-renewal protocol inside the caller's transaction.
     pub async fn try_claim_in_current_transaction(
         &self,
-        tx: &mut Tx<'_>,
+        tx: &mut WriteTx<'_>,
     ) -> Result<Option<MutexManualRenewalClaim>, Error> {
         self.mutex
             .try_claim_manual_renewal_in_current_transaction(tx)
@@ -391,7 +394,7 @@ impl MutexManualRenewalProtocol<'_> {
     /// Attempts to claim the mutex for an explicit holder through the manual-renewal protocol.
     pub async fn try_claim_for_holder(
         &self,
-        pool: &Pool,
+        pool: &WritePool,
         holder_id: &HolderId,
     ) -> Result<Option<MutexManualRenewalClaim>, Error> {
         self.mutex
@@ -402,7 +405,7 @@ impl MutexManualRenewalProtocol<'_> {
     /// Attempts to claim the mutex for an explicit holder through the manual-renewal protocol inside the caller's transaction.
     pub async fn try_claim_for_holder_in_current_transaction(
         &self,
-        tx: &mut Tx<'_>,
+        tx: &mut WriteTx<'_>,
         holder_id: &HolderId,
     ) -> Result<Option<MutexManualRenewalClaim>, Error> {
         self.mutex
@@ -413,7 +416,7 @@ impl MutexManualRenewalProtocol<'_> {
     /// Attempts to renew a live mutex claim through the manual-renewal protocol once.
     pub async fn try_renew_claim(
         &self,
-        pool: &Pool,
+        pool: &WritePool,
         claim: &MutexManualRenewalClaim,
     ) -> Result<Option<MutexManualRenewalClaim>, Error> {
         self.mutex.try_renew_manual_renewal_claim(pool, claim).await
@@ -422,7 +425,7 @@ impl MutexManualRenewalProtocol<'_> {
     /// Attempts to renew a live mutex claim through the manual-renewal protocol once inside the caller's transaction.
     pub async fn try_renew_claim_in_current_transaction(
         &self,
-        tx: &mut Tx<'_>,
+        tx: &mut WriteTx<'_>,
         claim: &MutexManualRenewalClaim,
     ) -> Result<Option<MutexManualRenewalClaim>, Error> {
         self.mutex
@@ -433,7 +436,7 @@ impl MutexManualRenewalProtocol<'_> {
     /// Releases a live mutex claim through the manual-renewal protocol.
     pub async fn release_claim(
         &self,
-        pool: &Pool,
+        pool: &WritePool,
         claim: &MutexManualRenewalClaim,
     ) -> Result<bool, Error> {
         self.mutex.release_manual_renewal_claim(pool, claim).await
@@ -442,7 +445,7 @@ impl MutexManualRenewalProtocol<'_> {
     /// Releases a live mutex claim through the manual-renewal protocol inside the caller's transaction.
     pub async fn release_claim_in_current_transaction(
         &self,
-        tx: &mut Tx<'_>,
+        tx: &mut WriteTx<'_>,
         claim: &MutexManualRenewalClaim,
     ) -> Result<bool, Error> {
         self.mutex

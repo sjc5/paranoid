@@ -2,9 +2,7 @@ use super::*;
 
 #[tokio::test]
 async fn fleet_semaphore_acquire_release_status_and_reset() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let store = Store::new(test_database.config.clone()).expect("fleet store");
     let semaphore_key = SemaphoreKey::new("workers").expect("semaphore key");
@@ -115,9 +113,7 @@ async fn fleet_semaphore_acquire_release_status_and_reset() {
 
 #[tokio::test]
 async fn fleet_semaphore_guard_drop_on_plain_thread_releases_slot() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let store = Store::new(test_database.config.clone()).expect("fleet store");
     let semaphore = store
@@ -175,9 +171,7 @@ async fn fleet_semaphore_guard_drop_on_plain_thread_releases_slot() {
 
 #[tokio::test]
 async fn fleet_semaphore_concurrent_acquire_respects_limit() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let store = Store::new(test_database.config.clone()).expect("fleet store");
     let semaphore = Arc::new(
@@ -259,9 +253,7 @@ async fn fleet_semaphore_concurrent_acquire_respects_limit() {
 
 #[tokio::test]
 async fn fleet_semaphore_composes_inside_current_transaction_and_rolls_back() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let store = Store::new(test_database.config.clone()).expect("fleet store");
     let semaphore = store
@@ -348,9 +340,7 @@ async fn fleet_semaphore_composes_inside_current_transaction_and_rolls_back() {
 
 #[tokio::test]
 async fn fleet_semaphore_claims_are_scoped_and_stale_claims_do_not_release_reused_slots() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let store = Store::new(test_database.config.clone()).expect("fleet store");
     let duration = Duration::from_millis(1200);
@@ -429,9 +419,7 @@ async fn fleet_semaphore_claims_are_scoped_and_stale_claims_do_not_release_reuse
 
 #[tokio::test]
 async fn fleet_semaphore_try_run_task_runs_releases_and_reports_no_slot_available() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let store = Store::new(test_database.config.clone()).expect("fleet store");
     let semaphore = store
@@ -522,9 +510,7 @@ async fn fleet_semaphore_try_run_task_runs_releases_and_reports_no_slot_availabl
 
 #[tokio::test]
 async fn fleet_semaphore_try_release_retains_retry_authority_after_release_failure() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let store = Store::new(test_database.config.clone()).expect("fleet store");
     let semaphore_key = SemaphoreKey::new("try-release-retry").expect("semaphore key");
@@ -594,9 +580,7 @@ async fn fleet_semaphore_try_release_retains_retry_authority_after_release_failu
 
 #[tokio::test]
 async fn fleet_semaphore_try_release_retains_retry_authority_after_blocked_release_is_cancelled() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let store = Store::new(test_database.config.clone()).expect("fleet store");
     let semaphore_key = SemaphoreKey::new("try-release-cancelled").expect("semaphore key");
@@ -660,9 +644,7 @@ async fn fleet_semaphore_try_release_retains_retry_authority_after_blocked_relea
 
 #[tokio::test]
 async fn fleet_semaphore_run_task_when_available_waits_for_slot() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let store = Store::new(test_database.config.clone()).expect("fleet store");
     let semaphore = store
@@ -731,9 +713,7 @@ async fn fleet_semaphore_run_task_when_available_waits_for_slot() {
 
 #[tokio::test]
 async fn fleet_semaphore_waiting_task_can_be_cancelled_before_execution() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let store = Store::new(test_database.config.clone()).expect("fleet store");
     let semaphore = store
@@ -794,9 +774,7 @@ async fn fleet_semaphore_task_panic_drop_releases_slot() {
         panic!("semaphore task panic")
     }
 
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let store = Store::new(test_database.config.clone()).expect("fleet store");
     let semaphore = store

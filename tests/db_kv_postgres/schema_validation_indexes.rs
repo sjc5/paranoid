@@ -2,9 +2,7 @@ use super::*;
 
 #[tokio::test]
 async fn kv_migration_accepts_existing_usable_unique_key_and_optional_updated_at_index() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let mut no_updated_at_index_config =
         KvStoreConfig::new(unique_test_table_name()).expect("kv config");
@@ -67,9 +65,7 @@ async fn kv_migration_accepts_existing_usable_unique_key_and_optional_updated_at
 
 #[tokio::test]
 async fn kv_migration_rejects_expected_index_names_with_wrong_definitions() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let expires_at_config = KvStoreConfig::new(unique_test_table_name()).expect("kv config");
     drop_test_table(&test_database.sqlx_pool, &expires_at_config.table_name).await;
@@ -158,9 +154,7 @@ async fn kv_migration_rejects_expected_index_names_with_wrong_definitions() {
 
 #[tokio::test]
 async fn kv_validation_rejects_unusable_key_uniqueness_and_non_c_key_collation() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let missing_unique_config = KvStoreConfig::new(unique_test_table_name()).expect("kv config");
     drop_test_table(&test_database.sqlx_pool, &missing_unique_config.table_name).await;
@@ -379,9 +373,7 @@ async fn kv_validation_rejects_unusable_key_uniqueness_and_non_c_key_collation()
 
 #[tokio::test]
 async fn kv_migration_case_distinct_tables_get_independent_indexes() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let mixed_case_table = format!(
         "__kv_rs_Case_{}",
@@ -420,9 +412,7 @@ async fn kv_migration_case_distinct_tables_get_independent_indexes() {
 
 #[tokio::test]
 async fn kv_schema_qualified_table_names_are_migrated_and_used_without_public_schema_bleed() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let schema_name = unique_test_schema_name();
     let table_name = unique_test_unqualified_table_name_text();

@@ -2,9 +2,7 @@ use super::*;
 
 #[tokio::test]
 async fn paranoid_pool_exposes_sqlx_pool_and_transaction_for_app_owned_queries() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let app_table_name = unique_test_table_name();
     drop_test_table(test_database.paranoid_pool.sqlx_pool(), &app_table_name).await;

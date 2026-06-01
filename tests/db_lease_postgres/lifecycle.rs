@@ -2,9 +2,7 @@ use super::*;
 
 #[tokio::test]
 async fn lease_claim_blocks_contention_and_release_preserves_fencing_progression() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let store = LeaseStore::new(test_database.config.clone());
     let key = LeaseKey::from_parts(["fleet", "leader"]).expect("key");
@@ -109,9 +107,7 @@ async fn lease_claim_blocks_contention_and_release_preserves_fencing_progression
 
 #[tokio::test]
 async fn lease_fencing_counter_survives_live_state_deletion() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let store = LeaseStore::new(test_database.config.clone());
     let key = LeaseKey::from_parts(["fleet", "durable-fencing"]).expect("key");
@@ -159,9 +155,7 @@ async fn lease_fencing_counter_survives_live_state_deletion() {
 
 #[tokio::test]
 async fn lease_claim_repairs_missing_fencing_counter_from_expired_state() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let store = LeaseStore::new(test_database.config.clone());
     let key = LeaseKey::from_parts(["fleet", "counter-repair"]).expect("key");
@@ -210,9 +204,7 @@ async fn lease_claim_repairs_missing_fencing_counter_from_expired_state() {
 
 #[tokio::test]
 async fn lease_expiry_takeover_rejects_stale_renew_and_release() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let store = LeaseStore::new(test_database.config.clone());
     let key = LeaseKey::from_parts(["queue", "sweeper"]).expect("key");
@@ -280,9 +272,7 @@ async fn lease_expiry_takeover_rejects_stale_renew_and_release() {
 
 #[tokio::test]
 async fn lease_renew_rotates_claim_token_and_keeps_fencing_token() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let store = LeaseStore::new(test_database.config.clone());
     let key = LeaseKey::from_parts(["fleet", "membership"]).expect("key");

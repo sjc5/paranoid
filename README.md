@@ -33,7 +33,7 @@ Enable only the namespaces your crate uses:
 
 ```toml
 [dependencies]
-paranoid = { version = "0.0.0-pre.2", features = ["crypto"] }
+paranoid = { version = "0.X.Y", features = ["crypto"] }
 ```
 
 Feature groups compose intentionally:
@@ -52,10 +52,16 @@ transaction-mode connection poolers. Paranoid internals do not depend on advisor
 `LISTEN`/`NOTIFY`, or any other Postgres behavior that requires session state to survive
 across transactions.
 
-Paranoid constructs its SQLx pool through its own configuration path so the internal
-portability guarantees stay under library control. Applications may use the exposed SQLx
-pool and active transaction accessors for app-owned tables and queries. App-owned SQL may
-use raw SQLx normally. When an application wants its own SQL to follow Paranoid's portable
-execution style, it can use `paranoid::db::portable_query`,
-`paranoid::db::portable_query_as`, or `paranoid::db::portable_query_scalar` inside an
-explicit Paranoid transaction.
+Paranoid constructs its SQLx pools through its own configuration path so the internal
+portability guarantees stay under library control. `paranoid::db::Pool` and
+`paranoid::db::Tx` are neutral DB handles; they do not imply particular database
+privileges. `paranoid::db::WritePool` and `paranoid::db::WriteTx` are marker wrappers used
+by Paranoid APIs whose existing behavior requires write authority. These marker wrappers
+do not inspect, reduce, or enforce Postgres privileges. Construct each pool with the
+connection URL and database role intended for that call site.
+
+Applications may use the exposed SQLx pool and active transaction accessors for app-owned
+tables and queries. App-owned SQL may use raw SQLx normally. When an application wants its
+own SQL to follow Paranoid's portable execution style, it can use
+`paranoid::db::portable_query`, `paranoid::db::portable_query_as`, or
+`paranoid::db::portable_query_scalar` inside an explicit Paranoid transaction.

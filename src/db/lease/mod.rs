@@ -1,6 +1,7 @@
 use super::{
     DatabaseOperationKind, DatabaseOperationObserver, DbError, PgIdentifier, PgQualifiedTableName,
-    Pool, Tx, finish_db_pool_transaction, finish_db_pool_validation_transaction,
+    Pool, Tx, WritePool, WriteTx, finish_db_pool_transaction,
+    finish_db_pool_validation_transaction,
     finish_pool_owned_rollback_only_transaction_and_preserve_rollback_error,
     finish_pool_owned_write_transaction_and_preserve_rollback_error,
     pg_table_name_set_could_contain_same_relation, pooler_safe_query, pooler_safe_query_as,
@@ -67,7 +68,7 @@ pub(crate) const LEASE_OPERATION_SCHEMA_VALIDATE: &str = "lease.schema.validate"
 
 async fn finish_lease_pool_transaction<T>(
     operation: &'static str,
-    tx: Tx<'_>,
+    tx: WriteTx<'_>,
     result: Result<T, Error>,
 ) -> Result<T, Error> {
     finish_pool_owned_write_transaction_and_preserve_rollback_error(

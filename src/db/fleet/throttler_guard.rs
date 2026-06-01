@@ -151,7 +151,7 @@ async fn stop_throttler_probe_heartbeat(
 
 pub(super) async fn run_throttler_probe_heartbeat(
     throttler: Throttler,
-    pool: Pool,
+    pool: WritePool,
     permit: ThrottlerPermit,
     stop_heartbeat: Arc<AtomicBool>,
     stop_heartbeat_notify: Arc<Notify>,

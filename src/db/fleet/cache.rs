@@ -28,7 +28,7 @@ where
     /// Fetches a fresh cached value, or computes it while holding this key's distributed mutex.
     pub async fn fetch_or_compute<S, I, E, Fut, F>(
         &self,
-        pool: &Pool,
+        pool: &WritePool,
         key_parts: I,
         compute_value: F,
     ) -> Result<T, CoalescingCacheFetchError<E>>
@@ -68,7 +68,7 @@ where
     }
 
     /// Stores a cache value manually for the given key parts.
-    pub async fn set<S, I>(&self, pool: &Pool, key_parts: I, value: T) -> Result<(), Error>
+    pub async fn set<S, I>(&self, pool: &WritePool, key_parts: I, value: T) -> Result<(), Error>
     where
         S: AsRef<str>,
         I: IntoIterator<Item = S>,
@@ -86,7 +86,7 @@ where
     }
 
     /// Deletes one cached value so the next fetch recomputes it.
-    pub async fn invalidate<S, I>(&self, pool: &Pool, key_parts: I) -> Result<(), Error>
+    pub async fn invalidate<S, I>(&self, pool: &WritePool, key_parts: I) -> Result<(), Error>
     where
         S: AsRef<str>,
         I: IntoIterator<Item = S>,
@@ -107,7 +107,7 @@ where
     }
 
     /// Invalidates all values in this cache namespace by advancing its epoch.
-    pub async fn invalidate_all(&self, pool: &Pool) -> Result<(), Error> {
+    pub async fn invalidate_all(&self, pool: &WritePool) -> Result<(), Error> {
         let mut tx = pool.begin_transaction().await?;
         let result = self.invalidate_all_in_current_transaction(&mut tx).await;
         finish_fleet_pool_transaction(FLEET_OPERATION_CACHE_INVALIDATE_ALL, tx, result).await
@@ -116,7 +116,7 @@ where
     /// Transactional variant of `invalidate_all`.
     pub async fn invalidate_all_in_current_transaction(
         &self,
-        tx: &mut Tx<'_>,
+        tx: &mut WriteTx<'_>,
     ) -> Result<(), Error> {
         self.epoch_item
             .mutate_live_or_insert_initial_value_atomically_in_current_transaction(
@@ -140,7 +140,7 @@ where
 
     async fn fetch_or_compute_while_holding_mutex<E, Fut, F>(
         &self,
-        pool: &Pool,
+        pool: &WritePool,
         key_parts: &[String],
         guard: &MutexGuard,
         compute_value: F,
@@ -190,7 +190,7 @@ where
 
     async fn fetch_locked_cached_value_and_epoch(
         &self,
-        pool: &Pool,
+        pool: &WritePool,
         key_parts: &[String],
     ) -> Result<(Option<T>, i64), Error> {
         match self.fetch_cached_entry(pool, key_parts).await? {
@@ -207,7 +207,7 @@ where
 
     async fn fetch_fresh_cached_value(
         &self,
-        pool: &Pool,
+        pool: &WritePool,
         key_parts: &[String],
     ) -> Result<Option<T>, Error> {
         let Some(entry) = self.fetch_cached_entry(pool, key_parts).await? else {
@@ -222,7 +222,7 @@ where
 
     async fn fetch_cached_entry(
         &self,
-        pool: &Pool,
+        pool: &WritePool,
         key_parts: &[String],
     ) -> Result<Option<CoalescingCacheEntry<T>>, Error> {
         match self
@@ -246,7 +246,7 @@ where
 
     async fn set_without_mutex(
         &self,
-        pool: &Pool,
+        pool: &WritePool,
         key_parts: &[String],
         value: T,
     ) -> Result<(), Error> {
@@ -268,7 +268,7 @@ where
 
     async fn store_computed_value_best_effort(
         &self,
-        pool: &Pool,
+        pool: &WritePool,
         key_parts: &[String],
         value: &T,
         epoch: i64,
@@ -290,7 +290,7 @@ where
 
     async fn acquire_compute_mutex_guard(
         &self,
-        pool: &Pool,
+        pool: &WritePool,
         mutex: &Mutex,
     ) -> Result<MutexGuard, Error> {
         let started_at = tokio::time::Instant::now();

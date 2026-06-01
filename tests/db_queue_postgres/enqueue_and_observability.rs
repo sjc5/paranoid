@@ -2,9 +2,7 @@ use super::*;
 
 #[tokio::test]
 async fn queue_registered_json_task_handle_binds_task_name_for_enqueue_and_worker_processing() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let queue = Store::new(test_database.config.clone()).expect("queue");
     reset_queue_schema(&test_database).await;
@@ -84,9 +82,7 @@ async fn queue_registered_json_task_handle_binds_task_name_for_enqueue_and_worke
 
 #[tokio::test]
 async fn queue_active_dedupe_is_single_winner_under_contention() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let queue = Arc::new(Store::new(test_database.config.clone()).expect("queue"));
     let pool = Arc::new(test_database.paranoid_pool.clone());
@@ -134,9 +130,7 @@ async fn queue_active_dedupe_is_single_winner_under_contention() {
 
 #[tokio::test]
 async fn queue_enqueue_classifies_suppressed_insert_rows_without_losing_control_flow() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let queue = Store::new(test_database.config.clone()).expect("queue");
     reset_queue_schema(&test_database).await;
@@ -201,9 +195,7 @@ async fn queue_enqueue_classifies_suppressed_insert_rows_without_losing_control_
 
 #[tokio::test]
 async fn queue_status_counts_track_core_lifecycle_states() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let queue = Store::new(test_database.config.clone()).expect("queue");
     reset_queue_schema(&test_database).await;
@@ -377,9 +369,7 @@ async fn install_enqueue_suppressed_insert_trigger(test_database: &TestDatabase)
 
 #[tokio::test]
 async fn queue_worker_pressure_and_task_introspection_follow_registered_handler_state() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let queue = Store::new(test_database.config.clone()).expect("queue");
     reset_queue_schema(&test_database).await;
@@ -524,9 +514,7 @@ async fn queue_worker_pressure_and_task_introspection_follow_registered_handler_
 
 #[tokio::test]
 async fn queue_observability_methods_report_missing_backing_tables() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let queue = Store::new(test_database.config.clone()).expect("queue");
     let registry = TaskRegistry::new();

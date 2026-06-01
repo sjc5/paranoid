@@ -111,6 +111,14 @@ suites.
 A failing test that exposes a real bug or issue is ALWAYS a HUGE BLESSING, and we should
 be CELEBRATING when that happens.
 
+## Tests Must Never "Skip" When A Resource Is Missing
+
+It is strictly prohibited to skip tests, ever. If something a test needs to run is missing
+(e.g., a live Docker container or whatever), then the test must instantly and loudly fail.
+Zero exceptions. We cannot risk ever having only a subset of tests run; it would
+dangerously lead to false confidence from a suite that didn't even run fully. Printing a
+warning is NOT sufficient. The tests must fail.
+
 ## Long, Clear Function/Method/Variable Names Are Good
 
 When a short function/method/variable name is crystal clear, then that's fine. But if it's

@@ -2,9 +2,7 @@ use super::*;
 
 #[tokio::test]
 async fn lease_claims_compose_inside_current_transaction_and_roll_back() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let store = LeaseStore::new(test_database.config.clone());
     let key = LeaseKey::from_parts(["transaction", "lease"]).expect("key");
@@ -56,12 +54,7 @@ async fn lease_claims_compose_inside_current_transaction_and_roll_back() {
 
 #[tokio::test]
 async fn lease_future_abort_while_waiting_for_pool_connection_does_not_mutate_later() {
-    let Some(database_url) = test_database_url() else {
-        eprintln!(
-            "skipping Postgres lease test; set TEST_DSN or PARANOID_TEST_DATABASE_URL to run"
-        );
-        return;
-    };
+    let database_url = test_database_url();
 
     let paranoid_pool = connect_paranoid_pool_with_max_connections(&database_url, 1).await;
     let sqlx_pool = connect_sqlx_pool(&database_url).await;
@@ -177,9 +170,7 @@ async fn lease_future_abort_while_waiting_for_pool_connection_does_not_mutate_la
 
 #[tokio::test]
 async fn lease_future_abort_while_waiting_for_row_lock_does_not_mutate_later() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let store = LeaseStore::new(test_database.config.clone());
     let key = LeaseKey::from_parts(["cancel", "row-lock", "lease"]).expect("key");
@@ -333,9 +324,7 @@ async fn lease_future_abort_while_waiting_for_row_lock_does_not_mutate_later() {
 
 #[tokio::test]
 async fn lease_claims_serialize_absent_key_races() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let store = LeaseStore::new(test_database.config.clone());
     let key = LeaseKey::from_parts(["race", "lease"]).expect("key");
@@ -387,9 +376,7 @@ async fn lease_claims_serialize_absent_key_races() {
 
 #[tokio::test]
 async fn lease_claims_serialize_expired_key_races() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let store = LeaseStore::new(test_database.config.clone());
     let key = LeaseKey::from_parts(["race", "expired", "lease"]).expect("key");

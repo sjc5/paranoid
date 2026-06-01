@@ -2,9 +2,7 @@ use super::*;
 
 #[tokio::test]
 async fn queue_dead_letter_batch_future_cancellation_does_not_move_failed_jobs() {
-    let Some(test_database) = TestDatabase::connect().await else {
-        return;
-    };
+    let test_database = TestDatabase::connect().await;
 
     let queue = Store::new(test_database.config.clone()).expect("queue");
     reset_queue_schema(&test_database).await;

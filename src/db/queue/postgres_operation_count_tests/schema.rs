@@ -2,12 +2,7 @@ use super::*;
 
 #[tokio::test]
 async fn queue_schema_setup_and_validation_emit_expected_database_operation_shapes() {
-    let Some(database_url) = test_database_url() else {
-        eprintln!(
-            "skipping Postgres Queue schema operation-count test; set TEST_DSN or PARANOID_TEST_DATABASE_URL to run"
-        );
-        return;
-    };
+    let database_url = test_database_url();
 
     let sqlx_pool = connect_sqlx_pool(&database_url).await;
     let config = unique_test_config();
@@ -49,12 +44,7 @@ async fn queue_schema_setup_and_validation_emit_expected_database_operation_shap
 
 #[tokio::test]
 async fn queue_schema_migration_rolls_back_when_existing_schema_is_incompatible() {
-    let Some(database_url) = test_database_url() else {
-        eprintln!(
-            "skipping Postgres Queue schema rollback test; set TEST_DSN or PARANOID_TEST_DATABASE_URL to run"
-        );
-        return;
-    };
+    let database_url = test_database_url();
 
     let sqlx_pool = connect_sqlx_pool(&database_url).await;
     let config = unique_test_config();

@@ -33,7 +33,7 @@ where
 }
 
 pub(in crate::db::queue) async fn cleanup_jobs_older_than_until_empty(
-    pool: &Pool,
+    pool: &WritePool,
     sql_catalog: &SqlCatalog,
     status: JobStatus,
     older_than: Duration,
@@ -83,7 +83,7 @@ where
 }
 
 pub(in crate::db::queue) async fn cleanup_available_dead_letter_jobs_older_than_until_empty(
-    pool: &Pool,
+    pool: &WritePool,
     sql_catalog: &SqlCatalog,
     older_than: Duration,
     batch_size: u32,
@@ -102,7 +102,7 @@ pub(in crate::db::queue) async fn cleanup_available_dead_letter_jobs_older_than_
 }
 
 pub(in crate::db::queue) async fn cleanup_jobs_older_than_until_empty_or_cancelled(
-    pool: &Pool,
+    pool: &WritePool,
     sql_catalog: &SqlCatalog,
     status: JobStatus,
     older_than: Duration,
@@ -123,7 +123,7 @@ pub(in crate::db::queue) async fn cleanup_jobs_older_than_until_empty_or_cancell
 }
 
 pub(in crate::db::queue) async fn cleanup_available_dead_letter_jobs_older_than_until_empty_or_cancelled(
-    pool: &Pool,
+    pool: &WritePool,
     sql_catalog: &SqlCatalog,
     older_than: Duration,
     batch_size: u32,
@@ -149,7 +149,7 @@ enum CleanupTarget {
 }
 
 async fn cleanup_target_older_than_until_empty(
-    pool: &Pool,
+    pool: &WritePool,
     sql_catalog: &SqlCatalog,
     target: CleanupTarget,
     older_than: Duration,

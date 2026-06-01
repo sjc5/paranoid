@@ -2,12 +2,7 @@ use super::*;
 
 #[tokio::test]
 async fn queue_cleanup_until_empty_operations_emit_one_cleanup_operation_per_batch() {
-    let Some(database_url) = test_database_url() else {
-        eprintln!(
-            "skipping Postgres Queue operation-count test; set TEST_DSN or PARANOID_TEST_DATABASE_URL to run"
-        );
-        return;
-    };
+    let database_url = test_database_url();
 
     let sqlx_pool = connect_sqlx_pool(&database_url).await;
     let config = unique_test_config();
