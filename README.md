@@ -1,13 +1,13 @@
-# 🕵
-
-`paranoid` is a Rust crate for misuse-resistant application security and Postgres-backed
-distributed systems primitives.
+**WARNING:** _Paranoid is in an alpha state and has not undergone a formal security audit.
+Use at your own risk and discretion, and understand that there will be frequent breaking
+changes for the foreseeable future._
 
 ---
 
-**WARNING:** `paranoid` is in an alpha state, and it has not undergone a formal security
-audit. Use at your own risk. There will be frequent breaking changes, so be sure to pin to
-a specific version.
+<img src="paranoid-banner.webp" alt="Paranoid banner">
+
+Paranoid is a library of misuse-resistant application security and distributed systems
+primitives.
 
 ---
 
