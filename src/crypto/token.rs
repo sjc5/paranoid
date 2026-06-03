@@ -116,6 +116,7 @@ impl<K> SecretBytes<K> {
         ))
     }
 
+    #[cfg(feature = "__auth_wip")]
     pub(crate) fn to_macs_for_all_keyset_keys(
         &self,
         keyset: &Keyset,

@@ -50,7 +50,9 @@ Feature groups compose intentionally:
 The database-backed surfaces are Postgres-only and are designed to remain compatible with
 transaction-mode connection poolers. Paranoid internals do not depend on advisory locks,
 `LISTEN`/`NOTIFY`, or any other Postgres behavior that requires session state to survive
-across transactions.
+across transactions (except that the DB bootstrap helper has one transaction-scoped
+advisory lock exception so it can serialize creation of Paranoid's own coordination tables
+before those tables exist).
 
 Paranoid constructs its SQLx pools through its own configuration path so the internal
 portability guarantees stay under library control. `paranoid::db::Pool` and

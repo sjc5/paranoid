@@ -51,6 +51,7 @@
 //! # }
 //! ```
 
+mod bootstrap;
 mod error;
 pub(crate) mod fleet;
 mod identifier;
@@ -66,6 +67,9 @@ mod schema_ledger;
 mod sql_state;
 mod time;
 
+pub use bootstrap::{
+    BootstrapConfig, BootstrapError, BootstrapStores, DEFAULT_BOOTSTRAP_SCHEMA_NAME,
+};
 pub use error::Error;
 pub use identifier::{
     InvalidPgIdentifier, MAX_PG_IDENTIFIER_BYTES, PgIdentifier, PgQualifiedTableName, PgSchemaName,

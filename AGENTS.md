@@ -57,8 +57,14 @@ minimal as possible. There should be no extra or speculative surface area, perio
 
 All packages shall be designed for use with Postgres only and shall be safe for use with
 connection poolers in transaction mode (or equivalent). It is prohibited to use advisory
-locks, LISTEN/NOTIFY or any other Postgres features that require maintaining session-level
-state across multiple transactions.
+locks, LISTEN/NOTIFY, or any other Postgres features that require maintaining
+session-level state across multiple transactions, subject to the following sole exception:
+
+The only advisory-lock exception is Paranoid-owned schema bootstrap before Paranoid's own
+coordination tables exist. That path may use one transaction-scoped
+`pg_advisory_xact_lock` to serialize creation/migration of Paranoid subsystem tables. It
+must not use session-scoped advisory locks, must not be exposed as a general coordination
+primitive, and must not appear in runtime paths after bootstrap.
 
 ## SQLx Is The Blessed Postgres Substrate
 
@@ -119,7 +125,7 @@ be CELEBRATING when that happens.
 ## Tests Must Never "Skip" When A Resource Is Missing
 
 It is strictly prohibited to skip tests, ever. If something a test needs to run is missing
-(e.g., a live Docker container or whatever), then the test must instantly and loudly fail.
+(such as a running container or whatever), then the test must instantly and loudly fail.
 Zero exceptions. We cannot risk ever having only a subset of tests run; it would
 dangerously lead to false confidence from a suite that didn't even run fully. Printing a
 warning is NOT sufficient. The tests must fail. Similarly, the repo's full gate

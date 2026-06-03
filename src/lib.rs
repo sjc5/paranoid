@@ -131,5 +131,5 @@ pub mod queue;
 #[cfg(feature = "web")]
 pub mod web;
 
-#[cfg(feature = "auth")]
+#[cfg(feature = "__auth_wip")]
 mod auth_core;

@@ -382,6 +382,9 @@ fn production_db_sql_does_not_use_session_level_postgres_features() {
             .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
         let source_lowercase = source.to_lowercase();
         for needle in forbidden_needles {
+            if needle == "pg_advisory" && path_is_db_bootstrap_advisory_lock_exception(&path) {
+                continue;
+            }
             if source_contains_forbidden_sql_phrase(&source_lowercase, needle) {
                 let relative = path
                     .strip_prefix(env!("CARGO_MANIFEST_DIR"))
@@ -394,8 +397,50 @@ fn production_db_sql_does_not_use_session_level_postgres_features() {
     violations.sort();
     assert!(
         violations.is_empty(),
-        "Paranoid-owned DB SQL must avoid session-level Postgres features and connection-pooler-hostile prepared-statement commands:\n{}",
+        "Paranoid-owned DB SQL must avoid session-level Postgres features and connection-pooler-hostile prepared-statement commands. The only advisory-lock exception is the audited transaction-scoped DB bootstrap lock:\n{}",
         violations.join("\n")
+    );
+}
+
+#[test]
+fn db_bootstrap_advisory_lock_exception_is_transaction_scoped_and_isolated() {
+    let source = read_crate_source_file("src/db/bootstrap.rs");
+    let source_lowercase = source.to_lowercase();
+
+    assert!(
+        source_lowercase.contains("pg_advisory_xact_lock($1, $2)"),
+        "DB bootstrap must serialize fresh schema creation with one transaction-scoped advisory lock"
+    );
+    assert_eq!(
+        source_lowercase.matches("pg_advisory").count(),
+        1,
+        "DB bootstrap must keep exactly one advisory-lock SQL call"
+    );
+    assert!(
+        !source_lowercase.contains("pg_advisory_lock("),
+        "DB bootstrap must not use session-scoped advisory locks"
+    );
+    assert!(
+        !source_lowercase.contains("pg_try_advisory"),
+        "DB bootstrap must block inside its transaction instead of exposing try-lock semantics"
+    );
+    assert!(
+        !source_lowercase.contains("pg_advisory_unlock"),
+        "DB bootstrap must not manually unlock session-level advisory state"
+    );
+
+    let migrate_once_body = rust_function_body_by_name(&source, "migrate_schema_once");
+    assert_source_order(
+        migrate_once_body,
+        "acquire_bootstrap_transaction_lock(&mut tx).await?",
+        "create_bootstrap_schema_if_needed(&mut tx, self.schema_name()).await?",
+        "DB bootstrap must acquire its transaction-scoped lock before creating the schema",
+    );
+    assert_source_order(
+        migrate_once_body,
+        "create_bootstrap_schema_if_needed(&mut tx, self.schema_name()).await?",
+        "migrate_schema_in_current_transaction(&mut tx)",
+        "DB bootstrap must create the schema before migrating subsystem tables into it",
     );
 }
 
@@ -1234,6 +1279,7 @@ fn function_uses_centralized_transaction_finisher(function: RustFunctionBlock<'_
         "finish_queue_pool_transaction(",
         "finish_queue_read_transaction(",
         "finish_queue_validation_transaction(",
+        "finish_pool_owned_write_transaction_and_preserve_rollback_error(",
         "finish_pool_owned_write_rollback_only_transaction_and_preserve_rollback_error(",
         "finish_worker_database_operation(",
     ]
@@ -1499,6 +1545,13 @@ fn path_is_db_test_or_pooler_safe_query_helper(path: &Path) -> bool {
         || relative.ends_with("postgres_operation_count_tests.rs")
         || relative.contains("/postgres_operation_count_tests/")
         || relative.contains("/tests/")
+}
+
+fn path_is_db_bootstrap_advisory_lock_exception(path: &Path) -> bool {
+    path.strip_prefix(env!("CARGO_MANIFEST_DIR"))
+        .unwrap_or(path)
+        .to_string_lossy()
+        .ends_with("src/db/bootstrap.rs")
 }
 
 fn path_is_db_test_or_public_pool_definition(path: &Path) -> bool {
