@@ -21,19 +21,11 @@ pub(crate) const SCHEMA_LEDGER_OPERATION_RECORD_COMPONENT_VERSION: &str =
 pub(crate) const SCHEMA_LEDGER_OPERATION_FETCH_COMPONENT_VERSION: &str =
     "schema_ledger.fetch_component_version";
 
-/// Default prefix reserved for Paranoid-owned Postgres objects.
-pub const DEFAULT_RESERVED_DB_OBJECT_PREFIX: &str = "__paranoid_";
-
-/// Default prefix reserved for Paranoid-owned KV keys.
-pub const DEFAULT_RESERVED_KV_KEY_PREFIX: &str = "__paranoid";
-
-/// Default table where Paranoid records current component schema versions.
-pub const DEFAULT_SCHEMA_LEDGER_TABLE_NAME: &str = "__paranoid_schema_ledger";
-
 pub(crate) const MAX_SCHEMA_LEDGER_COMPONENT_BYTES: usize = 128;
 pub(crate) const MAX_SCHEMA_LEDGER_INSTANCE_KEY_BYTES: usize = 1024;
 pub(crate) const MAX_SCHEMA_LEDGER_FINGERPRINT_BYTES: usize = 256;
 
+#[cfg(test)]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct SchemaLedgerConfig {
     pub(crate) table_name: PgQualifiedTableName,
@@ -47,13 +39,22 @@ pub(crate) struct ComponentSchemaVersion<'a> {
     pub(crate) fingerprint: &'a str,
 }
 
-impl Default for SchemaLedgerConfig {
-    fn default() -> Self {
-        Self {
-            table_name: PgQualifiedTableName::unqualified(DEFAULT_SCHEMA_LEDGER_TABLE_NAME)
-                .expect("default schema ledger table name must be valid"),
-        }
+#[cfg(test)]
+impl SchemaLedgerConfig {
+    pub(crate) fn new(table_name: PgQualifiedTableName) -> Self {
+        Self { table_name }
     }
+}
+
+#[cfg(test)]
+pub(crate) fn test_schema_ledger_table_name() -> PgQualifiedTableName {
+    PgQualifiedTableName::unqualified("__paranoid_test_schema_ledger")
+        .expect("test schema ledger table name must be valid")
+}
+
+#[cfg(test)]
+pub(crate) fn test_schema_ledger_config() -> SchemaLedgerConfig {
+    SchemaLedgerConfig::new(test_schema_ledger_table_name())
 }
 
 pub(crate) async fn record_component_schema_version_in_current_transaction(

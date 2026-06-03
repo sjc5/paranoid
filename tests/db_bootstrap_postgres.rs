@@ -31,16 +31,17 @@ async fn concurrent_bootstrap_migrates_subsystem_tables_in_one_schema() {
             .expect("concurrent bootstrap must succeed");
     }
 
-    let stores = config.stores().expect("bootstrap stores");
+    let table_names = config.table_names();
+
     for table_name in [
-        &stores.kv.config().table_name,
-        &stores.kv.config().schema_ledger_table_name,
-        &stores.fleet.config().state_table_name,
-        &stores.fleet.config().coordination_table_name,
-        &stores.fleet.config().fencing_counter_table_name,
-        &stores.queue.config().table_name,
-        &stores.queue.config().dead_letter_table_name,
-        &stores.queue.config().pause_table_name,
+        &table_names.kv,
+        &table_names.schema_ledger,
+        &table_names.fleet_state,
+        &table_names.fleet_coordination,
+        &table_names.fleet_fencing_counters,
+        &table_names.queue_jobs,
+        &table_names.queue_dead_letters,
+        &table_names.queue_pauses,
     ] {
         assert!(
             fetch_table_exists(&sqlx_pool, table_name).await,
@@ -50,6 +51,33 @@ async fn concurrent_bootstrap_migrates_subsystem_tables_in_one_schema() {
     }
 
     drop_test_schema(&sqlx_pool, config.schema_name().identifier()).await;
+}
+
+#[test]
+fn bootstrap_default_layout_uses_schema_as_the_paranoid_namespace() {
+    let config = BootstrapConfig::default();
+    let table_names = config.table_names();
+
+    for table_name in [
+        &table_names.schema_ledger,
+        &table_names.kv,
+        &table_names.fleet_state,
+        &table_names.fleet_coordination,
+        &table_names.fleet_fencing_counters,
+        &table_names.queue_jobs,
+        &table_names.queue_dead_letters,
+        &table_names.queue_pauses,
+    ] {
+        assert_eq!(
+            table_name.schema().map(|schema| schema.as_str()),
+            Some("__paranoid")
+        );
+        assert!(
+            !table_name.table().as_str().starts_with("__paranoid"),
+            "bootstrap table name should not repeat the schema namespace: {}",
+            table_name.quoted()
+        );
+    }
 }
 
 async fn connect_paranoid_pool(database_url: &str) -> WritePool {

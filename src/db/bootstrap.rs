@@ -1,10 +1,9 @@
 use super::{
     DatabaseOperationKind, Error, InvalidPgIdentifier, PgIdentifier, PgQualifiedTableName,
     PgSchemaName, PgSqlState, WritePool, WriteTx,
-    finish_pool_owned_write_transaction_and_preserve_rollback_error, pooler_safe_query,
-    sql_state_from_sqlx_error, unparameterized_simple_query,
+    finish_pool_owned_write_transaction_and_preserve_rollback_error, fleet, kv, pooler_safe_query,
+    queue, sql_state_from_sqlx_error, unparameterized_simple_query,
 };
-use crate::{fleet, kv, queue};
 use std::time::Duration;
 
 const BOOTSTRAP_SCHEMA_CREATION_RACE_MAX_ATTEMPTS: u32 = 64;
@@ -12,6 +11,30 @@ const BOOTSTRAP_SCHEMA_CREATION_RACE_RETRY_DELAY: Duration = Duration::from_mill
 
 /// Default schema name for Paranoid-owned DB primitive bootstrap.
 pub const DEFAULT_BOOTSTRAP_SCHEMA_NAME: &str = "__paranoid";
+
+/// Schema-local table name for Paranoid's bootstrap schema ledger.
+pub const BOOTSTRAP_SCHEMA_LEDGER_TABLE_NAME: &str = "schema_ledger";
+
+/// Schema-local table name for Paranoid's bootstrap KV store.
+pub const BOOTSTRAP_KV_TABLE_NAME: &str = "kv_store";
+
+/// Schema-local table name for Paranoid's bootstrap Fleet state store.
+pub const BOOTSTRAP_FLEET_STATE_TABLE_NAME: &str = "fleet_state";
+
+/// Schema-local table name for Paranoid's bootstrap Fleet coordination store.
+pub const BOOTSTRAP_FLEET_COORDINATION_TABLE_NAME: &str = "fleet_coordination";
+
+/// Schema-local table name for Paranoid's bootstrap Fleet fencing counter store.
+pub const BOOTSTRAP_FLEET_FENCING_COUNTER_TABLE_NAME: &str = "fleet_fencing_counters";
+
+/// Schema-local table name for Paranoid's bootstrap Queue jobs store.
+pub const BOOTSTRAP_QUEUE_JOBS_TABLE_NAME: &str = "queue_jobs";
+
+/// Schema-local table name for Paranoid's bootstrap Queue dead-letter store.
+pub const BOOTSTRAP_QUEUE_DEAD_LETTER_TABLE_NAME: &str = "queue_dead_letters";
+
+/// Schema-local table name for Paranoid's bootstrap Queue pause store.
+pub const BOOTSTRAP_QUEUE_PAUSE_TABLE_NAME: &str = "queue_pauses";
 
 const BOOTSTRAP_ADVISORY_LOCK_CLASS_ID: i32 = i32::from_be_bytes(*b"para");
 const BOOTSTRAP_ADVISORY_LOCK_OBJECT_ID: i32 = i32::from_be_bytes(*b"boot");
@@ -26,6 +49,27 @@ const DB_BOOTSTRAP_OPERATION_CREATE_SCHEMA: &str = "db.bootstrap.create_schema";
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BootstrapConfig {
     schema_name: PgSchemaName,
+}
+
+/// Fully qualified table names owned by one Paranoid bootstrap schema.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BootstrapTableNames {
+    /// Schema ledger table.
+    pub schema_ledger: PgQualifiedTableName,
+    /// KV store table.
+    pub kv: PgQualifiedTableName,
+    /// Fleet state table.
+    pub fleet_state: PgQualifiedTableName,
+    /// Fleet coordination table.
+    pub fleet_coordination: PgQualifiedTableName,
+    /// Fleet fencing counter table.
+    pub fleet_fencing_counters: PgQualifiedTableName,
+    /// Queue jobs table.
+    pub queue_jobs: PgQualifiedTableName,
+    /// Queue dead-letter table.
+    pub queue_dead_letters: PgQualifiedTableName,
+    /// Queue pause-state table.
+    pub queue_pauses: PgQualifiedTableName,
 }
 
 /// Store handles configured by [`BootstrapConfig`].
@@ -101,41 +145,53 @@ impl BootstrapConfig {
         &self.schema_name
     }
 
-    /// Builds KV, Fleet, and Queue store handles for this bootstrap config.
-    pub fn stores(&self) -> Result<BootstrapStores, BootstrapError> {
-        let schema_ledger_table_name =
-            self.qualified_table_name(super::DEFAULT_SCHEMA_LEDGER_TABLE_NAME);
+    /// Returns the fully qualified table names owned by this bootstrap schema.
+    pub fn table_names(&self) -> BootstrapTableNames {
+        BootstrapTableNames {
+            schema_ledger: self.qualified_table_name(BOOTSTRAP_SCHEMA_LEDGER_TABLE_NAME),
+            kv: self.qualified_table_name(BOOTSTRAP_KV_TABLE_NAME),
+            fleet_state: self.qualified_table_name(BOOTSTRAP_FLEET_STATE_TABLE_NAME),
+            fleet_coordination: self.qualified_table_name(BOOTSTRAP_FLEET_COORDINATION_TABLE_NAME),
+            fleet_fencing_counters: self
+                .qualified_table_name(BOOTSTRAP_FLEET_FENCING_COUNTER_TABLE_NAME),
+            queue_jobs: self.qualified_table_name(BOOTSTRAP_QUEUE_JOBS_TABLE_NAME),
+            queue_dead_letters: self.qualified_table_name(BOOTSTRAP_QUEUE_DEAD_LETTER_TABLE_NAME),
+            queue_pauses: self.qualified_table_name(BOOTSTRAP_QUEUE_PAUSE_TABLE_NAME),
+        }
+    }
+
+    /// Builds store handles for a schema that has already been migrated by Paranoid.
+    pub fn stores_for_already_migrated_schema(&self) -> Result<BootstrapStores, BootstrapError> {
+        let table_names = self.table_names();
+        let schema_ledger_table_name = table_names.schema_ledger.clone();
 
         let kv_config = kv::StoreConfig {
-            table_name: self.qualified_table_name(kv::DEFAULT_TABLE_NAME),
+            table_name: table_names.kv,
             schema_ledger_table_name: schema_ledger_table_name.clone(),
             create_updated_at_index: true,
         };
 
         let fleet_config = fleet::StoreConfig {
             root_key: fleet::RootKey::default(),
-            state_table_name: self.qualified_table_name(fleet::DEFAULT_STATE_TABLE_NAME),
-            coordination_table_name: self
-                .qualified_table_name(fleet::DEFAULT_COORDINATION_TABLE_NAME),
-            fencing_counter_table_name: self
-                .qualified_table_name(fleet::DEFAULT_FENCING_COUNTER_TABLE_NAME),
+            state_table_name: table_names.fleet_state,
+            coordination_table_name: table_names.fleet_coordination,
+            fencing_counter_table_name: table_names.fleet_fencing_counters,
             schema_ledger_table_name: schema_ledger_table_name.clone(),
             create_state_updated_at_index: true,
         };
 
         let queue_config = queue::StoreConfig {
-            table_name: self.qualified_table_name(queue::DEFAULT_TABLE_NAME),
-            dead_letter_table_name: self
-                .qualified_table_name(queue::DEFAULT_DEAD_LETTER_TABLE_NAME),
-            pause_table_name: self.qualified_table_name(queue::DEFAULT_PAUSE_TABLE_NAME),
+            table_name: table_names.queue_jobs,
+            dead_letter_table_name: table_names.queue_dead_letters,
+            pause_table_name: table_names.queue_pauses,
             schema_ledger_table_name,
-            payload_json_limit_bytes: queue::DEFAULT_PAYLOAD_JSON_LIMIT_BYTES,
+            payload_json_limit_bytes: queue::DEFAULT_QUEUE_PAYLOAD_JSON_LIMIT_BYTES,
         };
 
         Ok(BootstrapStores {
-            kv: kv::Store::new(kv_config)?,
-            fleet: fleet::Store::new(fleet_config)?,
-            queue: queue::Store::new(queue_config)?,
+            kv: kv::Store::new_inner(kv_config)?,
+            fleet: fleet::Store::new_inner(fleet_config)?,
+            queue: queue::Store::new_inner(queue_config)?,
         })
     }
 
@@ -177,20 +233,20 @@ impl BootstrapConfig {
             .await
             .map_err(BootstrapError::from)?;
         let result = async {
-            let stores = self.stores()?;
+            let stores = self.stores_for_already_migrated_schema()?;
             acquire_bootstrap_transaction_lock(&mut tx).await?;
             create_bootstrap_schema_if_needed(&mut tx, self.schema_name()).await?;
             stores
                 .kv
-                .migrate_schema_in_current_transaction(&mut tx)
+                .migrate_schema_in_current_transaction_inner(&mut tx)
                 .await?;
             stores
                 .fleet
-                .migrate_schema_in_current_transaction(&mut tx)
+                .migrate_schema_in_current_transaction_inner(&mut tx)
                 .await?;
             stores
                 .queue
-                .migrate_schema_in_current_transaction(&mut tx)
+                .migrate_schema_in_current_transaction_inner(&mut tx)
                 .await?;
             Ok(stores)
         }
@@ -214,7 +270,7 @@ impl BootstrapConfig {
         PgQualifiedTableName::new(
             Some(self.schema_name.clone()),
             PgIdentifier::new(table_name)
-                .expect("Paranoid default table name must be a valid Postgres identifier"),
+                .expect("Paranoid bootstrap table name must be a valid Postgres identifier"),
         )
     }
 }
@@ -268,7 +324,9 @@ mod tests {
     #[test]
     fn default_bootstrap_config_derives_every_store_table_from_one_schema() {
         let config = BootstrapConfig::default();
-        let stores = config.stores().expect("bootstrap stores");
+        let stores = config
+            .stores_for_already_migrated_schema()
+            .expect("bootstrap stores");
         let expected_schema = config.schema_name();
 
         for table_name in [
@@ -290,7 +348,7 @@ mod tests {
     #[test]
     fn default_bootstrap_config_uses_distinct_subsystem_tables_and_one_schema_ledger() {
         let stores = BootstrapConfig::default()
-            .stores()
+            .stores_for_already_migrated_schema()
             .expect("bootstrap stores");
 
         assert_ne!(

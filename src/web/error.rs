@@ -91,6 +91,11 @@ pub enum Error {
         /// Header label.
         label: &'static str,
     },
+    /// Development-mode web helpers only accept localhost request hosts.
+    DevelopmentModeNonLocalhostHost {
+        /// Host header or URI host that was rejected.
+        host: String,
+    },
     /// A CSRF header was not valid visible header text.
     CsrfHeaderDecode {
         /// Header label.
@@ -195,6 +200,12 @@ impl fmt::Display for Error {
                 write!(
                     f,
                     "paranoid web: csrf {label} must be an origin without path, query, fragment, username, or password"
+                )
+            }
+            Self::DevelopmentModeNonLocalhostHost { host } => {
+                write!(
+                    f,
+                    "paranoid web: development mode only accepts localhost request hosts, got {host}"
                 )
             }
             Self::CsrfHeaderDecode { label, source } => {

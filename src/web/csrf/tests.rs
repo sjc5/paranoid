@@ -745,7 +745,7 @@ fn csrf_binding_rejects_oversized_bytes() {
 }
 
 #[test]
-fn csrf_safe_method_matches_go_baseline() {
+fn csrf_safe_method_set_matches_http_csrf_safety_contract() {
     assert!(is_csrf_safe_method("GET"));
     assert!(is_csrf_safe_method("HEAD"));
     assert!(is_csrf_safe_method("OPTIONS"));
@@ -755,7 +755,7 @@ fn csrf_safe_method_matches_go_baseline() {
 }
 
 #[test]
-fn localhost_host_detection_matches_go_baseline_cases() {
+fn localhost_host_detection_accepts_loopback_host_forms() {
     for host in [
         "localhost",
         "LOCALHOST",
@@ -788,25 +788,30 @@ fn localhost_host_detection_matches_go_baseline_cases() {
 }
 
 #[test]
-#[should_panic(expected = "DANGER: CSRF middleware is configured for development mode")]
-fn csrf_development_mode_panics_on_non_localhost_host() {
+fn csrf_development_mode_rejects_non_localhost_host_without_panicking() {
     let config = CsrfProtectorConfig::new(test_development_manager());
     let protector = CsrfProtector::new(config).expect("protector");
     let request = request_with_headers(Method::GET, "example.com", None, None, None, None, None);
 
-    let _ = protector.issue_token_cookie_if_needed_for_request(&request);
+    assert!(matches!(
+        protector.issue_token_cookie_if_needed_for_request(&request),
+        Err(Error::DevelopmentModeNonLocalhostHost { host }) if host == "example.com"
+    ));
 }
 
 #[test]
-#[should_panic(expected = "DANGER: CSRF middleware is configured for development mode")]
-fn csrf_layer_development_mode_panics_on_non_localhost_unsafe_host() {
+fn csrf_layer_development_mode_rejects_non_localhost_unsafe_host_without_panicking() {
     let config = CsrfProtectorConfig::new(test_development_manager());
     let protector = CsrfProtector::new(config).expect("protector");
     let layer = CsrfLayer::new(protector, forbidden_response);
     let mut service = layer.layer(OkService);
     let request = request_with_headers(Method::POST, "example.com", None, None, None, None, None);
 
-    std::mem::drop(service.call(request));
+    let response = block_on_ready(service.call(request)).expect("response");
+
+    assert_eq!(response.status(), 403);
+    assert_eq!(response.body(), "forbidden");
+    assert!(response.headers().get(SET_COOKIE).is_none());
 }
 
 #[test]

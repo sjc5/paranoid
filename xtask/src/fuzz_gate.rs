@@ -147,7 +147,10 @@ fn repo_root() -> PathBuf {
 
 fn copy_corpus_files_if_present(source_dir: &Path, destination_dir: &Path) -> Result<(), String> {
     if !source_dir.exists() {
-        return Ok(());
+        return Err(format!(
+            "seed corpus directory is missing for fuzz target: {}",
+            source_dir.display()
+        ));
     }
     for entry in fs::read_dir(source_dir)
         .map_err(|error| format!("read seed corpus {}: {error}", source_dir.display()))?
@@ -156,7 +159,10 @@ fn copy_corpus_files_if_present(source_dir: &Path, destination_dir: &Path) -> Re
             .map_err(|error| format!("read seed corpus entry {}: {error}", source_dir.display()))?;
         let source_path = entry.path();
         if !source_path.is_file() {
-            continue;
+            return Err(format!(
+                "seed corpus entry is not a file: {}",
+                source_path.display()
+            ));
         }
         let destination_path = destination_dir.join(entry.file_name());
         fs::copy(&source_path, &destination_path).map_err(|error| {
@@ -348,6 +354,37 @@ Done 0 runs in 0 second(s)
         );
     }
 
+    #[test]
+    fn missing_seed_corpus_directory_is_rejected() {
+        let test_dir = unique_test_dir("missing-seed-corpus");
+        let source_dir = test_dir.join("missing");
+        let destination_dir = test_dir.join("destination");
+        fs::create_dir_all(&destination_dir).expect("create destination");
+
+        let err = copy_corpus_files_if_present(&source_dir, &destination_dir)
+            .expect_err("missing corpus directory should fail loudly");
+
+        assert!(err.contains("seed corpus directory is missing"));
+
+        fs::remove_dir_all(&test_dir).expect("remove test dir");
+    }
+
+    #[test]
+    fn non_file_seed_corpus_entry_is_rejected() {
+        let test_dir = unique_test_dir("non-file-seed-corpus");
+        let source_dir = test_dir.join("source");
+        let destination_dir = test_dir.join("destination");
+        fs::create_dir_all(source_dir.join("nested")).expect("create nested source entry");
+        fs::create_dir_all(&destination_dir).expect("create destination");
+
+        let err = copy_corpus_files_if_present(&source_dir, &destination_dir)
+            .expect_err("non-file corpus entry should fail loudly");
+
+        assert!(err.contains("seed corpus entry is not a file"));
+
+        fs::remove_dir_all(&test_dir).expect("remove test dir");
+    }
+
     fn fuzz_target_names_from_manifest(manifest: &str) -> Vec<&str> {
         let mut names = Vec::new();
         let mut inside_bin = false;
@@ -381,5 +418,16 @@ Done 0 runs in 0 second(s)
             "fuzz manifest should define fuzz targets"
         );
         names
+    }
+
+    fn unique_test_dir(label: &str) -> PathBuf {
+        env::temp_dir().join(format!(
+            "paranoid_xtask_fuzz_gate_{label}_{}_{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("system clock")
+                .as_nanos()
+        ))
     }
 }

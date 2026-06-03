@@ -302,11 +302,11 @@ fn kv_store_config_defaults_customization_and_item_constructors_are_explicit() {
     let default_config = StoreConfig::default();
     assert_eq!(
         default_config.table_name,
-        PgQualifiedTableName::unqualified(DEFAULT_KV_TABLE_NAME).expect("default table")
+        PgQualifiedTableName::unqualified(TEST_KV_TABLE_NAME).expect("test table")
     );
     assert_eq!(
         default_config.schema_ledger_table_name,
-        SchemaLedgerConfig::default().table_name
+        test_schema_ledger_table_name()
     );
     assert!(default_config.create_updated_at_index);
 
@@ -338,7 +338,7 @@ fn kv_store_config_defaults_customization_and_item_constructors_are_explicit() {
 
 #[test]
 fn kv_table_names_must_not_overlap() {
-    let ledger_table_name = SchemaLedgerConfig::default().table_name;
+    let ledger_table_name = test_schema_ledger_table_name();
     assert!(matches!(
         StoreConfig::new(ledger_table_name),
         Err(Error::TableNamesMustBeDistinct)

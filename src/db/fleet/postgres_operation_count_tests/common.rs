@@ -2,7 +2,7 @@ use super::*;
 
 #[tokio::test]
 async fn fleet_common_composed_operations_emit_exact_database_operation_records() {
-    let database_url = test_database_url();
+    let database_url = standard_test_database_url();
 
     let observed = prepare_observed_fleet_store(&database_url).await;
     let store = &observed.store;

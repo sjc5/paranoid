@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 const DEFAULT_FUZZ_RUNS: u64 = 4096;
-const DEFAULT_LOG_DIR: &str = "logs.local";
+const GATE_LOG_DIR: &str = "logs.local";
 
 #[derive(Debug, Eq, PartialEq)]
 struct Options {
@@ -75,7 +75,7 @@ fn parse_positive_u64(flag: &str, value: &str) -> Result<u64, String> {
 }
 
 fn run_gate(options: Options) -> Result<i32, String> {
-    let log_dir = PathBuf::from(DEFAULT_LOG_DIR);
+    let log_dir = PathBuf::from(GATE_LOG_DIR);
     fs::create_dir_all(&log_dir)
         .map_err(|error| format!("create gate log directory {}: {error}", log_dir.display()))?;
 
@@ -125,7 +125,7 @@ fn gate_steps(fuzz_runs: u64) -> Vec<GateStep> {
         make_step("feature-gate"),
         make_step("tool-gate"),
         make_step("bench-gate"),
-        make_step("test-db"),
+        make_step("test"),
         GateStep {
             name: "fuzz",
             command: make_command("fuzz"),
@@ -249,7 +249,7 @@ mod tests {
         let names = steps.iter().map(|step| step.name).collect::<Vec<_>>();
         assert_eq!(
             names,
-            vec!["feature-gate", "tool-gate", "bench-gate", "test-db", "fuzz"]
+            vec!["feature-gate", "tool-gate", "bench-gate", "test", "fuzz"]
         );
         assert_eq!(steps[4].env, vec![("FUZZ_RUNS", OsString::from("9"))]);
     }

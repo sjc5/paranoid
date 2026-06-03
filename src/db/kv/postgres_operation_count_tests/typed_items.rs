@@ -2,7 +2,7 @@ use super::*;
 
 #[tokio::test]
 async fn kv_typed_item_operations_emit_exact_database_operation_records() {
-    let database_url = test_database_url();
+    let database_url = standard_test_database_url();
 
     let sqlx_pool = connect_sqlx_pool(&database_url).await;
     let table_name = unique_test_table_name();

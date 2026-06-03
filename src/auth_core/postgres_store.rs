@@ -18,7 +18,8 @@ use super::*;
 const AUTH_SCHEMA_COMPONENT: &str = "auth_core";
 const AUTH_SCHEMA_VERSION: i32 = 1;
 const AUTH_SCHEMA_FINGERPRINT: &str = "auth-core-postgres-v1";
-const DEFAULT_AUTH_TABLE_PREFIX: &str = crate::db::DEFAULT_RESERVED_DB_OBJECT_PREFIX;
+const DEFAULT_AUTH_TABLE_PREFIX: &str = "__paranoid_";
+const AUTH_SCHEMA_LEDGER_TABLE_SUFFIX: &str = "schema_ledger";
 const AUTH_CREDENTIAL_SECRET_BYTES: usize = 32;
 const SESSION_SECRET_MAC_CONTEXT_PREFIX: &[u8] = b"paranoid/auth/v1/session-secret";
 const TRUSTED_DEVICE_SECRET_MAC_CONTEXT_PREFIX: &[u8] = b"paranoid/auth/v1/trusted-device-secret";
@@ -61,6 +62,18 @@ impl PostgresAuthStoreConfig {
 
     fn table_names(&self) -> Result<AuthCoreTableNames, PostgresAuthStoreError> {
         AuthCoreTableNames::new(self)
+    }
+
+    pub(super) fn schema_ledger_table_name(
+        &self,
+    ) -> Result<PgQualifiedTableName, PostgresAuthStoreError> {
+        let table_name = PgIdentifier::new(format!(
+            "{}{}",
+            self.table_prefix.as_str(),
+            AUTH_SCHEMA_LEDGER_TABLE_SUFFIX
+        ))
+        .map_err(DbError::from)?;
+        Ok(PgQualifiedTableName::new(self.schema.clone(), table_name))
     }
 }
 
@@ -228,7 +241,7 @@ impl PostgresAuthStore {
         };
         record_component_schema_version_in_current_transaction(
             tx,
-            &crate::db::SchemaLedgerConfig::default().table_name,
+            &self.config.schema_ledger_table_name()?,
             ledger_row,
         )
         .await?;
@@ -934,7 +947,7 @@ async fn validate_auth_schema_ledger_in_current_transaction(
     };
     validate_component_schema_version_in_current_transaction(
         tx,
-        &crate::db::SchemaLedgerConfig::default().table_name,
+        &config.schema_ledger_table_name()?,
         ledger_row,
     )
     .await?;

@@ -22,7 +22,8 @@ struct ActualColumn {
 }
 
 /// Creates and validates the configured lease schema inside one transaction.
-pub async fn migrate_schema(pool: &WritePool, config: &StoreConfig) -> Result<(), DbError> {
+#[cfg(test)]
+pub(crate) async fn migrate_schema(pool: &WritePool, config: &StoreConfig) -> Result<(), DbError> {
     validate_distinct_table_names(config)?;
     let mut tx = pool.begin_transaction().await?;
     let result = migrate_schema_in_current_transaction(&mut tx, config).await;
@@ -30,7 +31,7 @@ pub async fn migrate_schema(pool: &WritePool, config: &StoreConfig) -> Result<()
 }
 
 /// Creates and validates the configured lease schema inside the caller's transaction.
-pub async fn migrate_schema_in_current_transaction(
+pub(crate) async fn migrate_schema_in_current_transaction(
     tx: &mut WriteTx<'_>,
     config: &StoreConfig,
 ) -> Result<(), DbError> {
@@ -51,7 +52,8 @@ pub async fn migrate_schema_in_current_transaction(
 }
 
 /// Validates that the configured lease schema already exists and is compatible.
-pub async fn validate_schema(pool: &Pool, config: &StoreConfig) -> Result<(), DbError> {
+#[cfg(test)]
+pub(crate) async fn validate_schema(pool: &Pool, config: &StoreConfig) -> Result<(), DbError> {
     validate_distinct_table_names(config)?;
     let mut tx = pool.begin_transaction().await?;
     let validation_result = validate_schema_in_current_transaction(&mut tx, config).await;

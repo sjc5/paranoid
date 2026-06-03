@@ -3,14 +3,17 @@ use super::*;
 /// Size, in bytes, of queue job identifiers.
 pub const JOB_ID_SIZE: usize = id::SORTABLE_ID_SIZE;
 
-/// Default queue jobs table name.
-pub const DEFAULT_QUEUE_TABLE_NAME: &str = "__paranoid_queue_jobs";
+/// Test-only unqualified queue jobs table name.
+#[cfg(test)]
+pub const TEST_QUEUE_JOBS_TABLE_NAME: &str = "__paranoid_queue_jobs";
 
-/// Default queue dead-letter table name.
-pub const DEFAULT_QUEUE_DEAD_LETTER_TABLE_NAME: &str = "__paranoid_queue_dead_letters";
+/// Test-only unqualified queue dead-letter table name.
+#[cfg(test)]
+pub const TEST_QUEUE_DEAD_LETTER_TABLE_NAME: &str = "__paranoid_queue_dead_letters";
 
-/// Default queue pause-state table name.
-pub const DEFAULT_QUEUE_PAUSE_TABLE_NAME: &str = "__paranoid_queue_pauses";
+/// Test-only unqualified queue pause-state table name.
+#[cfg(test)]
+pub const TEST_QUEUE_PAUSE_TABLE_NAME: &str = "__paranoid_queue_pauses";
 
 pub(crate) const QUEUE_SCHEMA_COMPONENT: &str = "queue";
 pub(crate) const QUEUE_SCHEMA_VERSION: i32 = 1;

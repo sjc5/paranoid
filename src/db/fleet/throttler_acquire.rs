@@ -555,7 +555,7 @@ mod tests {
     }
 
     #[test]
-    fn throttler_sql_shape_matches_go_minimal_db_call_cases() {
+    fn throttler_sql_shape_preserves_minimal_database_call_cases() {
         let scenarios = [
             ("rate-only", true, false, false, 2),
             ("concurrency-only", false, true, false, 4),

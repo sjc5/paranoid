@@ -108,22 +108,6 @@ name = "db_bootstrap_postgres"
 required-features = ["db"]
 
 [[test]]
-name = "db_fleet_postgres"
-required-features = ["db"]
-
-[[test]]
-name = "db_kv_postgres"
-required-features = ["db"]
-
-[[test]]
-name = "db_queue_postgres"
-required-features = ["db"]
-
-[[test]]
-name = "db_write_pool_marker_postgres"
-required-features = ["db"]
-
-[[test]]
 name = "web_stack"
 required-features = ["web"]
 

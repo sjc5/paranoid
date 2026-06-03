@@ -56,11 +56,12 @@ mod error;
 pub(crate) mod fleet;
 mod identifier;
 pub(crate) mod kv;
-#[allow(dead_code)]
 pub(crate) mod lease;
 mod operation_observer;
 mod pool;
 mod portable_query;
+#[cfg(test)]
+pub(crate) mod postgres_test_support;
 pub(crate) mod queue;
 mod schema;
 mod schema_ledger;
@@ -68,7 +69,11 @@ mod sql_state;
 mod time;
 
 pub use bootstrap::{
-    BootstrapConfig, BootstrapError, BootstrapStores, DEFAULT_BOOTSTRAP_SCHEMA_NAME,
+    BOOTSTRAP_FLEET_COORDINATION_TABLE_NAME, BOOTSTRAP_FLEET_FENCING_COUNTER_TABLE_NAME,
+    BOOTSTRAP_FLEET_STATE_TABLE_NAME, BOOTSTRAP_KV_TABLE_NAME,
+    BOOTSTRAP_QUEUE_DEAD_LETTER_TABLE_NAME, BOOTSTRAP_QUEUE_JOBS_TABLE_NAME,
+    BOOTSTRAP_QUEUE_PAUSE_TABLE_NAME, BOOTSTRAP_SCHEMA_LEDGER_TABLE_NAME, BootstrapConfig,
+    BootstrapError, BootstrapStores, BootstrapTableNames, DEFAULT_BOOTSTRAP_SCHEMA_NAME,
 };
 pub use error::Error;
 pub use identifier::{
@@ -78,10 +83,6 @@ pub use identifier::{
 pub use pool::{Pool, PoolConfig, SslMode, Tx, WritePool, WriteTx};
 pub use portable_query::{
     portable_query, portable_query_as, portable_query_scalar, unparameterized_simple_query,
-};
-pub use schema_ledger::{
-    DEFAULT_RESERVED_DB_OBJECT_PREFIX, DEFAULT_RESERVED_KV_KEY_PREFIX,
-    DEFAULT_SCHEMA_LEDGER_TABLE_NAME,
 };
 pub use sql_state::PgSqlState;
 
@@ -99,9 +100,8 @@ pub(crate) use portable_query::{
 };
 pub(crate) use schema::normalize_check_constraint_expression;
 pub(crate) use schema_ledger::{
-    ComponentSchemaVersion, SchemaLedgerConfig,
-    record_component_schema_version_in_current_transaction, schema_instance_key_for_parts,
-    validate_component_schema_version_in_current_transaction,
+    ComponentSchemaVersion, record_component_schema_version_in_current_transaction,
+    schema_instance_key_for_parts, validate_component_schema_version_in_current_transaction,
 };
 #[cfg(test)]
 pub(crate) use schema_ledger::{
@@ -109,7 +109,8 @@ pub(crate) use schema_ledger::{
     SCHEMA_LEDGER_OPERATION_FETCH_COMPONENT_VERSION,
     SCHEMA_LEDGER_OPERATION_RECORD_COMPONENT_VERSION, SCHEMA_LEDGER_OPERATION_RELEASE_SAVEPOINT,
     SCHEMA_LEDGER_OPERATION_VALIDATE_CHECK_CONSTRAINTS, SCHEMA_LEDGER_OPERATION_VALIDATE_COLUMNS,
-    SCHEMA_LEDGER_OPERATION_VALIDATE_PRIMARY_KEY,
+    SCHEMA_LEDGER_OPERATION_VALIDATE_PRIMARY_KEY, test_schema_ledger_config,
+    test_schema_ledger_table_name,
 };
 pub(crate) use sql_state::{
     SQLSTATE_ADMIN_SHUTDOWN, SQLSTATE_CANNOT_CONNECT_NOW, SQLSTATE_CRASH_SHUTDOWN,
@@ -127,6 +128,7 @@ pub(crate) fn first_8_bytes_as_lower_hex(bytes: &[u8; 32]) -> String {
     hex
 }
 
+#[cfg(test)]
 pub(crate) async fn finish_db_pool_transaction<T>(
     operation: &'static str,
     tx: WriteTx<'_>,
@@ -146,6 +148,7 @@ pub(crate) async fn finish_db_pool_transaction<T>(
     .await
 }
 
+#[cfg(test)]
 pub(crate) async fn finish_db_pool_validation_transaction<T>(
     operation: &'static str,
     tx: Tx<'_>,
@@ -184,6 +187,7 @@ pub(crate) async fn finish_pool_owned_write_transaction_and_preserve_rollback_er
     }
 }
 
+#[cfg(test)]
 pub(crate) async fn finish_pool_owned_write_rollback_only_transaction_and_preserve_rollback_error<
     T,
     E,
@@ -235,3 +239,5 @@ pub(crate) use schema_ledger::build_migrate_schema_ledger_statement_for_test;
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod write_pool_marker_postgres_tests;

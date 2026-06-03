@@ -3,14 +3,17 @@ use super::*;
 /// Default Fleet root key used to namespace Fleet-owned records.
 pub const DEFAULT_FLEET_ROOT_KEY: &str = "__paranoid_fleet";
 
-/// Default Fleet state backing table name.
-pub const DEFAULT_FLEET_STATE_TABLE_NAME: &str = "__paranoid_fleet_state";
+/// Test-only unqualified Fleet state backing table name.
+#[cfg(test)]
+pub const TEST_FLEET_STATE_TABLE_NAME: &str = "__paranoid_fleet_state";
 
-/// Default Fleet coordination backing table name.
-pub const DEFAULT_FLEET_COORDINATION_TABLE_NAME: &str = "__paranoid_fleet_coordination";
+/// Test-only unqualified Fleet coordination backing table name.
+#[cfg(test)]
+pub const TEST_FLEET_COORDINATION_TABLE_NAME: &str = "__paranoid_fleet_coordination";
 
-/// Default Fleet fencing counter backing table name.
-pub const DEFAULT_FLEET_FENCING_COUNTER_TABLE_NAME: &str = "__paranoid_fleet_fencing_counters";
+/// Test-only unqualified Fleet fencing counter backing table name.
+#[cfg(test)]
+pub const TEST_FLEET_FENCING_COUNTER_TABLE_NAME: &str = "__paranoid_fleet_fencing_counters";
 
 pub(crate) const FLEET_SCHEMA_COMPONENT: &str = "fleet";
 pub(crate) const FLEET_SCHEMA_VERSION: i32 = 1;

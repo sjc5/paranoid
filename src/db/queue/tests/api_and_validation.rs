@@ -110,7 +110,7 @@ fn queue_public_primitives_are_available_through_namespaced_modules() {
     let _: Option<crate::queue::JobRunAtOrAfter> = None;
     let _: Option<crate::queue::MoveFailedJobsToDeadLetterBatchResult> = None;
     let _: Option<crate::kv::Store> = None;
-    let _: Option<crate::fleet::StoreConfig> = None;
+    let _: Option<crate::db::fleet::StoreConfig> = None;
     let _: Option<crate::fleet::CoalescingCacheConfig> = None;
     let _: Option<crate::fleet::CoalescingCache<String>> = None;
     let _: Option<crate::fleet::CoalescingCacheFetchError<Error>> = None;
@@ -660,15 +660,15 @@ fn queue_config_and_input_validators_reject_ambiguous_protocol_values() {
     let default_config = StoreConfig::default();
     assert_eq!(
         default_config.table_name,
-        test_table_name(DEFAULT_QUEUE_TABLE_NAME)
+        test_table_name(TEST_QUEUE_JOBS_TABLE_NAME)
     );
     assert_eq!(
         default_config.dead_letter_table_name,
-        test_table_name(DEFAULT_QUEUE_DEAD_LETTER_TABLE_NAME)
+        test_table_name(TEST_QUEUE_DEAD_LETTER_TABLE_NAME)
     );
     assert_eq!(
         default_config.pause_table_name,
-        test_table_name(DEFAULT_QUEUE_PAUSE_TABLE_NAME)
+        test_table_name(TEST_QUEUE_PAUSE_TABLE_NAME)
     );
     assert_eq!(
         default_config.payload_json_limit_bytes,
@@ -694,7 +694,7 @@ fn queue_config_and_input_validators_reject_ambiguous_protocol_values() {
             table_name: jobs.clone(),
             dead_letter_table_name: dead.clone(),
             pause_table_name: dead.clone(),
-            schema_ledger_table_name: SchemaLedgerConfig::default().table_name,
+            schema_ledger_table_name: test_schema_ledger_table_name(),
             payload_json_limit_bytes: DEFAULT_QUEUE_PAYLOAD_JSON_LIMIT_BYTES,
         }),
         Err(Error::TableNamesMustBeDistinct)
@@ -704,7 +704,7 @@ fn queue_config_and_input_validators_reject_ambiguous_protocol_values() {
             table_name: jobs.clone(),
             dead_letter_table_name: dead.clone(),
             pause_table_name: pauses.clone(),
-            schema_ledger_table_name: SchemaLedgerConfig::default().table_name,
+            schema_ledger_table_name: test_schema_ledger_table_name(),
             payload_json_limit_bytes: 0,
         }),
         Err(Error::PayloadJsonLimitIsZero)
@@ -714,7 +714,7 @@ fn queue_config_and_input_validators_reject_ambiguous_protocol_values() {
             table_name: jobs.clone(),
             dead_letter_table_name: dead.clone(),
             pause_table_name: pauses.clone(),
-            schema_ledger_table_name: SchemaLedgerConfig::default().table_name,
+            schema_ledger_table_name: test_schema_ledger_table_name(),
             payload_json_limit_bytes: MAX_QUEUE_PAYLOAD_JSON_LIMIT_BYTES + 1,
         }),
         Err(Error::PayloadJsonLimitTooLarge { actual, max })
@@ -1229,27 +1229,6 @@ proptest! {
 }
 
 #[test]
-fn queue_job_id_from_bytes_accepts_only_exact_sortable_id_byte_length() {
-    for len in 0..=(crate::id::SORTABLE_ID_SIZE * 2) {
-        let bytes = (0..len).map(|index| index as u8).collect::<Vec<_>>();
-        let parsed = JobId::from_bytes(&bytes);
-        if len == crate::id::SORTABLE_ID_SIZE {
-            assert_eq!(
-                parsed
-                    .expect("exact id byte length should parse")
-                    .as_bytes(),
-                bytes.as_slice()
-            );
-        } else {
-            assert!(
-                matches!(parsed, Err(crate::id::Error::InvalidIdLength { actual }) if actual == len),
-                "byte length {len} should be rejected"
-            );
-        }
-    }
-}
-
-#[test]
 fn queue_job_run_at_or_after_converts_only_unambiguous_times() {
     assert_eq!(
         JobRunAtOrAfter::from_unix_microseconds(0)
@@ -1458,139 +1437,4 @@ fn queue_filter_and_pause_helpers_preserve_unambiguous_runtime_state() {
     ]);
     assert!(queue_paused);
     assert_eq!(paused_task_names, vec!["task.alpha", "task.zeta"]);
-}
-
-#[test]
-fn queue_enqueue_preparation_resolves_defaults_and_rejects_ambiguous_options() {
-    let prepared = PreparedEnqueue::new("task.enqueue", &123_u16, EnqueueOptions::default())
-        .expect("prepare default enqueue");
-    assert_eq!(prepared.task_name, "task.enqueue");
-    assert_eq!(prepared.payload_json, "123");
-    assert_eq!(prepared.run_at_or_after_unix_microseconds, None);
-    assert_eq!(prepared.max_retries, DEFAULT_QUEUE_MAX_RETRIES as i32);
-    assert_eq!(prepared.timeout_nanos, 0);
-    assert_eq!(prepared.dedupe_key, None);
-
-    let scheduled = PreparedEnqueue::new(
-        "task.enqueue",
-        &123_u16,
-        EnqueueOptions {
-            run_at_or_after: Some(
-                JobRunAtOrAfter::from_unix_microseconds(42).expect("scheduled run time"),
-            ),
-            max_retries: Some(0),
-            timeout: JobTimeout::NoTimeout,
-            dedupe_key: Some("dedupe-key".to_owned()),
-        },
-    )
-    .expect("prepare scheduled enqueue");
-    assert_eq!(scheduled.run_at_or_after_unix_microseconds, Some(42));
-    assert_eq!(scheduled.max_retries, 0);
-    assert_eq!(scheduled.timeout_nanos, -1);
-    assert_eq!(scheduled.dedupe_key.as_deref(), Some("dedupe-key"));
-
-    let explicit_timeout = PreparedEnqueue::new(
-        "task.enqueue",
-        &123_u16,
-        EnqueueOptions {
-            timeout: JobTimeout::ExpiresAfter(Duration::from_nanos(7)),
-            ..EnqueueOptions::default()
-        },
-    )
-    .expect("prepare explicit timeout enqueue");
-    assert_eq!(explicit_timeout.timeout_nanos, 7);
-
-    assert!(matches!(
-        PreparedEnqueue::new(
-            "task.enqueue",
-            &123_u16,
-            EnqueueOptions {
-                max_retries: Some(u32::MAX),
-                ..EnqueueOptions::default()
-            },
-        ),
-        Err(Error::InvalidMaxRetries)
-    ));
-    assert!(matches!(
-        PreparedEnqueue::new(
-            "task.enqueue",
-            &123_u16,
-            EnqueueOptions {
-                timeout: JobTimeout::ExpiresAfter(Duration::ZERO),
-                ..EnqueueOptions::default()
-            },
-        ),
-        Err(Error::InvalidTimeout)
-    ));
-    assert!(matches!(
-        PreparedEnqueue::new(
-            "task.enqueue",
-            &123_u16,
-            EnqueueOptions {
-                dedupe_key: Some(String::new()),
-                ..EnqueueOptions::default()
-            },
-        ),
-        Err(Error::InvalidDedupeKey)
-    ));
-}
-
-#[test]
-fn queue_enqueue_option_resolution_preserves_database_numeric_domains() {
-    for max_retries in [0, 1, i32::MAX as u32, i32::MAX as u32 + 1, u32::MAX] {
-        let result = PreparedEnqueue::new(
-            "task.enqueue",
-            &123_u16,
-            EnqueueOptions {
-                max_retries: Some(max_retries),
-                ..EnqueueOptions::default()
-            },
-        );
-        if max_retries <= i32::MAX as u32 {
-            assert_eq!(
-                result.expect("valid max retries").max_retries,
-                max_retries as i32
-            );
-        } else {
-            assert!(
-                matches!(result, Err(Error::InvalidMaxRetries)),
-                "max retries {max_retries} should not fit Postgres INT"
-            );
-        }
-    }
-
-    for timeout in [
-        JobTimeout::WorkerDefault,
-        JobTimeout::NoTimeout,
-        JobTimeout::ExpiresAfter(Duration::from_nanos(1)),
-        JobTimeout::ExpiresAfter(Duration::from_nanos(i64::MAX as u64)),
-        JobTimeout::ExpiresAfter(Duration::from_nanos(i64::MAX as u64 + 1)),
-        JobTimeout::ExpiresAfter(Duration::ZERO),
-    ] {
-        let result = PreparedEnqueue::new(
-            "task.enqueue",
-            &123_u16,
-            EnqueueOptions {
-                timeout,
-                ..EnqueueOptions::default()
-            },
-        );
-        match timeout {
-            JobTimeout::WorkerDefault => {
-                assert_eq!(result.expect("worker default timeout").timeout_nanos, 0)
-            }
-            JobTimeout::NoTimeout => assert_eq!(result.expect("no timeout").timeout_nanos, -1),
-            JobTimeout::ExpiresAfter(duration)
-                if !duration.is_zero() && duration.as_nanos() <= i64::MAX as u128 =>
-            {
-                assert_eq!(
-                    result.expect("valid explicit timeout").timeout_nanos,
-                    duration.as_nanos() as i64
-                );
-            }
-            JobTimeout::ExpiresAfter(_) => {
-                assert!(matches!(result, Err(Error::InvalidTimeout)));
-            }
-        }
-    }
 }

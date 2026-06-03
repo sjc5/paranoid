@@ -219,16 +219,21 @@ async fn postgres_store_migrates_and_validates_schema_when_database_is_available
         .begin_transaction()
         .await
         .expect("begin remove schema ledger row transaction");
-    pooler_safe_query(
-        r#"DELETE FROM "__paranoid_schema_ledger" WHERE component = $1 AND instance_key = $2"#,
-    )
-    .bind("auth_core")
-    .bind(super::super::postgres_store::schema_instance_key(
-        &store_config,
-    ))
-    .execute(remove_ledger_row_tx.sqlx_transaction().as_mut())
-    .await
-    .expect("remove schema ledger row");
+    let remove_ledger_row_statement = format!(
+        "DELETE FROM {} WHERE component = $1 AND instance_key = $2",
+        store_config
+            .schema_ledger_table_name()
+            .expect("auth schema ledger table name")
+            .quoted()
+    );
+    pooler_safe_query(sqlx::AssertSqlSafe(remove_ledger_row_statement.as_str()))
+        .bind("auth_core")
+        .bind(super::super::postgres_store::schema_instance_key(
+            &store_config,
+        ))
+        .execute(remove_ledger_row_tx.sqlx_transaction().as_mut())
+        .await
+        .expect("remove schema ledger row");
     remove_ledger_row_tx
         .commit()
         .await

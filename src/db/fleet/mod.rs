@@ -14,13 +14,17 @@ pub use super::lease::{ClaimDuration, CoordinationError, FencingToken, HolderId}
 use super::{
     ComponentSchemaVersion, DbError, PgQualifiedTableName, PgSqlState, Pool,
     SQLSTATE_ADMIN_SHUTDOWN, SQLSTATE_CANNOT_CONNECT_NOW, SQLSTATE_CRASH_SHUTDOWN,
-    SQLSTATE_LOCK_NOT_AVAILABLE, SQLSTATE_QUERY_CANCELED, SchemaLedgerConfig, Tx, WritePool,
-    WriteTx, duration_from_nonnegative_f64_seconds, finish_db_pool_transaction,
-    finish_db_pool_validation_transaction,
+    SQLSTATE_LOCK_NOT_AVAILABLE, SQLSTATE_QUERY_CANCELED, Tx, WritePool, WriteTx,
+    duration_from_nonnegative_f64_seconds,
     finish_pool_owned_write_transaction_and_preserve_rollback_error,
     pg_table_name_set_could_contain_same_relation, random_unit_f64_from_system,
     record_component_schema_version_in_current_transaction, schema_instance_key_for_parts,
     validate_component_schema_version_in_current_transaction,
+};
+#[cfg(test)]
+use super::{
+    finish_db_pool_transaction, finish_db_pool_validation_transaction,
+    test_schema_ledger_table_name,
 };
 use crate::id;
 use serde::de::DeserializeOwned;
@@ -73,6 +77,8 @@ mod util;
 
 #[cfg(test)]
 mod postgres_operation_count_tests;
+#[cfg(test)]
+mod postgres_tests;
 
 pub use cache_model::{CoalescingCache, CoalescingCacheConfig, CoalescingCacheFetchError, Counter};
 pub use constants::*;
@@ -98,7 +104,8 @@ pub use semaphore_model::{
     Semaphore, SemaphoreClaim, SemaphoreClaimGuard, SemaphoreGuardedTaskResult,
     SemaphoreManualClaimProtocol, SemaphoreStatus, SemaphoreTryRunTaskResult,
 };
-pub use store::{Store, StoreConfig};
+pub use store::Store;
+pub(crate) use store::StoreConfig;
 pub use throttler_model::{
     CircuitBreaker, CircuitBreakerConfig, CircuitBreakerGuardAcquireResult,
     CircuitBreakerGuardedTaskResult, CircuitBreakerManualPermitAcquireResult,
@@ -137,7 +144,9 @@ use topic_model::TopicEventEnvelope;
 use topic_support::*;
 use util::*;
 
+#[cfg(test)]
 pub(crate) const FLEET_OPERATION_SCHEMA_MIGRATE: &str = "fleet.schema.migrate";
+#[cfg(test)]
 pub(crate) const FLEET_OPERATION_SCHEMA_VALIDATE: &str = "fleet.schema.validate";
 
 async fn finish_fleet_pool_transaction<T>(

@@ -1,6 +1,7 @@
 use super::*;
 
 const INDEX_KIND: &str = "idx";
+#[cfg(test)]
 const FENCING_COUNTER_TABLE_SUFFIX: &str = "fencing_counters";
 const LEASE_EXPIRES_AT_UNIX_MICROSECONDS: &str =
     "(floor(EXTRACT(EPOCH FROM expires_at) * 1000000)::bigint)";
@@ -123,6 +124,7 @@ fn build_fetch_live_lease_holder_query(quoted_table_name: &str) -> String {
     )
 }
 
+#[cfg(test)]
 pub(super) fn derive_fencing_counter_table_name(
     table_name: &PgQualifiedTableName,
 ) -> PgQualifiedTableName {

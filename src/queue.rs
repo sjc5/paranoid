@@ -7,10 +7,11 @@
 //! ```rust,no_run
 //! # #[cfg(feature = "db")]
 //! # async fn example(pool: paranoid::db::WritePool) -> Result<(), Box<dyn std::error::Error>> {
-//! use paranoid::queue::{EnqueueOptions, Store, StoreConfig};
+//! use paranoid::db::BootstrapConfig;
+//! use paranoid::queue::EnqueueOptions;
 //!
-//! let queue = Store::new(StoreConfig::default())?;
-//! queue.migrate_schema(&pool).await?;
+//! let stores = BootstrapConfig::default().migrate_schema(&pool).await?;
+//! let queue = stores.queue;
 //!
 //! let result = queue
 //!     .enqueue_json(
@@ -30,17 +31,14 @@ pub use crate::db::queue::{
     DEFAULT_QUEUE_CLEANUP_BATCH_SIZE as DEFAULT_CLEANUP_BATCH_SIZE,
     DEFAULT_QUEUE_COMPLETED_JOB_RETENTION as DEFAULT_COMPLETED_JOB_RETENTION,
     DEFAULT_QUEUE_DEAD_LETTER_JOB_RETENTION as DEFAULT_DEAD_LETTER_JOB_RETENTION,
-    DEFAULT_QUEUE_DEAD_LETTER_TABLE_NAME as DEFAULT_DEAD_LETTER_TABLE_NAME,
     DEFAULT_QUEUE_FAILED_JOB_RETENTION as DEFAULT_FAILED_JOB_RETENTION,
     DEFAULT_QUEUE_LIST_LIMIT as DEFAULT_LIST_LIMIT,
     DEFAULT_QUEUE_MAX_RETRIES as DEFAULT_MAX_RETRIES,
-    DEFAULT_QUEUE_PAUSE_TABLE_NAME as DEFAULT_PAUSE_TABLE_NAME,
     DEFAULT_QUEUE_PAYLOAD_JSON_LIMIT_BYTES as DEFAULT_PAYLOAD_JSON_LIMIT_BYTES,
     DEFAULT_QUEUE_RECLAIM_BATCH_SIZE as DEFAULT_RECLAIM_BATCH_SIZE,
     DEFAULT_QUEUE_RETRY_EXPONENTIAL_BASE as DEFAULT_RETRY_EXPONENTIAL_BASE,
     DEFAULT_QUEUE_RETRY_JITTER_FRACTION as DEFAULT_RETRY_JITTER_FRACTION,
     DEFAULT_QUEUE_RETRY_MAX_BACKOFF as DEFAULT_RETRY_MAX_BACKOFF,
-    DEFAULT_QUEUE_TABLE_NAME as DEFAULT_TABLE_NAME,
     DEFAULT_QUEUE_WORKER_CLEANUP_INTERVAL as DEFAULT_WORKER_CLEANUP_INTERVAL,
     DEFAULT_QUEUE_WORKER_CONCURRENCY as DEFAULT_WORKER_CONCURRENCY,
     DEFAULT_QUEUE_WORKER_DATABASE_OPERATION_TIMEOUT as DEFAULT_WORKER_DATABASE_OPERATION_TIMEOUT,
@@ -69,7 +67,7 @@ pub use crate::db::queue::{
     MIN_QUEUE_RETRY_BACKOFF as MIN_RETRY_BACKOFF, MoveFailedJobsToDeadLetterBatchResult,
     MovedToDeadLetterJob, ReclaimStaleRunningJobsResult, ReclaimedFailedJob, ReclaimedJob,
     RegisteredJsonTask, RetryBackoffFn, RetryBackoffStrategy, RetryPolicy, StatusCounts, Store,
-    StoreConfig, TaskError, TaskRegistry, WorkerConfig, WorkerDefaultJobTimeout, WorkerHandle,
+    TaskError, TaskRegistry, WorkerConfig, WorkerDefaultJobTimeout, WorkerHandle,
     WorkerMaintenanceConfig, WorkerOwnerId, WorkerPressure, WorkerRunLoopSummary,
     WorkerRunOnceSummary,
 };

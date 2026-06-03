@@ -1042,8 +1042,8 @@ not auth-core security identity signals.
 
 ## Current Implementation Status
 
-The auth code is WIP private implementation behind the `auth` feature. It is not ready as
-public API.
+The auth code is WIP private implementation behind the `__auth_wip` feature. It is not
+ready as public API.
 
 The reducer model currently includes:
 

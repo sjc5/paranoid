@@ -158,12 +158,12 @@ fn vault_dir_resolves_from_absolute_root_and_relative_parent_path() {
 
     assert_eq!(
         vault_dir_from_root_and_relative_parent(&root, Path::new(".")).expect("vault dir"),
-        root.join(DEFAULT_VAULT_DIR)
+        root.join(VAULT_DIR_NAME)
     );
     assert_eq!(
         vault_dir_from_root_and_relative_parent(&root, Path::new("local/private"))
             .expect("vault dir"),
-        root.join("local/private").join(DEFAULT_VAULT_DIR)
+        root.join("local/private").join(VAULT_DIR_NAME)
     );
     assert!(matches!(
         vault_dir_from_root_and_relative_parent(Path::new("relative-root"), Path::new(".")),
@@ -231,7 +231,7 @@ fn configure_initializes_sets_checks_and_projects_without_plaintext_storage() {
         b"secret-value"
     );
 
-    let vault_json = fs::read_to_string(dir.join(DEFAULT_VAULT_FILE_NAME)).expect("vault json");
+    let vault_json = fs::read_to_string(dir.join(VAULT_FILE_NAME)).expect("vault json");
     assert!(!vault_json.contains("secret-value"));
     assert!(!vault_json.contains("operator-password"));
     assert_eq!(
@@ -266,7 +266,7 @@ fn config_creates_vault_directory_and_files_with_restrictive_permissions() {
         VAULT_DIR_MODE
     );
     assert_eq!(
-        fs::metadata(dir.join(DEFAULT_VAULT_FILE_NAME))
+        fs::metadata(dir.join(VAULT_FILE_NAME))
             .expect("vault metadata")
             .permissions()
             .mode()
@@ -292,7 +292,7 @@ fn validate_restricts_existing_vault_directory_and_file_permissions_before_readi
 
     let dir = temp_vault_dir();
     write_vault_with_current_and_stale_values(&dir);
-    let vault_path = dir.join(DEFAULT_VAULT_FILE_NAME);
+    let vault_path = dir.join(VAULT_FILE_NAME);
     fs::set_permissions(&dir, fs::Permissions::from_mode(0o755)).expect("loosen dir");
     fs::set_permissions(&vault_path, fs::Permissions::from_mode(0o644)).expect("loosen vault");
 
@@ -373,8 +373,8 @@ fn config_rejects_fixed_vault_directory_path_conflict() {
 #[test]
 fn config_rejects_fixed_vault_file_path_conflict_before_password_prompt() {
     let dir = temp_vault_dir();
-    fs::create_dir_all(dir.join(DEFAULT_VAULT_FILE_NAME)).expect("create conflicting directory");
-    let vault_path = dir.join(DEFAULT_VAULT_FILE_NAME);
+    fs::create_dir_all(dir.join(VAULT_FILE_NAME)).expect("create conflicting directory");
+    let vault_path = dir.join(VAULT_FILE_NAME);
     let mut runner = VaultRunnerCore::with_terminal(
         [Profile::new("app", [APP_API_KEY]).expect("profile")],
         FakeTerminal::new(&[], &[]),
@@ -395,7 +395,7 @@ fn config_rejects_fixed_vault_file_path_conflict_before_password_prompt() {
 fn existing_config_rejects_malformed_vault_before_password_prompt() {
     let dir = temp_vault_dir();
     fs::create_dir_all(&dir).expect("create vault dir");
-    let vault_path = dir.join(DEFAULT_VAULT_FILE_NAME);
+    let vault_path = dir.join(VAULT_FILE_NAME);
     fs::write(&vault_path, br#"{"version":1,"encrypted_env":}"#).expect("write malformed vault");
     let mut runner = VaultRunnerCore::with_terminal(
         [Profile::new("app", [APP_API_KEY]).expect("profile")],
@@ -440,7 +440,7 @@ fn existing_config_rejects_wrong_password_before_menu_or_writes() {
         Err(Error::PasswordRejected)
     ));
 
-    let vault = read_vault(&dir.join(DEFAULT_VAULT_FILE_NAME)).expect("vault");
+    let vault = read_vault(&dir.join(VAULT_FILE_NAME)).expect("vault");
     assert!(!vault.encrypted_env.contains_key("APP_API_KEY"));
 
     fs::remove_dir_all(dir).expect("remove temp vault dir");
@@ -464,7 +464,7 @@ fn ciphertext_copied_between_secret_names_is_rejected() {
 
     runner.run_from_args(["env", "configure"]).expect("config");
 
-    let vault_path = dir.join(DEFAULT_VAULT_FILE_NAME);
+    let vault_path = dir.join(VAULT_FILE_NAME);
     let mut vault = read_vault(&vault_path).expect("vault");
     let first_entry = vault
         .encrypted_env
@@ -507,7 +507,7 @@ fn vault_lock_blocks_second_writer_and_drop_releases() {
 fn vault_lock_loss_blocks_secret_write() {
     let dir = temp_vault_dir();
     fs::create_dir_all(&dir).expect("create vault dir");
-    let vault_path = dir.join(DEFAULT_VAULT_FILE_NAME);
+    let vault_path = dir.join(VAULT_FILE_NAME);
     let password = SecretBytes::try_from(b"operator-password".as_slice()).expect("password");
     let mut vault = VaultFile::new(&password, minimal_test_kdf_params()).expect("vault");
     let keyset = unlock_vault_keyset(&vault, &password).expect("keyset");
@@ -534,7 +534,7 @@ fn vault_lock_loss_blocks_secret_write() {
 #[test]
 fn read_vault_reports_missing_vault_without_path_exists_race() {
     let dir = temp_vault_dir();
-    let vault_path = dir.join(DEFAULT_VAULT_FILE_NAME);
+    let vault_path = dir.join(VAULT_FILE_NAME);
 
     assert!(matches!(
         read_vault(&vault_path),
@@ -546,7 +546,7 @@ fn read_vault_reports_missing_vault_without_path_exists_race() {
 fn read_vault_rejects_oversized_vault_file_before_json_parsing() {
     let dir = temp_vault_dir();
     fs::create_dir_all(&dir).expect("create dir");
-    let vault_path = dir.join(DEFAULT_VAULT_FILE_NAME);
+    let vault_path = dir.join(VAULT_FILE_NAME);
     fs::File::create(&vault_path)
         .expect("create vault")
         .set_len(MAX_VAULT_FILE_BYTES + 1)
@@ -566,7 +566,7 @@ fn atomic_vault_replace_replaces_existing_vault_file() {
     let dir = temp_vault_dir();
     let password: SecretBytes =
         SecretBytes::try_from(b"operator-password".as_slice()).expect("password");
-    let vault_path = dir.join(DEFAULT_VAULT_FILE_NAME);
+    let vault_path = dir.join(VAULT_FILE_NAME);
     let first_name = EnvVarName::new("FIRST_SECRET").expect("name");
     let second_name = EnvVarName::new("SECOND_SECRET").expect("name");
     let mut vault = VaultFile::new(&password, minimal_test_kdf_params()).expect("vault");
@@ -600,7 +600,7 @@ fn atomic_vault_replace_replaces_existing_vault_file() {
 fn vault_validation_rejects_malformed_stored_env_names() {
     let dir = temp_vault_dir();
     fs::create_dir_all(&dir).expect("create dir");
-    let vault_path = dir.join(DEFAULT_VAULT_FILE_NAME);
+    let vault_path = dir.join(VAULT_FILE_NAME);
     let password: SecretBytes =
         SecretBytes::try_from(b"operator-password".as_slice()).expect("password");
     let mut vault = VaultFile::new(&password, minimal_test_kdf_params()).expect("vault");
@@ -632,7 +632,7 @@ fn vault_validation_rejects_malformed_stored_env_names() {
 fn vault_validation_rejects_wrong_vault_id_length() {
     let dir = temp_vault_dir();
     fs::create_dir_all(&dir).expect("create dir");
-    let vault_path = dir.join(DEFAULT_VAULT_FILE_NAME);
+    let vault_path = dir.join(VAULT_FILE_NAME);
     let password: SecretBytes =
         SecretBytes::try_from(b"operator-password".as_slice()).expect("password");
     let mut vault = VaultFile::new(&password, minimal_test_kdf_params()).expect("vault");
@@ -651,7 +651,7 @@ fn vault_validation_rejects_wrong_vault_id_length() {
 fn vault_validation_rejects_stored_kdf_work_factor_above_local_bounds() {
     let dir = temp_vault_dir();
     fs::create_dir_all(&dir).expect("create dir");
-    let vault_path = dir.join(DEFAULT_VAULT_FILE_NAME);
+    let vault_path = dir.join(VAULT_FILE_NAME);
     let password: SecretBytes =
         SecretBytes::try_from(b"operator-password".as_slice()).expect("password");
     let mut vault = VaultFile::new(&password, minimal_test_kdf_params()).expect("vault");
@@ -713,7 +713,7 @@ fn vault_creation_rejects_local_kdf_work_factor_above_read_bounds() {
 fn vault_validation_rejects_malformed_ciphertext_without_echoing_it() {
     let dir = temp_vault_dir();
     fs::create_dir_all(&dir).expect("create dir");
-    let vault_path = dir.join(DEFAULT_VAULT_FILE_NAME);
+    let vault_path = dir.join(VAULT_FILE_NAME);
     let password: SecretBytes =
         SecretBytes::try_from(b"operator-password".as_slice()).expect("password");
     let mut vault = VaultFile::new(&password, minimal_test_kdf_params()).expect("vault");
@@ -737,7 +737,7 @@ fn vault_validation_rejects_malformed_ciphertext_without_echoing_it() {
 fn json_and_password_errors_do_not_echo_secret_inputs() {
     let dir = temp_vault_dir();
     fs::create_dir_all(&dir).expect("create dir");
-    let vault_path = dir.join(DEFAULT_VAULT_FILE_NAME);
+    let vault_path = dir.join(VAULT_FILE_NAME);
     fs::write(
         &vault_path,
         br#"{"version":1,"secret":"secret-value","encrypted_env":}"#,
@@ -955,7 +955,7 @@ fn config_keeps_values_not_required_by_profiles_until_explicit_cleanup() {
     );
     runner.run_from_args(["env", "configure"]).expect("config");
 
-    let vault = read_vault(&dir.join(DEFAULT_VAULT_FILE_NAME)).expect("vault");
+    let vault = read_vault(&dir.join(VAULT_FILE_NAME)).expect("vault");
     assert!(vault.encrypted_env.contains_key("CURRENT_VALUE"));
     assert!(vault.encrypted_env.contains_key("STALE_VALUE"));
     assert!(
@@ -981,7 +981,7 @@ fn config_removes_values_not_required_by_profiles_only_from_explicit_cleanup_men
     );
     runner.run_from_args(["env", "configure"]).expect("config");
 
-    let vault = read_vault(&dir.join(DEFAULT_VAULT_FILE_NAME)).expect("vault");
+    let vault = read_vault(&dir.join(VAULT_FILE_NAME)).expect("vault");
     assert!(vault.encrypted_env.contains_key("CURRENT_VALUE"));
     assert!(!vault.encrypted_env.contains_key("STALE_VALUE"));
     assert!(
@@ -1201,7 +1201,7 @@ fn write_vault_with_current_and_stale_values(dir: &Path) {
             )
             .expect("set value");
     }
-    write_vault_atomically(&dir.join(DEFAULT_VAULT_FILE_NAME), &vault).expect("write vault");
+    write_vault_atomically(&dir.join(VAULT_FILE_NAME), &vault).expect("write vault");
 }
 
 fn minimal_test_kdf_params() -> PasswordKdfParams {

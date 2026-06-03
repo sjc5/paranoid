@@ -5,6 +5,7 @@ use super::{
 };
 
 /// Runs idempotent queue schema migration and validates the result.
+#[cfg(test)]
 pub(crate) async fn migrate_schema(pool: &WritePool, config: &StoreConfig) -> Result<(), Error> {
     let mut tx = pool.begin_transaction().await?;
     let result = migrate_schema_in_current_transaction(&mut tx, config).await;
@@ -16,15 +17,16 @@ pub(crate) async fn migrate_schema_in_current_transaction(
     tx: &mut WriteTx<'_>,
     config: &StoreConfig,
 ) -> Result<(), Error> {
-    let queue = Store::new(config.clone())?;
-    execute_queue_migration_statements_in_current_transaction(tx, queue.config()).await?;
-    validate_physical_schema_in_current_transaction(tx, queue.config()).await?;
-    record_queue_schema_version_in_current_transaction(tx, queue.config()).await?;
-    validate_queue_schema_version_in_current_transaction(tx, queue.config()).await?;
+    let queue = Store::new_inner(config.clone())?;
+    execute_queue_migration_statements_in_current_transaction(tx, queue.config_inner()).await?;
+    validate_physical_schema_in_current_transaction(tx, queue.config_inner()).await?;
+    record_queue_schema_version_in_current_transaction(tx, queue.config_inner()).await?;
+    validate_queue_schema_version_in_current_transaction(tx, queue.config_inner()).await?;
     Ok(())
 }
 
 /// Validates an existing queue schema.
+#[cfg(test)]
 pub(crate) async fn validate_schema(pool: &WritePool, config: &StoreConfig) -> Result<(), Error> {
     let mut tx = pool.begin_transaction().await?;
     let validation_result = validate_schema_in_current_transaction(&mut tx, config).await;
@@ -33,13 +35,14 @@ pub(crate) async fn validate_schema(pool: &WritePool, config: &StoreConfig) -> R
 }
 
 /// Validates an existing queue schema inside the caller's active transaction.
+#[cfg(test)]
 pub(crate) async fn validate_schema_in_current_transaction(
     tx: &mut WriteTx<'_>,
     config: &StoreConfig,
 ) -> Result<(), Error> {
-    let queue = Store::new(config.clone())?;
-    validate_physical_schema_in_current_transaction(tx, queue.config()).await?;
-    validate_queue_schema_version_in_current_transaction(tx, queue.config()).await?;
+    let queue = Store::new_inner(config.clone())?;
+    validate_physical_schema_in_current_transaction(tx, queue.config_inner()).await?;
+    validate_queue_schema_version_in_current_transaction(tx, queue.config_inner()).await?;
     Ok(())
 }
 

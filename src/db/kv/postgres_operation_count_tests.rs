@@ -1,4 +1,5 @@
 use super::*;
+use crate::db::postgres_test_support::{connect_sqlx_pool_for_harness, standard_test_database_url};
 use crate::db::{
     DatabaseOperationKind, DatabaseOperationObserver, DatabaseOperationRecord, PoolConfig,
     SCHEMA_LEDGER_OPERATION_CREATE_SAVEPOINT, SCHEMA_LEDGER_OPERATION_CREATE_TABLE,
@@ -9,9 +10,7 @@ use crate::db::{
 };
 use crate::id::SortableId as UniqueTestId;
 use secrecy::SecretString;
-use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use sqlx::{PgPool, Row};
-use std::str::FromStr;
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 use std::time::Instant;
@@ -294,21 +293,6 @@ fn transaction_records_many<const N: usize>(
     operation_records
 }
 
-fn test_database_url() -> String {
-    ["TEST_DSN", "PARANOID_TEST_DATABASE_URL"]
-        .into_iter()
-        .find_map(|env_name| {
-            let value = std::env::var(env_name).ok()?;
-            let trimmed = value.trim();
-            if trimmed.is_empty() {
-                None
-            } else {
-                Some(trimmed.to_owned())
-            }
-        })
-        .expect("required Postgres test database URL missing; set TEST_DSN or PARANOID_TEST_DATABASE_URL")
-}
-
 async fn connect_paranoid_pool(database_url: &str) -> WritePool {
     let mut config = PoolConfig::new(SecretString::from(database_url.to_owned()));
     config.max_connections = 2;
@@ -319,14 +303,7 @@ async fn connect_paranoid_pool(database_url: &str) -> WritePool {
 }
 
 async fn connect_sqlx_pool(database_url: &str) -> PgPool {
-    let connect_options = PgConnectOptions::from_str(database_url)
-        .expect("parse test database URL")
-        .statement_cache_capacity(0);
-    PgPoolOptions::new()
-        .max_connections(2)
-        .connect_with(connect_options)
-        .await
-        .expect("connect sqlx pool")
+    connect_sqlx_pool_for_harness(database_url, 2, "paranoid_kv_operation_count_test").await
 }
 
 fn unique_test_table_name() -> PgQualifiedTableName {

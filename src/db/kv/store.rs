@@ -1,11 +1,12 @@
 use super::*;
 
+#[cfg(test)]
 impl Default for StoreConfig {
     fn default() -> Self {
         Self {
-            table_name: PgQualifiedTableName::unqualified(DEFAULT_KV_TABLE_NAME)
-                .expect("default KV table name must be a valid Postgres identifier"),
-            schema_ledger_table_name: SchemaLedgerConfig::default().table_name,
+            table_name: PgQualifiedTableName::unqualified(TEST_KV_TABLE_NAME)
+                .expect("test KV table name must be a valid Postgres identifier"),
+            schema_ledger_table_name: test_schema_ledger_table_name(),
             create_updated_at_index: true,
         }
     }
@@ -13,10 +14,11 @@ impl Default for StoreConfig {
 
 impl StoreConfig {
     /// Creates a KV store config for a validated table name.
-    pub fn new(table_name: PgQualifiedTableName) -> Result<Self, Error> {
+    #[cfg(test)]
+    pub(crate) fn new(table_name: PgQualifiedTableName) -> Result<Self, Error> {
         let config = Self {
             table_name,
-            schema_ledger_table_name: SchemaLedgerConfig::default().table_name,
+            schema_ledger_table_name: test_schema_ledger_table_name(),
             create_updated_at_index: true,
         };
         validate_distinct_table_names(&config)?;
@@ -26,24 +28,39 @@ impl StoreConfig {
 
 impl Store {
     /// Creates a KV store handle with precomputed SQL for the configured table.
-    pub fn new(config: StoreConfig) -> Result<Self, Error> {
+    #[cfg(test)]
+    pub(crate) fn new(config: StoreConfig) -> Result<Self, Error> {
+        Self::new_inner(config)
+    }
+
+    pub(crate) fn new_inner(config: StoreConfig) -> Result<Self, Error> {
         validate_distinct_table_names(&config)?;
         let queries = Queries::new(&config.table_name);
         Ok(Self { config, queries })
     }
 
     /// Returns this store's config.
-    pub fn config(&self) -> &StoreConfig {
+    #[cfg(test)]
+    pub(crate) fn config(&self) -> &StoreConfig {
         &self.config
     }
 
     /// Creates and validates this store's schema inside one transaction.
-    pub async fn migrate_schema(&self, pool: &WritePool) -> Result<(), crate::db::Error> {
+    #[cfg(test)]
+    pub(crate) async fn migrate_schema(&self, pool: &WritePool) -> Result<(), crate::db::Error> {
         migrate_schema(pool, &self.config).await
     }
 
     /// Runs schema migration inside the caller's active transaction.
-    pub async fn migrate_schema_in_current_transaction(
+    #[cfg(test)]
+    pub(crate) async fn migrate_schema_in_current_transaction(
+        &self,
+        tx: &mut WriteTx<'_>,
+    ) -> Result<(), crate::db::Error> {
+        self.migrate_schema_in_current_transaction_inner(tx).await
+    }
+
+    pub(crate) async fn migrate_schema_in_current_transaction_inner(
         &self,
         tx: &mut WriteTx<'_>,
     ) -> Result<(), crate::db::Error> {
@@ -51,12 +68,21 @@ impl Store {
     }
 
     /// Validates that this store's schema already exists and is compatible.
-    pub async fn validate_schema(&self, pool: &Pool) -> Result<(), crate::db::Error> {
+    #[cfg(test)]
+    pub(crate) async fn validate_schema(&self, pool: &Pool) -> Result<(), crate::db::Error> {
         validate_schema(pool, &self.config).await
     }
 
     /// Validates schema inside the caller's active transaction.
-    pub async fn validate_schema_in_current_transaction(
+    #[cfg(test)]
+    pub(crate) async fn validate_schema_in_current_transaction(
+        &self,
+        tx: &mut Tx<'_>,
+    ) -> Result<(), crate::db::Error> {
+        self.validate_schema_in_current_transaction_inner(tx).await
+    }
+
+    pub(crate) async fn validate_schema_in_current_transaction_inner(
         &self,
         tx: &mut Tx<'_>,
     ) -> Result<(), crate::db::Error> {

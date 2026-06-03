@@ -1,20 +1,23 @@
 use super::{
     DatabaseOperationKind, DatabaseOperationObserver, DbError, PgIdentifier, PgQualifiedTableName,
-    Pool, Tx, WritePool, WriteTx, finish_db_pool_transaction,
-    finish_db_pool_validation_transaction,
-    finish_pool_owned_rollback_only_transaction_and_preserve_rollback_error,
+    Pool, WritePool, finish_pool_owned_rollback_only_transaction_and_preserve_rollback_error,
     finish_pool_owned_write_transaction_and_preserve_rollback_error,
     pg_table_name_set_could_contain_same_relation, pooler_safe_query, pooler_safe_query_as,
     pooler_safe_query_scalar, record_database_operation,
 };
+use super::{Tx, WriteTx};
+#[cfg(test)]
+use super::{finish_db_pool_transaction, finish_db_pool_validation_transaction};
 use sqlx::{Executor, Postgres};
 use std::time::Duration as StdDuration;
 
-/// Default lease backing table name.
-pub const DEFAULT_LEASE_TABLE_NAME: &str = "__paranoid_lease_store";
+/// Test-only unqualified lease backing table name.
+#[cfg(test)]
+pub const TEST_LEASE_TABLE_NAME: &str = "__paranoid_lease_store";
 
-/// Default lease fencing counter backing table name.
-pub const DEFAULT_LEASE_FENCING_COUNTER_TABLE_NAME: &str = "__paranoid_lease_fencing_counters";
+/// Test-only unqualified lease fencing counter backing table name.
+#[cfg(test)]
+pub const TEST_LEASE_FENCING_COUNTER_TABLE_NAME: &str = "__paranoid_lease_fencing_counters";
 
 /// Separator used when composing persisted lease keys from key parts.
 pub const LEASE_KEY_SEPARATOR: &str = "::";
@@ -42,11 +45,13 @@ pub use error::CoordinationError;
 use model::Token;
 pub use model::{Claim, ClaimDuration, FencingToken, HolderId, HolderSnapshot, Key};
 use queries::*;
+pub(crate) use schema::migrate_schema_in_current_transaction;
 use schema::validate_schema_in_current_transaction;
 #[cfg(test)]
 use schema::{build_migrate_statements, validate_distinct_table_names};
-pub use schema::{migrate_schema, migrate_schema_in_current_transaction, validate_schema};
-pub use store::{Store, StoreConfig};
+#[cfg(test)]
+pub(crate) use schema::{migrate_schema, validate_schema};
+pub(crate) use store::{Store, StoreConfig};
 
 #[cfg(test)]
 mod postgres_tests;
@@ -63,7 +68,9 @@ pub(crate) const LEASE_OPERATION_SCHEMA_VALIDATE_CHECK_CONSTRAINTS: &str =
     "lease.schema.validate_check_constraints";
 pub(crate) const LEASE_OPERATION_SCHEMA_VALIDATE_EXPIRES_AT_INDEX: &str =
     "lease.schema.validate_expires_at_index";
+#[cfg(test)]
 pub(crate) const LEASE_OPERATION_SCHEMA_MIGRATE: &str = "lease.schema.migrate";
+#[cfg(test)]
 pub(crate) const LEASE_OPERATION_SCHEMA_VALIDATE: &str = "lease.schema.validate";
 
 async fn finish_lease_pool_transaction<T>(

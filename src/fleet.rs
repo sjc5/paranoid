@@ -2,19 +2,18 @@
 //!
 //! Fleet is the coordination layer for mutexes, one-shot tasks, coalescing
 //! caches, topics, semaphores, throttlers, cron loops, and circuit breakers.
-//! The common path is to create a `Store`, migrate or validate its schema, and
-//! then construct high-level primitives from typed keys.
+//! Create the store through [`crate::db::BootstrapConfig`], then construct
+//! high-level primitives from typed keys.
 //!
 //! ```rust,no_run
 //! # #[cfg(feature = "db")]
 //! # async fn example(pool: paranoid::db::WritePool) -> Result<(), Box<dyn std::error::Error>> {
-//! use paranoid::fleet::{
-//!     ClaimDuration, MutexGuardConfig, MutexKey, MutexTryRunTaskResult, Store, StoreConfig,
-//! };
+//! use paranoid::db::BootstrapConfig;
+//! use paranoid::fleet::{ClaimDuration, MutexGuardConfig, MutexKey, MutexTryRunTaskResult};
 //! use std::time::Duration;
 //!
-//! let store = Store::new(StoreConfig::default())?;
-//! store.migrate_schema(&pool).await?;
+//! let stores = BootstrapConfig::default().migrate_schema(&pool).await?;
+//! let store = stores.fleet;
 //!
 //! let mutex = store.new_mutex(
 //!     MutexKey::new("billing-rollup")?,
@@ -42,11 +41,9 @@ pub use crate::db::fleet::{
     CronRunHandleError, CronTaskErrorAction, CronTryRunOnceResult,
     DEFAULT_COALESCING_CACHE_LOCK_RETRY_INTERVAL, DEFAULT_COALESCING_CACHE_LOCK_WAIT_TIMEOUT,
     DEFAULT_COALESCING_CACHE_MUTEX_CLAIM_DURATION,
-    DEFAULT_FLEET_COORDINATION_TABLE_NAME as DEFAULT_COORDINATION_TABLE_NAME,
     DEFAULT_FLEET_CRON_ACQUIRE_RETRY_INTERVAL as DEFAULT_CRON_ACQUIRE_RETRY_INTERVAL,
     DEFAULT_FLEET_CRON_CLAIM_DURATION as DEFAULT_CRON_CLAIM_DURATION,
     DEFAULT_FLEET_CRON_HEARTBEAT_INTERVAL as DEFAULT_CRON_HEARTBEAT_INTERVAL,
-    DEFAULT_FLEET_FENCING_COUNTER_TABLE_NAME as DEFAULT_FENCING_COUNTER_TABLE_NAME,
     DEFAULT_FLEET_MUTEX_ACQUIRE_RETRY_INTERVAL as DEFAULT_MUTEX_ACQUIRE_RETRY_INTERVAL,
     DEFAULT_FLEET_MUTEX_CLAIM_DURATION as DEFAULT_MUTEX_CLAIM_DURATION,
     DEFAULT_FLEET_MUTEX_MAX_ACQUIRE_RETRY_INTERVAL as DEFAULT_MUTEX_MAX_ACQUIRE_RETRY_INTERVAL,
@@ -55,7 +52,6 @@ pub use crate::db::fleet::{
     DEFAULT_FLEET_ROOT_KEY as DEFAULT_ROOT_KEY,
     DEFAULT_FLEET_SEMAPHORE_ACQUIRE_RETRY_INTERVAL as DEFAULT_SEMAPHORE_ACQUIRE_RETRY_INTERVAL,
     DEFAULT_FLEET_SEMAPHORE_MAX_HOLD_DURATION as DEFAULT_SEMAPHORE_MAX_HOLD_DURATION,
-    DEFAULT_FLEET_STATE_TABLE_NAME as DEFAULT_STATE_TABLE_NAME,
     DEFAULT_FLEET_THROTTLER_BLOCKING_RETRY_INTERVAL as DEFAULT_THROTTLER_BLOCKING_RETRY_INTERVAL,
     DEFAULT_FLEET_THROTTLER_MAX_HOLD_DURATION as DEFAULT_THROTTLER_MAX_HOLD_DURATION,
     DEFAULT_FLEET_THROTTLER_PROBE_WINDOW as DEFAULT_THROTTLER_PROBE_WINDOW,
@@ -73,8 +69,8 @@ pub use crate::db::fleet::{
     RateLimiterGuardAcquireResult, RateLimiterGuardedTaskResult, RateLimiterKey, RateLimiterPermit,
     RateLimiterPermitGuard, RateLimiterStatus, RateLimiterTryRunTaskResult, RootKey, Semaphore,
     SemaphoreClaim, SemaphoreClaimGuard, SemaphoreGuardedTaskResult, SemaphoreKey, SemaphoreStatus,
-    SemaphoreTryRunTaskResult, Store, StoreConfig, Subscription, SubscriptionConfig,
-    SubscriptionKey, SubscriptionPollErrorAction, SubscriptionRunError, SubscriptionRunHandle,
+    SemaphoreTryRunTaskResult, Store, Subscription, SubscriptionConfig, SubscriptionKey,
+    SubscriptionPollErrorAction, SubscriptionRunError, SubscriptionRunHandle,
     SubscriptionRunHandleError, Throttler, ThrottlerCircuitBreaker, ThrottlerCircuitState,
     ThrottlerConcurrencyLimit, ThrottlerConfig, ThrottlerGuardAcquireResult,
     ThrottlerGuardedTaskResult, ThrottlerKey, ThrottlerPermit, ThrottlerPermitGuard,

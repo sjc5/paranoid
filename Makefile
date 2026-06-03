@@ -14,30 +14,27 @@ check:
 test:
 	@$(XTASK) with-isolated-test-db -- cargo test --all-features
 
-# Runs fast tests that do not need the isolated Postgres/PgBouncer stack.
-test-fast:
-	@cargo test --all-features --lib
-	@cargo test --all-features --test web_stack
-
 # Runs every DB integration test inside an isolated PgBouncer-backed stack.
 test-db:
 	@$(XTASK) with-isolated-test-db -- cargo test $(DB_FEATURES)
 
 # Runs only the KV DB integration tests inside the isolated DB stack.
 test-db-kv:
-	@$(XTASK) with-isolated-test-db -- cargo test $(DB_FEATURES) --test db_kv_postgres
+	@$(XTASK) with-isolated-test-db -- cargo test $(DB_FEATURES) db::kv::postgres_tests
 
 # Runs only the Fleet DB integration tests inside the isolated DB stack.
 test-db-fleet:
-	@$(XTASK) with-isolated-test-db -- cargo test $(DB_FEATURES) --test db_fleet_postgres
+	@$(XTASK) with-isolated-test-db -- cargo test $(DB_FEATURES) db::fleet::postgres_tests
 
 # Runs only the Queue DB integration tests inside the isolated DB stack.
 test-db-queue:
-	@$(XTASK) with-isolated-test-db -- cargo test $(DB_FEATURES) --test db_queue_postgres
+	@$(XTASK) with-isolated-test-db -- cargo test $(DB_FEATURES) db::queue::postgres_tests
 
 # Checks the public API surface for no-feature, single-feature, and all-feature builds.
 feature-gate:
 	@$(MAKE) --no-print-directory feature-none
+	@$(MAKE) --no-print-directory feature-crypto
+	@$(MAKE) --no-print-directory feature-id
 	@$(MAKE) --no-print-directory feature-local-lock
 	@$(MAKE) --no-print-directory feature-local-env-vault
 	@$(MAKE) --no-print-directory feature-web
@@ -58,7 +55,7 @@ feature-none:
 	@cargo test --doc
 
 # Checks one single-feature surface; the feature name is derived from the target name.
-feature-local-lock feature-local-env-vault:
+feature-crypto feature-id feature-local-lock feature-local-env-vault:
 	@cargo check --no-default-features --features '$(@:feature-%=%)' --tests
 	@cargo test --no-default-features --features '$(@:feature-%=%)' --lib
 	@RUSTDOCFLAGS="-D warnings" cargo doc --no-default-features --features '$(@:feature-%=%)' --no-deps

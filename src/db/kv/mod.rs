@@ -1,13 +1,17 @@
 use super::{
     ComponentSchemaVersion, DatabaseOperationKind, DatabaseOperationObserver, DbError,
-    PgQualifiedTableName, Pool, SchemaLedgerConfig, Tx, WritePool, WriteTx,
-    finish_db_pool_transaction, finish_db_pool_validation_transaction,
+    PgQualifiedTableName, Pool, Tx, WritePool, WriteTx,
     finish_pool_owned_rollback_only_transaction_and_preserve_rollback_error,
     finish_pool_owned_write_transaction_and_preserve_rollback_error,
     normalize_check_constraint_expression, pg_table_name_set_could_contain_same_relation,
     pooler_safe_query, pooler_safe_query_as, pooler_safe_query_scalar,
     record_component_schema_version_in_current_transaction, record_database_operation,
     schema_instance_key_for_parts, validate_component_schema_version_in_current_transaction,
+};
+#[cfg(test)]
+use super::{
+    finish_db_pool_transaction, finish_db_pool_validation_transaction,
+    test_schema_ledger_table_name,
 };
 use crate::crypto::Error as CodecError;
 use crate::crypto::envelope::encrypt_plaintext_bytes_as;
@@ -20,8 +24,9 @@ use std::marker::PhantomData;
 use std::sync::Arc;
 use std::time::Duration;
 
-/// Default KV backing table name.
-pub const DEFAULT_KV_TABLE_NAME: &str = "__paranoid_kv_store";
+/// Test-only unqualified KV backing table name.
+#[cfg(test)]
+pub const TEST_KV_TABLE_NAME: &str = "__paranoid_kv_store";
 
 /// Separator used when composing persisted KV keys from key parts.
 pub const KV_KEY_SEPARATOR: &str = "::";
@@ -119,7 +124,9 @@ pub(crate) const KV_OPERATION_SCHEMA_VALIDATE_KEY_PATTERN_INDEX: &str =
     "kv.schema.validate_key_pattern_index";
 pub(crate) const KV_OPERATION_SCHEMA_VALIDATE_UPDATED_AT_INDEX: &str =
     "kv.schema.validate_updated_at_index";
+#[cfg(test)]
 pub(crate) const KV_OPERATION_SCHEMA_MIGRATE: &str = "kv.schema.migrate";
+#[cfg(test)]
 pub(crate) const KV_OPERATION_SCHEMA_VALIDATE: &str = "kv.schema.validate";
 
 const CREATE_KV_TABLE_TEMPLATE_PREFIX: &str = "CREATE TABLE IF NOT EXISTS ";
@@ -584,13 +591,13 @@ pub struct AtomicLiveOrInitMutationResult {
 
 /// Schema configuration for the Postgres-backed KV primitive.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct StoreConfig {
+pub(crate) struct StoreConfig {
     /// Backing table for KV rows.
-    pub table_name: PgQualifiedTableName,
+    pub(crate) table_name: PgQualifiedTableName,
     /// Schema ledger table for this KV store.
-    pub schema_ledger_table_name: PgQualifiedTableName,
+    pub(crate) schema_ledger_table_name: PgQualifiedTableName,
     /// Whether migration should create and validation should require `updated_at`.
-    pub create_updated_at_index: bool,
+    pub(crate) create_updated_at_index: bool,
 }
 
 /// Postgres-backed KV store bound to one configured table.
@@ -690,13 +697,16 @@ mod validation;
 
 #[cfg(test)]
 use schema::build_migrate_statements;
+#[cfg(test)]
+pub(crate) use schema::{migrate_schema, validate_schema};
 pub(crate) use schema::{
-    migrate_schema, migrate_schema_in_current_transaction, validate_schema,
-    validate_schema_in_current_transaction,
+    migrate_schema_in_current_transaction, validate_schema_in_current_transaction,
 };
 use validation::*;
 
 #[cfg(test)]
 mod postgres_operation_count_tests;
+#[cfg(test)]
+mod postgres_tests;
 #[cfg(test)]
 mod tests;

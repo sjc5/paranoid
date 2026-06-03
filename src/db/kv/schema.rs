@@ -1,6 +1,7 @@
 use super::*;
 
 /// Creates and validates the configured KV schema inside one transaction.
+#[cfg(test)]
 pub(crate) async fn migrate_schema(
     pool: &WritePool,
     config: &StoreConfig,
@@ -52,6 +53,7 @@ pub(crate) async fn migrate_schema_in_current_transaction(
 }
 
 /// Validates that the configured KV schema already exists and is compatible.
+#[cfg(test)]
 pub(crate) async fn validate_schema(
     pool: &Pool,
     config: &StoreConfig,

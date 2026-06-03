@@ -18,7 +18,7 @@ ergonomics.
 
 Auth-core readiness estimate: about 41%.
 
-Auth is private WIP behind the `auth` feature. The lower-core planner, runtime-owned
+Auth is private WIP behind the `__auth_wip` feature. The lower-core planner, runtime-owned
 continuation/cookie shape, fast-fail challenge model, Postgres runtime slices, method
 registry skeleton, and satisfied-proof provenance model are partially built and tested.
 
@@ -439,3 +439,7 @@ realistic fictitious application rather than only reducer internals.
 - [ ] Verify public API names match the high-level Paranoid philosophy.
 - [ ] Verify public alpha docs clearly mark remaining non-alpha features.
 - [ ] release auth in public alpha
+- [ ] Extend DB source guards to all auth Postgres code or add equivalent auth-specific
+      guards while auth remains private.
+- [ ] Rework auth WIP storage to use the same dedicated-schema bootstrap model before any
+      public auth release.

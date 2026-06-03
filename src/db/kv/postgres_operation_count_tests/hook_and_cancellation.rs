@@ -2,7 +2,7 @@ use super::*;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn database_operation_hook_can_pause_before_read_transaction_to_force_committed_read_race() {
-    let database_url = test_database_url();
+    let database_url = standard_test_database_url();
 
     let sqlx_pool = connect_sqlx_pool(&database_url).await;
     let table_name = unique_test_table_name();
@@ -68,7 +68,7 @@ async fn database_operation_hook_can_pause_before_read_transaction_to_force_comm
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn pool_owned_write_abort_at_commit_boundary_commits_once() {
-    let database_url = test_database_url();
+    let database_url = standard_test_database_url();
 
     let sqlx_pool = connect_sqlx_pool(&database_url).await;
     let table_name = unique_test_table_name();

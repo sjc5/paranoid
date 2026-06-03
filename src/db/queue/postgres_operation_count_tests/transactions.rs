@@ -2,7 +2,7 @@ use super::*;
 
 #[tokio::test]
 async fn queue_in_current_transaction_operations_emit_only_inner_database_operation_records() {
-    let database_url = test_database_url();
+    let database_url = standard_test_database_url();
 
     let sqlx_pool = connect_sqlx_pool(&database_url).await;
     let config = unique_test_config();

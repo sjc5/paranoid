@@ -2,7 +2,7 @@ use super::*;
 
 #[tokio::test]
 async fn queue_process_available_jobs_once_emits_expected_worker_database_operation_records() {
-    let database_url = test_database_url();
+    let database_url = standard_test_database_url();
 
     let sqlx_pool = connect_sqlx_pool(&database_url).await;
     let config = unique_test_config();
@@ -100,7 +100,7 @@ async fn queue_process_available_jobs_once_emits_expected_worker_database_operat
 
 #[tokio::test]
 async fn queue_long_running_worker_loop_emits_expected_worker_database_operation_records() {
-    let database_url = test_database_url();
+    let database_url = standard_test_database_url();
 
     let sqlx_pool = connect_sqlx_pool(&database_url).await;
     let config = unique_test_config();

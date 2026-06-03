@@ -79,28 +79,28 @@ struct PostgresRuntimeTestHarness {
 }
 
 impl PostgresRuntimeTestHarness {
-    async fn connect_or_skip() -> Option<Self> {
-        Self::connect_or_skip_with_registered_plugins(None, true).await
+    async fn connect_required() -> Self {
+        Self::connect_required_with_registered_plugins(None, true).await
     }
 
-    async fn connect_or_skip_without_method_registry() -> Option<Self> {
-        Self::connect_or_skip_with_registered_plugins(None, false).await
+    async fn connect_required_without_method_registry() -> Self {
+        Self::connect_required_with_registered_plugins(None, false).await
     }
 
-    async fn connect_or_skip_with_method_plugin(
+    async fn connect_required_with_method_plugin(
         failure_mode: Option<TestMethodCommitFailureMode>,
-    ) -> Option<Self> {
-        Self::connect_or_skip_with_registered_plugins(failure_mode, false).await
+    ) -> Self {
+        Self::connect_required_with_registered_plugins(failure_mode, false).await
     }
 
-    async fn connect_or_skip_with_email_otp_method() -> Option<Self> {
-        Self::connect_or_skip_with_registered_plugins(None, true).await
+    async fn connect_required_with_email_otp_method() -> Self {
+        Self::connect_required_with_registered_plugins(None, true).await
     }
 
-    async fn connect_or_skip_with_email_otp_subject_resolver(
+    async fn connect_required_with_email_otp_subject_resolver(
         subject_resolver: Arc<dyn PostgresEmailOtpSubjectResolver>,
-    ) -> Option<Self> {
-        Self::connect_or_skip_with_registered_plugins_for_test_method_and_configured_methods(
+    ) -> Self {
+        Self::connect_required_with_registered_plugins_for_test_method_and_configured_methods(
             None,
             true,
             Some(subject_resolver),
@@ -112,43 +112,43 @@ impl PostgresRuntimeTestHarness {
         .await
     }
 
-    async fn connect_or_skip_with_message_signature_method() -> Option<Self> {
-        Self::connect_or_skip_with_registered_test_method(
+    async fn connect_required_with_message_signature_method() -> Self {
+        Self::connect_required_with_registered_test_method(
             ProofMethodDeclaration::new(ProofFamily::MessageSignature, "ssh_signature")
                 .expect("message signature method"),
         )
         .await
     }
 
-    async fn connect_or_skip_with_origin_bound_public_key_method() -> Option<Self> {
-        Self::connect_or_skip_with_registered_test_method(
+    async fn connect_required_with_origin_bound_public_key_method() -> Self {
+        Self::connect_required_with_registered_test_method(
             ProofMethodDeclaration::new(ProofFamily::OriginBoundPublicKey, "webauthn_passkey")
                 .expect("origin-bound public-key method"),
         )
         .await
     }
 
-    async fn connect_or_skip_with_federated_identity_method() -> Option<Self> {
-        Self::connect_or_skip_with_registered_test_method(
+    async fn connect_required_with_federated_identity_method() -> Self {
+        Self::connect_required_with_registered_test_method(
             ProofMethodDeclaration::new(ProofFamily::FederatedIdentityAssertion, "oidc_google")
                 .expect("federated identity method"),
         )
         .await
     }
 
-    async fn connect_or_skip_with_totp_method() -> Option<Self> {
-        Self::connect_or_skip_with_configured_secret_plugins(true, false).await
+    async fn connect_required_with_totp_method() -> Self {
+        Self::connect_required_with_configured_secret_plugins(true, false).await
     }
 
-    async fn connect_or_skip_with_recovery_code_method() -> Option<Self> {
-        Self::connect_or_skip_with_configured_secret_plugins(false, true).await
+    async fn connect_required_with_recovery_code_method() -> Self {
+        Self::connect_required_with_configured_secret_plugins(false, true).await
     }
 
-    async fn connect_or_skip_with_configured_secret_plugins(
+    async fn connect_required_with_configured_secret_plugins(
         include_totp_plugin: bool,
         include_recovery_code_plugin: bool,
-    ) -> Option<Self> {
-        Self::connect_or_skip_with_registered_plugins_for_test_method_and_configured_methods(
+    ) -> Self {
+        Self::connect_required_with_registered_plugins_for_test_method_and_configured_methods(
             None,
             true,
             None,
@@ -160,31 +160,29 @@ impl PostgresRuntimeTestHarness {
         .await
     }
 
-    async fn connect_or_skip_with_registered_test_method(
-        method: ProofMethodDeclaration,
-    ) -> Option<Self> {
-        Self::connect_or_skip_with_registered_test_method_and_verification_mode(
+    async fn connect_required_with_registered_test_method(method: ProofMethodDeclaration) -> Self {
+        Self::connect_required_with_registered_test_method_and_verification_mode(
             method,
             TestActiveMethodVerificationMode::BeforeStateLoad,
         )
         .await
     }
 
-    async fn connect_or_skip_with_registered_authoritative_test_method(
+    async fn connect_required_with_registered_authoritative_test_method(
         method: ProofMethodDeclaration,
-    ) -> Option<Self> {
-        Self::connect_or_skip_with_registered_test_method_and_verification_mode(
+    ) -> Self {
+        Self::connect_required_with_registered_test_method_and_verification_mode(
             method,
             TestActiveMethodVerificationMode::AuthoritativeConfirmation,
         )
         .await
     }
 
-    async fn connect_or_skip_with_registered_test_method_and_verification_mode(
+    async fn connect_required_with_registered_test_method_and_verification_mode(
         method: ProofMethodDeclaration,
         active_method_verification_mode: TestActiveMethodVerificationMode,
-    ) -> Option<Self> {
-        Self::connect_or_skip_with_registered_plugins_for_test_method(
+    ) -> Self {
+        Self::connect_required_with_registered_plugins_for_test_method(
             Some(TestMethodCommitFailureMode::None),
             false,
             None,
@@ -194,11 +192,11 @@ impl PostgresRuntimeTestHarness {
         .await
     }
 
-    async fn connect_or_skip_with_registered_plugins(
+    async fn connect_required_with_registered_plugins(
         failure_mode: Option<TestMethodCommitFailureMode>,
         include_email_otp_plugin: bool,
-    ) -> Option<Self> {
-        Self::connect_or_skip_with_registered_plugins_for_test_method(
+    ) -> Self {
+        Self::connect_required_with_registered_plugins_for_test_method(
             failure_mode,
             include_email_otp_plugin,
             None,
@@ -208,14 +206,14 @@ impl PostgresRuntimeTestHarness {
         .await
     }
 
-    async fn connect_or_skip_with_registered_plugins_for_test_method(
+    async fn connect_required_with_registered_plugins_for_test_method(
         failure_mode: Option<TestMethodCommitFailureMode>,
         include_email_otp_plugin: bool,
         email_otp_subject_resolver: Option<Arc<dyn PostgresEmailOtpSubjectResolver>>,
         test_method: Option<ProofMethodDeclaration>,
         active_method_verification_mode: TestActiveMethodVerificationMode,
-    ) -> Option<Self> {
-        Self::connect_or_skip_with_registered_plugins_for_test_method_and_configured_methods(
+    ) -> Self {
+        Self::connect_required_with_registered_plugins_for_test_method_and_configured_methods(
             failure_mode,
             include_email_otp_plugin,
             email_otp_subject_resolver,
@@ -227,7 +225,7 @@ impl PostgresRuntimeTestHarness {
         .await
     }
 
-    async fn connect_or_skip_with_registered_plugins_for_test_method_and_configured_methods(
+    async fn connect_required_with_registered_plugins_for_test_method_and_configured_methods(
         failure_mode: Option<TestMethodCommitFailureMode>,
         include_email_otp_plugin: bool,
         email_otp_subject_resolver: Option<Arc<dyn PostgresEmailOtpSubjectResolver>>,
@@ -235,8 +233,8 @@ impl PostgresRuntimeTestHarness {
         active_method_verification_mode: TestActiveMethodVerificationMode,
         include_totp_plugin: bool,
         include_recovery_code_plugin: bool,
-    ) -> Option<Self> {
-        let Some(database_url) = std::env::var("PARANOID_TEST_DATABASE_URL")
+    ) -> Self {
+        let database_url = std::env::var("PARANOID_TEST_DATABASE_URL")
             .ok()
             .filter(|value| !value.trim().is_empty())
             .or_else(|| {
@@ -244,12 +242,7 @@ impl PostgresRuntimeTestHarness {
                     .ok()
                     .filter(|value| !value.trim().is_empty())
             })
-        else {
-            eprintln!(
-                "skipping auth Postgres runtime test; set TEST_DSN or PARANOID_TEST_DATABASE_URL to run"
-            );
-            return None;
-        };
+            .expect("required auth Postgres runtime test database URL missing; run through the isolated DB harness so TEST_DSN or PARANOID_TEST_DATABASE_URL is set");
 
         let raw_pool = Pool::connect(PoolConfig::new(SecretString::from(database_url)))
             .await
@@ -379,7 +372,7 @@ impl PostgresRuntimeTestHarness {
             Arc::new(TestWeakProofGateVerifier),
         );
 
-        Some(Self {
+        Self {
             pool,
             database_operation_observer,
             store_config,
@@ -389,7 +382,7 @@ impl PostgresRuntimeTestHarness {
             email_otp_plugin,
             totp_plugin,
             recovery_code_plugin,
-        })
+        }
     }
 
     async fn drop_schema(&self) {
@@ -1704,11 +1697,8 @@ fn postgres_method_registry_rejects_core_owned_method_registration() {
 #[tokio::test]
 async fn postgres_runtime_completes_message_signature_through_method_registry() {
     let _postgres_runtime_test_guard = AUTH_POSTGRES_RUNTIME_TEST_LOCK.lock().await;
-    let Some(harness) =
-        PostgresRuntimeTestHarness::connect_or_skip_with_message_signature_method().await
-    else {
-        return;
-    };
+    let harness =
+        PostgresRuntimeTestHarness::connect_required_with_message_signature_method().await;
     let pool = &harness.pool;
     let store_config = &harness.store_config;
     let runtime = &harness.runtime;
@@ -1820,14 +1810,11 @@ async fn postgres_runtime_completes_message_signature_after_authoritative_confir
     let _postgres_runtime_test_guard = AUTH_POSTGRES_RUNTIME_TEST_LOCK.lock().await;
     let method = ProofMethodDeclaration::new(ProofFamily::MessageSignature, "ssh_signature")
         .expect("message signature method");
-    let Some(harness) =
-        PostgresRuntimeTestHarness::connect_or_skip_with_registered_authoritative_test_method(
+    let harness =
+        PostgresRuntimeTestHarness::connect_required_with_registered_authoritative_test_method(
             method.clone(),
         )
-        .await
-    else {
-        return;
-    };
+        .await;
     let pool = &harness.pool;
     let store_config = &harness.store_config;
     let runtime = &harness.runtime;
@@ -1907,14 +1894,11 @@ async fn postgres_runtime_authoritative_active_method_loads_resolved_subject_rev
     let _postgres_runtime_test_guard = AUTH_POSTGRES_RUNTIME_TEST_LOCK.lock().await;
     let method = ProofMethodDeclaration::new(ProofFamily::MessageSignature, "ssh_signature")
         .expect("message signature method");
-    let Some(harness) =
-        PostgresRuntimeTestHarness::connect_or_skip_with_registered_authoritative_test_method(
+    let harness =
+        PostgresRuntimeTestHarness::connect_required_with_registered_authoritative_test_method(
             method.clone(),
         )
-        .await
-    else {
-        return;
-    };
+        .await;
     let pool = &harness.pool;
     let store_config = &harness.store_config;
     let runtime = &harness.runtime;
@@ -1999,11 +1983,8 @@ async fn postgres_runtime_authoritative_active_method_loads_resolved_subject_rev
 #[tokio::test]
 async fn postgres_runtime_rejects_active_method_cookie_without_sealed_method_state() {
     let _postgres_runtime_test_guard = AUTH_POSTGRES_RUNTIME_TEST_LOCK.lock().await;
-    let Some(harness) =
-        PostgresRuntimeTestHarness::connect_or_skip_with_message_signature_method().await
-    else {
-        return;
-    };
+    let harness =
+        PostgresRuntimeTestHarness::connect_required_with_message_signature_method().await;
     let runtime = &harness.runtime;
     let nonce = ActiveProofChallengeFastFailNonce::from_bytes(
         &[77_u8; ACTIVE_PROOF_CHALLENGE_FAST_FAIL_NONCE_BYTES],
@@ -2059,11 +2040,8 @@ async fn postgres_runtime_rejects_active_method_cookie_without_sealed_method_sta
 #[tokio::test]
 async fn postgres_runtime_rejects_expired_active_method_cookie_before_plugin_dispatch() {
     let _postgres_runtime_test_guard = AUTH_POSTGRES_RUNTIME_TEST_LOCK.lock().await;
-    let Some(harness) =
-        PostgresRuntimeTestHarness::connect_or_skip_with_message_signature_method().await
-    else {
-        return;
-    };
+    let harness =
+        PostgresRuntimeTestHarness::connect_required_with_message_signature_method().await;
     let runtime = &harness.runtime;
     let nonce = ActiveProofChallengeFastFailNonce::from_bytes(
         &[78_u8; ACTIVE_PROOF_CHALLENGE_FAST_FAIL_NONCE_BYTES],
@@ -2120,11 +2098,8 @@ async fn postgres_runtime_rejects_expired_active_method_cookie_before_plugin_dis
 #[tokio::test]
 async fn postgres_runtime_completes_origin_bound_public_key_through_method_registry() {
     let _postgres_runtime_test_guard = AUTH_POSTGRES_RUNTIME_TEST_LOCK.lock().await;
-    let Some(harness) =
-        PostgresRuntimeTestHarness::connect_or_skip_with_origin_bound_public_key_method().await
-    else {
-        return;
-    };
+    let harness =
+        PostgresRuntimeTestHarness::connect_required_with_origin_bound_public_key_method().await;
     let pool = &harness.pool;
     let store_config = &harness.store_config;
     let runtime = &harness.runtime;
@@ -2259,11 +2234,8 @@ async fn postgres_runtime_completes_origin_bound_public_key_through_method_regis
 #[tokio::test]
 async fn postgres_runtime_completes_federated_identity_through_method_registry() {
     let _postgres_runtime_test_guard = AUTH_POSTGRES_RUNTIME_TEST_LOCK.lock().await;
-    let Some(harness) =
-        PostgresRuntimeTestHarness::connect_or_skip_with_federated_identity_method().await
-    else {
-        return;
-    };
+    let harness =
+        PostgresRuntimeTestHarness::connect_required_with_federated_identity_method().await;
     let pool = &harness.pool;
     let store_config = &harness.store_config;
     let runtime = &harness.runtime;
@@ -2400,9 +2372,7 @@ async fn postgres_runtime_completes_federated_identity_through_method_registry()
 #[tokio::test]
 async fn postgres_runtime_completes_totp_through_known_subject_method_registry() {
     let _postgres_runtime_test_guard = AUTH_POSTGRES_RUNTIME_TEST_LOCK.lock().await;
-    let Some(harness) = PostgresRuntimeTestHarness::connect_or_skip_with_totp_method().await else {
-        return;
-    };
+    let harness = PostgresRuntimeTestHarness::connect_required_with_totp_method().await;
     let pool = &harness.pool;
     let store_config = &harness.store_config;
     let runtime = &harness.runtime;
@@ -2509,9 +2479,7 @@ async fn postgres_runtime_completes_totp_through_known_subject_method_registry()
 #[tokio::test]
 async fn postgres_runtime_deletes_attempt_after_totp_failure_budget() {
     let _postgres_runtime_test_guard = AUTH_POSTGRES_RUNTIME_TEST_LOCK.lock().await;
-    let Some(harness) = PostgresRuntimeTestHarness::connect_or_skip_with_totp_method().await else {
-        return;
-    };
+    let harness = PostgresRuntimeTestHarness::connect_required_with_totp_method().await;
     let pool = &harness.pool;
     let store_config = &harness.store_config;
     let runtime = &harness.runtime;
@@ -2592,9 +2560,7 @@ async fn postgres_runtime_deletes_attempt_after_totp_failure_budget() {
 #[tokio::test]
 async fn postgres_runtime_rejects_invalid_totp_weak_gate_before_state_load() {
     let _postgres_runtime_test_guard = AUTH_POSTGRES_RUNTIME_TEST_LOCK.lock().await;
-    let Some(harness) = PostgresRuntimeTestHarness::connect_or_skip_with_totp_method().await else {
-        return;
-    };
+    let harness = PostgresRuntimeTestHarness::connect_required_with_totp_method().await;
     let pool = &harness.pool;
     let store_config = &harness.store_config;
     let runtime = &harness.runtime;
@@ -2646,11 +2612,7 @@ async fn postgres_runtime_rejects_invalid_totp_weak_gate_before_state_load() {
 #[tokio::test]
 async fn postgres_runtime_completes_recovery_code_through_known_subject_method_registry() {
     let _postgres_runtime_test_guard = AUTH_POSTGRES_RUNTIME_TEST_LOCK.lock().await;
-    let Some(harness) =
-        PostgresRuntimeTestHarness::connect_or_skip_with_recovery_code_method().await
-    else {
-        return;
-    };
+    let harness = PostgresRuntimeTestHarness::connect_required_with_recovery_code_method().await;
     let pool = &harness.pool;
     let store_config = &harness.store_config;
     let runtime = &harness.runtime;
@@ -2864,9 +2826,7 @@ async fn postgres_runtime_completes_recovery_code_through_known_subject_method_r
 #[tokio::test]
 async fn postgres_runtime_rejects_direct_active_proof_attempt_start() {
     let _postgres_runtime_test_guard = AUTH_POSTGRES_RUNTIME_TEST_LOCK.lock().await;
-    let Some(harness) = PostgresRuntimeTestHarness::connect_or_skip().await else {
-        return;
-    };
+    let harness = PostgresRuntimeTestHarness::connect_required().await;
     let pool = &harness.pool;
     let store_config = &harness.store_config;
     let runtime = &harness.runtime;
@@ -2903,9 +2863,7 @@ async fn postgres_runtime_rejects_direct_active_proof_attempt_start() {
 #[tokio::test]
 async fn postgres_runtime_current_session_active_proof_start_without_session_does_not_write() {
     let _postgres_runtime_test_guard = AUTH_POSTGRES_RUNTIME_TEST_LOCK.lock().await;
-    let Some(harness) = PostgresRuntimeTestHarness::connect_or_skip().await else {
-        return;
-    };
+    let harness = PostgresRuntimeTestHarness::connect_required().await;
     let pool = &harness.pool;
     let store_config = &harness.store_config;
     let runtime = &harness.runtime;
@@ -2931,9 +2889,7 @@ async fn postgres_runtime_current_session_active_proof_start_without_session_doe
 #[tokio::test]
 async fn postgres_runtime_rejects_unbound_challenge_issue_preflight_before_writes() {
     let _postgres_runtime_test_guard = AUTH_POSTGRES_RUNTIME_TEST_LOCK.lock().await;
-    let Some(harness) = PostgresRuntimeTestHarness::connect_or_skip().await else {
-        return;
-    };
+    let harness = PostgresRuntimeTestHarness::connect_required().await;
     let pool = &harness.pool;
     let store_config = &harness.store_config;
     let runtime = &harness.runtime;
@@ -2977,9 +2933,7 @@ async fn postgres_runtime_rejects_unbound_challenge_issue_preflight_before_write
 #[tokio::test]
 async fn postgres_runtime_rejects_unbound_challenge_issue_preflight_gate_mismatch_before_writes() {
     let _postgres_runtime_test_guard = AUTH_POSTGRES_RUNTIME_TEST_LOCK.lock().await;
-    let Some(harness) = PostgresRuntimeTestHarness::connect_or_skip().await else {
-        return;
-    };
+    let harness = PostgresRuntimeTestHarness::connect_required().await;
     let pool = &harness.pool;
     let store_config = &harness.store_config;
     let runtime = &harness.runtime;
@@ -3017,9 +2971,7 @@ async fn postgres_runtime_rejects_unbound_challenge_issue_preflight_gate_mismatc
 #[tokio::test]
 async fn postgres_runtime_rejects_configured_secret_challenge_issue_path() {
     let _postgres_runtime_test_guard = AUTH_POSTGRES_RUNTIME_TEST_LOCK.lock().await;
-    let Some(harness) = PostgresRuntimeTestHarness::connect_or_skip_with_totp_method().await else {
-        return;
-    };
+    let harness = PostgresRuntimeTestHarness::connect_required_with_totp_method().await;
     let pool = &harness.pool;
     let store_config = &harness.store_config;
     let runtime = &harness.runtime;
@@ -3071,9 +3023,7 @@ async fn postgres_runtime_rejects_configured_secret_challenge_issue_path() {
 #[tokio::test]
 async fn postgres_runtime_rejects_direct_active_proof_completion() {
     let _postgres_runtime_test_guard = AUTH_POSTGRES_RUNTIME_TEST_LOCK.lock().await;
-    let Some(harness) = PostgresRuntimeTestHarness::connect_or_skip().await else {
-        return;
-    };
+    let harness = PostgresRuntimeTestHarness::connect_required().await;
     let runtime = &harness.runtime;
     let proof = ProofSummary::new(ProofFamily::MessageSignature, "ssh_signature").expect("proof");
     let direct_command = Command::CompleteActiveProofChallenge(CompleteActiveProofChallenge {
@@ -3105,9 +3055,7 @@ async fn postgres_runtime_rejects_direct_active_proof_completion() {
 #[tokio::test]
 async fn postgres_runtime_rejects_direct_active_proof_failure_recording() {
     let _postgres_runtime_test_guard = AUTH_POSTGRES_RUNTIME_TEST_LOCK.lock().await;
-    let Some(harness) = PostgresRuntimeTestHarness::connect_or_skip().await else {
-        return;
-    };
+    let harness = PostgresRuntimeTestHarness::connect_required().await;
     let runtime = &harness.runtime;
     let direct_command = Command::RecordActiveProofFailure(RecordActiveProofFailure {
         now: at(30),
@@ -3135,9 +3083,7 @@ async fn postgres_runtime_rejects_direct_active_proof_failure_recording() {
 #[tokio::test]
 async fn postgres_runtime_rejects_direct_credential_reset_commands() {
     let _postgres_runtime_test_guard = AUTH_POSTGRES_RUNTIME_TEST_LOCK.lock().await;
-    let Some(harness) = PostgresRuntimeTestHarness::connect_or_skip().await else {
-        return;
-    };
+    let harness = PostgresRuntimeTestHarness::connect_required().await;
     let runtime = &harness.runtime;
     let target_credential_id = id("direct-reset-password-credential");
     let direct_plan = Command::PlanCredentialReset(PlanCredentialReset {
@@ -3313,10 +3259,7 @@ async fn postgres_runtime_rejects_direct_credential_reset_commands() {
 async fn postgres_runtime_authenticated_credential_reset_planning_builds_lifecycle_context_internally()
  {
     let _postgres_runtime_test_guard = AUTH_POSTGRES_RUNTIME_TEST_LOCK.lock().await;
-    let Some(harness) = PostgresRuntimeTestHarness::connect_or_skip_with_email_otp_method().await
-    else {
-        return;
-    };
+    let harness = PostgresRuntimeTestHarness::connect_required_with_email_otp_method().await;
     let pool = &harness.pool;
     let store_config = &harness.store_config;
     let runtime = &harness.runtime;
@@ -3412,10 +3355,7 @@ async fn postgres_runtime_authenticated_credential_reset_planning_builds_lifecyc
 async fn postgres_runtime_authenticated_credential_reset_planning_generates_pending_action_internally()
  {
     let _postgres_runtime_test_guard = AUTH_POSTGRES_RUNTIME_TEST_LOCK.lock().await;
-    let Some(harness) = PostgresRuntimeTestHarness::connect_or_skip_with_email_otp_method().await
-    else {
-        return;
-    };
+    let harness = PostgresRuntimeTestHarness::connect_required_with_email_otp_method().await;
     let pool = &harness.pool;
     let store_config = &harness.store_config;
     let runtime = &harness.runtime;
@@ -3517,10 +3457,7 @@ async fn postgres_runtime_authenticated_credential_reset_planning_generates_pend
 #[tokio::test]
 async fn postgres_runtime_reschedules_reset_after_expiry_with_quiet_cleanup() {
     let _postgres_runtime_test_guard = AUTH_POSTGRES_RUNTIME_TEST_LOCK.lock().await;
-    let Some(harness) = PostgresRuntimeTestHarness::connect_or_skip_with_email_otp_method().await
-    else {
-        return;
-    };
+    let harness = PostgresRuntimeTestHarness::connect_required_with_email_otp_method().await;
     let pool = &harness.pool;
     let store_config = &harness.store_config;
     let runtime = &harness.runtime;
@@ -3659,10 +3596,7 @@ async fn postgres_runtime_reschedules_reset_after_expiry_with_quiet_cleanup() {
 #[tokio::test]
 async fn postgres_runtime_authenticated_pending_credential_reset_cancellation_closes_open_action() {
     let _postgres_runtime_test_guard = AUTH_POSTGRES_RUNTIME_TEST_LOCK.lock().await;
-    let Some(harness) = PostgresRuntimeTestHarness::connect_or_skip_with_email_otp_method().await
-    else {
-        return;
-    };
+    let harness = PostgresRuntimeTestHarness::connect_required_with_email_otp_method().await;
     let pool = &harness.pool;
     let store_config = &harness.store_config;
     let runtime = &harness.runtime;
@@ -3797,11 +3731,7 @@ async fn postgres_runtime_authenticated_pending_credential_reset_cancellation_cl
 #[tokio::test]
 async fn postgres_runtime_unauthenticated_credential_reset_planning_consumes_recovery_attempt() {
     let _postgres_runtime_test_guard = AUTH_POSTGRES_RUNTIME_TEST_LOCK.lock().await;
-    let Some(harness) =
-        PostgresRuntimeTestHarness::connect_or_skip_with_recovery_code_method().await
-    else {
-        return;
-    };
+    let harness = PostgresRuntimeTestHarness::connect_required_with_recovery_code_method().await;
     let pool = &harness.pool;
     let store_config = &harness.store_config;
     let runtime = &harness.runtime;
@@ -3950,18 +3880,15 @@ async fn postgres_runtime_unauthenticated_credential_reset_planning_consumes_rec
 #[tokio::test]
 async fn postgres_runtime_authenticated_credential_reset_builds_method_work_internally() {
     let _postgres_runtime_test_guard = AUTH_POSTGRES_RUNTIME_TEST_LOCK.lock().await;
-    let Some(harness) =
-        PostgresRuntimeTestHarness::connect_or_skip_with_registered_plugins_for_test_method(
+    let harness =
+        PostgresRuntimeTestHarness::connect_required_with_registered_plugins_for_test_method(
             Some(TestMethodCommitFailureMode::None),
             true,
             None,
             Some(proof_method(ProofFamily::MessageSignature)),
             TestActiveMethodVerificationMode::BeforeStateLoad,
         )
-        .await
-    else {
-        return;
-    };
+        .await;
     let pool = &harness.pool;
     let store_config = &harness.store_config;
     let runtime = &harness.runtime;
@@ -4059,18 +3986,15 @@ async fn postgres_runtime_authenticated_credential_reset_builds_method_work_inte
 #[tokio::test]
 async fn postgres_runtime_mature_pending_credential_reset_builds_method_work_internally() {
     let _postgres_runtime_test_guard = AUTH_POSTGRES_RUNTIME_TEST_LOCK.lock().await;
-    let Some(harness) =
-        PostgresRuntimeTestHarness::connect_or_skip_with_registered_plugins_for_test_method(
+    let harness =
+        PostgresRuntimeTestHarness::connect_required_with_registered_plugins_for_test_method(
             Some(TestMethodCommitFailureMode::None),
             false,
             None,
             Some(proof_method(ProofFamily::MessageSignature)),
             TestActiveMethodVerificationMode::BeforeStateLoad,
         )
-        .await
-    else {
-        return;
-    };
+        .await;
     let pool = &harness.pool;
     let store_config = &harness.store_config;
     let runtime = &harness.runtime;
@@ -4178,18 +4102,15 @@ async fn postgres_runtime_mature_pending_credential_reset_builds_method_work_int
 #[tokio::test]
 async fn postgres_runtime_mature_pending_credential_replacement_builds_method_work_internally() {
     let _postgres_runtime_test_guard = AUTH_POSTGRES_RUNTIME_TEST_LOCK.lock().await;
-    let Some(harness) =
-        PostgresRuntimeTestHarness::connect_or_skip_with_registered_plugins_for_test_method(
+    let harness =
+        PostgresRuntimeTestHarness::connect_required_with_registered_plugins_for_test_method(
             Some(TestMethodCommitFailureMode::None),
             false,
             None,
             Some(proof_method(ProofFamily::MessageSignature)),
             TestActiveMethodVerificationMode::BeforeStateLoad,
         )
-        .await
-    else {
-        return;
-    };
+        .await;
     let pool = &harness.pool;
     let store_config = &harness.store_config;
     let runtime = &harness.runtime;
@@ -4323,9 +4244,7 @@ async fn postgres_runtime_mature_pending_credential_replacement_builds_method_wo
 #[tokio::test]
 async fn postgres_runtime_mature_pending_credential_removal_is_core_owned() {
     let _postgres_runtime_test_guard = AUTH_POSTGRES_RUNTIME_TEST_LOCK.lock().await;
-    let Some(harness) = PostgresRuntimeTestHarness::connect_or_skip().await else {
-        return;
-    };
+    let harness = PostgresRuntimeTestHarness::connect_required().await;
     let pool = &harness.pool;
     let store_config = &harness.store_config;
     let runtime = &harness.runtime;
@@ -4420,10 +4339,7 @@ async fn postgres_runtime_mature_pending_credential_removal_is_core_owned() {
 async fn postgres_runtime_authenticated_pending_credential_replacement_cancellation_closes_open_action()
  {
     let _postgres_runtime_test_guard = AUTH_POSTGRES_RUNTIME_TEST_LOCK.lock().await;
-    let Some(harness) = PostgresRuntimeTestHarness::connect_or_skip_with_email_otp_method().await
-    else {
-        return;
-    };
+    let harness = PostgresRuntimeTestHarness::connect_required_with_email_otp_method().await;
     let pool = &harness.pool;
     let store_config = &harness.store_config;
     let runtime = &harness.runtime;
@@ -4538,9 +4454,7 @@ async fn postgres_runtime_authenticated_pending_credential_replacement_cancellat
 #[tokio::test]
 async fn postgres_runtime_rejects_out_of_band_completion_without_challenge_runtime() {
     let _postgres_runtime_test_guard = AUTH_POSTGRES_RUNTIME_TEST_LOCK.lock().await;
-    let Some(harness) = PostgresRuntimeTestHarness::connect_or_skip().await else {
-        return;
-    };
+    let harness = PostgresRuntimeTestHarness::connect_required().await;
     let runtime = &harness.runtime;
 
     let error = runtime
@@ -4571,10 +4485,7 @@ async fn postgres_runtime_rejects_out_of_band_completion_without_challenge_runti
 #[tokio::test]
 async fn postgres_runtime_executes_email_otp_method_lifecycle_when_database_is_available() {
     let _postgres_runtime_test_guard = AUTH_POSTGRES_RUNTIME_TEST_LOCK.lock().await;
-    let Some(harness) = PostgresRuntimeTestHarness::connect_or_skip_with_email_otp_method().await
-    else {
-        return;
-    };
+    let harness = PostgresRuntimeTestHarness::connect_required_with_email_otp_method().await;
     let pool = &harness.pool;
     let store_config = &harness.store_config;
     let runtime = &harness.runtime;
@@ -4728,14 +4639,10 @@ async fn postgres_runtime_derives_email_otp_subject_from_method_state() {
         subject_id.clone(),
         source_id.clone(),
     ));
-    let Some(harness) =
-        PostgresRuntimeTestHarness::connect_or_skip_with_email_otp_subject_resolver(
-            subject_resolver.clone(),
-        )
-        .await
-    else {
-        return;
-    };
+    let harness = PostgresRuntimeTestHarness::connect_required_with_email_otp_subject_resolver(
+        subject_resolver.clone(),
+    )
+    .await;
     let pool = &harness.pool;
     let store_config = &harness.store_config;
     let runtime = &harness.runtime;
@@ -4823,14 +4730,10 @@ async fn postgres_runtime_rejects_bad_email_otp_before_subject_resolution() {
         id("bad-email-otp-fast-fail-subject"),
         id("bad-email-otp-fast-fail-source"),
     ));
-    let Some(harness) =
-        PostgresRuntimeTestHarness::connect_or_skip_with_email_otp_subject_resolver(
-            subject_resolver.clone(),
-        )
-        .await
-    else {
-        return;
-    };
+    let harness = PostgresRuntimeTestHarness::connect_required_with_email_otp_subject_resolver(
+        subject_resolver.clone(),
+    )
+    .await;
     let runtime = &harness.runtime;
     let email_otp = harness
         .email_otp_plugin
@@ -4894,9 +4797,7 @@ async fn postgres_runtime_rejects_bad_email_otp_before_subject_resolution() {
 async fn postgres_runtime_executes_session_and_trusted_device_lifecycle_when_database_is_available()
 {
     let _postgres_runtime_test_guard = AUTH_POSTGRES_RUNTIME_TEST_LOCK.lock().await;
-    let Some(harness) = PostgresRuntimeTestHarness::connect_or_skip().await else {
-        return;
-    };
+    let harness = PostgresRuntimeTestHarness::connect_required().await;
     let pool = &harness.pool;
     let store_config = &harness.store_config;
     let runtime = &harness.runtime;
@@ -5309,9 +5210,7 @@ async fn postgres_runtime_executes_session_and_trusted_device_lifecycle_when_dat
 #[tokio::test]
 async fn postgres_runtime_tripwires_replayed_previous_secrets_after_grace() {
     let _postgres_runtime_test_guard = AUTH_POSTGRES_RUNTIME_TEST_LOCK.lock().await;
-    let Some(harness) = PostgresRuntimeTestHarness::connect_or_skip().await else {
-        return;
-    };
+    let harness = PostgresRuntimeTestHarness::connect_required().await;
     let pool = &harness.pool;
     let store_config = &harness.store_config;
     let runtime = &harness.runtime;
@@ -5492,9 +5391,7 @@ async fn postgres_runtime_tripwires_replayed_previous_secrets_after_grace() {
 #[tokio::test]
 async fn postgres_runtime_executes_step_up_completion_when_database_is_available() {
     let _postgres_runtime_test_guard = AUTH_POSTGRES_RUNTIME_TEST_LOCK.lock().await;
-    let Some(harness) = PostgresRuntimeTestHarness::connect_or_skip().await else {
-        return;
-    };
+    let harness = PostgresRuntimeTestHarness::connect_required().await;
     let pool = &harness.pool;
     let store_config = &harness.store_config;
     let runtime = &harness.runtime;
@@ -5681,9 +5578,7 @@ async fn postgres_runtime_executes_step_up_completion_when_database_is_available
 #[tokio::test]
 async fn postgres_runtime_executes_revocation_paths_when_database_is_available() {
     let _postgres_runtime_test_guard = AUTH_POSTGRES_RUNTIME_TEST_LOCK.lock().await;
-    let Some(harness) = PostgresRuntimeTestHarness::connect_or_skip().await else {
-        return;
-    };
+    let harness = PostgresRuntimeTestHarness::connect_required().await;
     let pool = &harness.pool;
     let store_config = &harness.store_config;
     let runtime = &harness.runtime;
@@ -5985,9 +5880,7 @@ async fn postgres_runtime_executes_revocation_paths_when_database_is_available()
 async fn postgres_runtime_rejects_stale_loaded_state_commits_after_revocation_when_database_is_available()
  {
     let _postgres_runtime_test_guard = AUTH_POSTGRES_RUNTIME_TEST_LOCK.lock().await;
-    let Some(harness) = PostgresRuntimeTestHarness::connect_or_skip().await else {
-        return;
-    };
+    let harness = PostgresRuntimeTestHarness::connect_required().await;
     let pool = &harness.pool;
     let store_config = &harness.store_config;
     let runtime = &harness.runtime;
@@ -6258,9 +6151,7 @@ async fn postgres_runtime_rejects_stale_loaded_state_commits_after_revocation_wh
 #[tokio::test]
 async fn postgres_runtime_rejects_stale_active_proof_commits_when_database_is_available() {
     let _postgres_runtime_test_guard = AUTH_POSTGRES_RUNTIME_TEST_LOCK.lock().await;
-    let Some(harness) = PostgresRuntimeTestHarness::connect_or_skip().await else {
-        return;
-    };
+    let harness = PostgresRuntimeTestHarness::connect_required().await;
     let pool = &harness.pool;
     let store_config = &harness.store_config;
     let runtime = &harness.runtime;
@@ -6555,9 +6446,7 @@ async fn postgres_runtime_rejects_stale_active_proof_commits_when_database_is_av
 #[tokio::test]
 async fn postgres_runtime_commits_core_durable_effects_atomically_when_database_is_available() {
     let _postgres_runtime_test_guard = AUTH_POSTGRES_RUNTIME_TEST_LOCK.lock().await;
-    let Some(harness) = PostgresRuntimeTestHarness::connect_or_skip().await else {
-        return;
-    };
+    let harness = PostgresRuntimeTestHarness::connect_required().await;
     let pool = &harness.pool;
     let store_config = &harness.store_config;
     let runtime = &harness.runtime;
@@ -6653,9 +6542,7 @@ async fn postgres_runtime_commits_core_durable_effects_atomically_when_database_
 async fn postgres_runtime_rejects_method_facades_until_registry_is_configured_when_database_is_available()
  {
     let _postgres_runtime_test_guard = AUTH_POSTGRES_RUNTIME_TEST_LOCK.lock().await;
-    let Some(harness) = PostgresRuntimeTestHarness::connect_or_skip().await else {
-        return;
-    };
+    let harness = PostgresRuntimeTestHarness::connect_required().await;
     let pool = &harness.pool;
     let store_config = &harness.store_config;
     let registry_runtime = &harness.runtime;
@@ -6895,13 +6782,10 @@ async fn postgres_runtime_rejects_method_facades_until_registry_is_configured_wh
 async fn postgres_runtime_commits_method_work_atomically_with_core_work_when_database_is_available()
 {
     let _postgres_runtime_test_guard = AUTH_POSTGRES_RUNTIME_TEST_LOCK.lock().await;
-    let Some(harness) = PostgresRuntimeTestHarness::connect_or_skip_with_method_plugin(Some(
+    let harness = PostgresRuntimeTestHarness::connect_required_with_method_plugin(Some(
         TestMethodCommitFailureMode::None,
     ))
-    .await
-    else {
-        return;
-    };
+    .await;
     let pool = &harness.pool;
     let store_config = &harness.store_config;
     let runtime = &harness.runtime;
@@ -6981,13 +6865,10 @@ async fn postgres_runtime_commits_method_work_atomically_with_core_work_when_dat
 async fn postgres_runtime_rolls_back_core_work_when_method_mutation_fails_when_database_is_available()
  {
     let _postgres_runtime_test_guard = AUTH_POSTGRES_RUNTIME_TEST_LOCK.lock().await;
-    let Some(harness) = PostgresRuntimeTestHarness::connect_or_skip_with_method_plugin(Some(
+    let harness = PostgresRuntimeTestHarness::connect_required_with_method_plugin(Some(
         TestMethodCommitFailureMode::FailMutation,
     ))
-    .await
-    else {
-        return;
-    };
+    .await;
     let pool = &harness.pool;
     let store_config = &harness.store_config;
     let runtime = &harness.runtime;
@@ -7033,13 +6914,10 @@ async fn postgres_runtime_rolls_back_core_work_when_method_mutation_fails_when_d
 async fn postgres_runtime_rolls_back_core_work_when_method_durable_effect_fails_when_database_is_available()
  {
     let _postgres_runtime_test_guard = AUTH_POSTGRES_RUNTIME_TEST_LOCK.lock().await;
-    let Some(harness) = PostgresRuntimeTestHarness::connect_or_skip_with_method_plugin(Some(
+    let harness = PostgresRuntimeTestHarness::connect_required_with_method_plugin(Some(
         TestMethodCommitFailureMode::FailDurableEffectCommand,
     ))
-    .await
-    else {
-        return;
-    };
+    .await;
     let pool = &harness.pool;
     let store_config = &harness.store_config;
     let runtime = &harness.runtime;

@@ -2,7 +2,7 @@ use super::*;
 
 #[tokio::test]
 async fn queue_worker_with_fleet_maintenance_emits_expected_database_operation_shape_multiset() {
-    let database_url = test_database_url();
+    let database_url = standard_test_database_url();
 
     let sqlx_pool = connect_sqlx_pool(&database_url).await;
     let queue_config = unique_test_config();

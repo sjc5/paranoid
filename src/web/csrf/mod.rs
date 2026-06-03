@@ -182,7 +182,7 @@ impl CsrfProtector {
         &self,
         request: &Request<B>,
     ) -> Result<Cookie<'static>, Error> {
-        self.panic_if_development_request_host_is_not_localhost(request);
+        self.validate_development_request_host_is_localhost(request)?;
         let binding = self.extract_binding(request)?;
         self.new_token_cookie(binding.as_ref())
     }
@@ -200,7 +200,7 @@ impl CsrfProtector {
         &self,
         request: &Request<B>,
     ) -> Result<Option<Cookie<'static>>, Error> {
-        self.panic_if_development_request_host_is_not_localhost(request);
+        self.validate_development_request_host_is_localhost(request)?;
         let binding = self.extract_binding(request)?;
         if let Ok(cookie) = self.cookie.parse_from_request(request)
             && let Ok(payload) = self.payload_from_cookie(&cookie)
@@ -214,7 +214,7 @@ impl CsrfProtector {
 
     /// Verifies CSRF protection for an HTTP request.
     pub fn verify_request<B>(&self, request: &Request<B>) -> Result<(), Error> {
-        self.panic_if_development_request_host_is_not_localhost(request);
+        self.validate_development_request_host_is_localhost(request)?;
         if is_csrf_safe_method(request.method().as_str()) {
             return Ok(());
         }
@@ -315,15 +315,20 @@ impl CsrfProtector {
         Err(Error::CsrfOriginNotAllowed { origin: normalized })
     }
 
-    fn panic_if_development_request_host_is_not_localhost<B>(&self, request: &Request<B>) {
+    fn validate_development_request_host_is_localhost<B>(
+        &self,
+        request: &Request<B>,
+    ) -> Result<(), Error> {
         if !self.cookie_manager.is_development() {
-            return;
+            return Ok(());
         }
         let host = request_host(request).unwrap_or("");
-        assert!(
-            is_localhost_host(host),
-            "DANGER: CSRF middleware is configured for development mode but the request host is not localhost: {host}"
-        );
+        if is_localhost_host(host) {
+            return Ok(());
+        }
+        Err(Error::DevelopmentModeNonLocalhostHost {
+            host: host.to_owned(),
+        })
     }
 }
 
@@ -428,8 +433,13 @@ where
         if is_csrf_safe_method(request.method().as_str()) {
             return self.call_safe_request(request);
         }
-        self.protector
-            .panic_if_development_request_host_is_not_localhost(&request);
+        if let Err(error) = self
+            .protector
+            .validate_development_request_host_is_localhost(&request)
+        {
+            let response = (self.failure_response)(error);
+            return Box::pin(ready(Ok(response)));
+        }
         match self.protector.verify_unsafe_request(&request) {
             Ok(()) => Box::pin(self.inner.call(request)),
             Err(failure) => {
