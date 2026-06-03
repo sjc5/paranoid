@@ -207,6 +207,19 @@ fn state_dependent_mutations_have_commit_time_guards() {
                 &loaded_session(200),
             ),
         ),
+        (
+            "immediate credential reset",
+            immediate_credential_reset_plan(),
+        ),
+        ("delayed credential reset", delayed_credential_reset_plan()),
+        (
+            "immediate credential reset execution",
+            immediate_credential_reset_execution_plan(),
+        ),
+        (
+            "pending credential reset execution",
+            pending_credential_reset_execution_plan(),
+        ),
     ];
 
     for (plan_name, plan) in plans {
@@ -453,6 +466,40 @@ fn command_commit_guard_matrix_is_stable() {
             ),
             vec![],
         ),
+        (
+            "immediate credential reset",
+            immediate_credential_reset_plan(),
+            vec!["credential_instance_still_active"],
+        ),
+        (
+            "delayed credential reset",
+            delayed_credential_reset_plan(),
+            vec![
+                "credential_instance_still_active",
+                "no_open_pending_credential_lifecycle_action_for_target",
+            ],
+        ),
+        (
+            "immediate credential reset execution",
+            immediate_credential_reset_execution_plan(),
+            vec!["credential_instance_still_active"],
+        ),
+        (
+            "pending credential reset execution",
+            pending_credential_reset_execution_plan(),
+            vec![
+                "credential_instance_still_active",
+                "pending_credential_lifecycle_action_still_executable",
+            ],
+        ),
+        (
+            "pending credential reset cancellation",
+            pending_credential_reset_cancellation_plan(),
+            vec![
+                "credential_instance_still_active",
+                "pending_credential_lifecycle_action_still_cancellable_for_target",
+            ],
+        ),
     ];
 
     for (case_name, plan, expected_precondition_kinds) in cases {
@@ -462,6 +509,154 @@ fn command_commit_guard_matrix_is_stable() {
             "{case_name}"
         );
     }
+}
+
+fn immediate_credential_reset_plan() -> CommitPlan {
+    let target_credential_id: VerifiedProofSourceId = id("password-credential");
+    let email_authority: RecoveryAuthorityId = id("primary-email-authority");
+    let device_authority: RecoveryAuthorityId = id("trusted-device-authority");
+    reduced_plan(
+        Command::PlanCredentialReset(PlanCredentialReset {
+            now: at(100),
+            lifecycle_context: credential_lifecycle_context(
+                message_signature_credential_metadata("password-credential"),
+                [CredentialRecoveryAuthority::new(
+                    target_credential_id,
+                    CredentialLifecycleAction::Reset,
+                    email_authority.clone(),
+                    RecoveryAuthorityTiming::Immediate,
+                )],
+                [
+                    out_of_band_identifier_lifecycle_evidence("primary-email", [email_authority]),
+                    credential_instance_lifecycle_evidence("trusted-device", [device_authority]),
+                ],
+            ),
+            active_proof_attempt_to_close: None,
+            independent_evidence_required:
+                CredentialLifecycleIndependentEvidenceRequirement::Required,
+            pending_action: None,
+            immediate_subject_auth_revocation:
+                CredentialResetSubjectAuthRevocation::RevokeSubjectAuthState,
+        }),
+        &LoadedState::default(),
+    )
+}
+
+fn delayed_credential_reset_plan() -> CommitPlan {
+    let target_credential_id: VerifiedProofSourceId = id("password-credential");
+    let email_authority: RecoveryAuthorityId = id("primary-email-authority");
+    reduced_plan(
+        Command::PlanCredentialReset(PlanCredentialReset {
+            now: at(100),
+            lifecycle_context: credential_lifecycle_context(
+                message_signature_credential_metadata("password-credential"),
+                [CredentialRecoveryAuthority::new(
+                    target_credential_id,
+                    CredentialLifecycleAction::Reset,
+                    email_authority.clone(),
+                    RecoveryAuthorityTiming::Immediate,
+                )],
+                [out_of_band_identifier_lifecycle_evidence(
+                    "primary-email",
+                    [email_authority],
+                )],
+            ),
+            active_proof_attempt_to_close: None,
+            independent_evidence_required:
+                CredentialLifecycleIndependentEvidenceRequirement::Required,
+            pending_action: Some(PendingCredentialLifecycleActionSchedule {
+                pending_action_id: id("pending-reset"),
+                earliest_execute_at: at(200),
+                expires_at: at(300),
+            }),
+            immediate_subject_auth_revocation:
+                CredentialResetSubjectAuthRevocation::RevokeSubjectAuthState,
+        }),
+        &LoadedState::default(),
+    )
+}
+
+fn immediate_credential_reset_execution_plan() -> CommitPlan {
+    let target_credential_id: VerifiedProofSourceId = id("password-credential");
+    let email_authority: RecoveryAuthorityId = id("primary-email-authority");
+    let device_authority: RecoveryAuthorityId = id("trusted-device-authority");
+    reduced_plan(
+        Command::ExecuteCredentialReset(ExecuteCredentialReset {
+            now: at(250),
+            execution_authority: CredentialResetExecutionAuthority::Immediate {
+                lifecycle_context: credential_lifecycle_context(
+                    message_signature_credential_metadata("password-credential"),
+                    [CredentialRecoveryAuthority::new(
+                        target_credential_id,
+                        CredentialLifecycleAction::Reset,
+                        email_authority.clone(),
+                        RecoveryAuthorityTiming::Immediate,
+                    )],
+                    [
+                        out_of_band_identifier_lifecycle_evidence(
+                            "primary-email",
+                            [email_authority],
+                        ),
+                        credential_instance_lifecycle_evidence(
+                            "trusted-device",
+                            [device_authority],
+                        ),
+                    ],
+                ),
+                independent_evidence_required:
+                    CredentialLifecycleIndependentEvidenceRequirement::Required,
+            },
+            method_commit_work: vec![password_reset_method_commit_work(b"new-password-verifier")],
+            subject_auth_revocation: CredentialResetSubjectAuthRevocation::RevokeSubjectAuthState,
+        }),
+        &LoadedState::default(),
+    )
+}
+
+fn pending_credential_reset_execution_plan() -> CommitPlan {
+    let target_credential_id: VerifiedProofSourceId = id("password-credential");
+    reduced_plan(
+        Command::ExecuteCredentialReset(ExecuteCredentialReset {
+            now: at(250),
+            execution_authority: CredentialResetExecutionAuthority::MaturePendingAction {
+                target_credential: message_signature_credential_metadata("password-credential"),
+                pending_action: PendingCredentialLifecycleActionRecord::new_open(
+                    id("pending-reset"),
+                    id("subject"),
+                    target_credential_id,
+                    CredentialLifecycleAction::Reset,
+                    at(100),
+                    at(200),
+                    at(300),
+                )
+                .expect("pending action"),
+            },
+            method_commit_work: vec![password_reset_method_commit_work(b"new-password-verifier")],
+            subject_auth_revocation: CredentialResetSubjectAuthRevocation::RevokeSubjectAuthState,
+        }),
+        &LoadedState::default(),
+    )
+}
+
+fn pending_credential_reset_cancellation_plan() -> CommitPlan {
+    let target_credential_id: VerifiedProofSourceId = id("password-credential");
+    reduced_plan(
+        Command::CancelPendingCredentialReset(CancelPendingCredentialReset {
+            now: at(150),
+            target_credential: message_signature_credential_metadata("password-credential"),
+            pending_action: PendingCredentialLifecycleActionRecord::new_open(
+                id("pending-reset"),
+                id("subject"),
+                target_credential_id,
+                CredentialLifecycleAction::Reset,
+                at(100),
+                at(200),
+                at(300),
+            )
+            .expect("pending action"),
+        }),
+        &LoadedState::default(),
+    )
 }
 
 #[test]

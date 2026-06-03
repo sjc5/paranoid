@@ -85,6 +85,20 @@ pub enum Outcome {
     NeedsFullAuthentication,
     /// A revocation command produced a commit plan.
     RevocationPlanned(RevocationOutcome),
+    /// A credential reset was authorized immediately or scheduled as a delayed action.
+    CredentialResetPlanned(CredentialResetOutcome),
+    /// A credential reset was executed.
+    CredentialResetExecuted(CredentialResetExecutionOutcome),
+    /// A delayed credential reset was cancelled.
+    CredentialResetPendingActionCancelled(CredentialResetCancellationOutcome),
+    /// A delayed non-reset credential lifecycle action was executed.
+    NonResetPendingCredentialLifecycleActionExecuted(
+        NonResetPendingCredentialLifecycleActionExecutionOutcome,
+    ),
+    /// A delayed non-reset credential lifecycle action was cancelled.
+    NonResetPendingCredentialLifecycleActionCancelled(
+        NonResetPendingCredentialLifecycleActionCancellationOutcome,
+    ),
 }
 
 /// Semantic result of a revocation command.
@@ -107,6 +121,79 @@ pub enum RevocationTarget {
     TrustedDevice(TrustedDeviceCredentialId),
     /// All auth state for one subject created at or before the revocation timestamp.
     SubjectAuthState(SubjectId),
+}
+
+/// Semantic result of a credential reset planning command.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum CredentialResetOutcome {
+    /// The reset is authorized to commit during the current ceremony.
+    AuthorizedImmediate {
+        /// Subject that owns the target credential.
+        subject_id: SubjectId,
+        /// Target credential instance.
+        target_credential_instance_id: VerifiedProofSourceId,
+    },
+    /// The reset may only execute after the configured delay.
+    PendingActionCreated {
+        /// Subject that owns the target credential.
+        subject_id: SubjectId,
+        /// Target credential instance.
+        target_credential_instance_id: VerifiedProofSourceId,
+        /// Pending action id.
+        pending_action_id: PendingCredentialLifecycleActionId,
+        /// Earliest execution time.
+        earliest_execute_at: UnixSeconds,
+        /// Expiration time.
+        expires_at: UnixSeconds,
+    },
+}
+
+/// Semantic result of a credential reset execution command.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CredentialResetExecutionOutcome {
+    /// Subject that owns the target credential.
+    pub subject_id: SubjectId,
+    /// Target credential instance.
+    pub target_credential_instance_id: VerifiedProofSourceId,
+    /// Pending action consumed by this execution, if any.
+    pub pending_action_id: Option<PendingCredentialLifecycleActionId>,
+}
+
+/// Semantic result of a pending credential reset cancellation command.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CredentialResetCancellationOutcome {
+    /// Subject that owns the target credential.
+    pub subject_id: SubjectId,
+    /// Target credential instance.
+    pub target_credential_instance_id: VerifiedProofSourceId,
+    /// Pending action that was cancelled.
+    pub pending_action_id: PendingCredentialLifecycleActionId,
+}
+
+/// Semantic result of a delayed non-reset credential lifecycle action execution command.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct NonResetPendingCredentialLifecycleActionExecutionOutcome {
+    /// Subject that owns the target credential.
+    pub subject_id: SubjectId,
+    /// Target credential instance.
+    pub target_credential_instance_id: VerifiedProofSourceId,
+    /// Lifecycle action that executed.
+    pub action: CredentialLifecycleAction,
+    /// Pending action consumed by this execution.
+    pub pending_action_id: PendingCredentialLifecycleActionId,
+}
+
+/// Semantic result of a delayed non-reset credential lifecycle action cancellation command.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct NonResetPendingCredentialLifecycleActionCancellationOutcome {
+    /// Subject that owns the target credential.
+    pub subject_id: SubjectId,
+    /// Target credential instance.
+    pub target_credential_instance_id: VerifiedProofSourceId,
+    /// Lifecycle action that was cancelled.
+    pub action: CredentialLifecycleAction,
+    /// Pending action that was cancelled.
+    pub pending_action_id: PendingCredentialLifecycleActionId,
 }
 
 /// Authenticated-session details returned by the reducer.

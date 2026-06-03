@@ -70,14 +70,13 @@ where
                 Error::LoadedStateContradiction("totp response used a different method"),
             ));
         }
-        let Some(encrypted_secret) = self.fetch_locked_encrypted_secret(tx, subject_id).await?
-        else {
+        let Some(verifier) = self.fetch_locked_verifier(tx, subject_id).await? else {
             return Ok(KnownSubjectActiveProofMethodVerification::Rejected);
         };
         let secret = decrypt_bytes_with_associated_data(
             &self.secret_keyset,
-            &encrypted_secret,
-            &totp_secret_context(subject_id),
+            &verifier.encrypted_secret,
+            &totp_secret_context(subject_id, &verifier.totp_credential_id),
         )
         .map_err(PostgresTotpMethodError::Crypto)?;
         if !self.verifier.verify_totp_code(
@@ -87,26 +86,35 @@ where
         )? {
             return Ok(KnownSubjectActiveProofMethodVerification::Rejected);
         }
-        let verified_proof =
-            VerifiedActiveProof::from_summary(self.method.verified_proof_summary(), None)
-                .map_err(PostgresTotpMethodError::Core)?;
+        let verified_proof = VerifiedActiveProof::from_summary_with_source(
+            self.method.verified_proof_summary(),
+            None,
+            totp_proof_source(verifier.totp_credential_id),
+        )
+        .map_err(PostgresTotpMethodError::Core)?;
         Ok(KnownSubjectActiveProofMethodVerification::Accepted(
-            VerifiedActiveProofMethodResponse::new(verified_proof, Vec::new()),
+            VerifiedActiveProofMethodResponse::new(verified_proof, Vec::new())
+                .map_err(PostgresTotpMethodError::Core)?,
         ))
     }
 
-    async fn fetch_locked_encrypted_secret(
+    async fn fetch_locked_verifier(
         &self,
         tx: &mut Tx<'_>,
         subject_id: &SubjectId,
-    ) -> Result<Option<Vec<u8>>, PostgresTotpMethodError> {
+    ) -> Result<Option<TotpVerifier>, PostgresTotpMethodError> {
         let statement = format!(
-            "SELECT encrypted_secret FROM {} WHERE subject_id = $1 FOR UPDATE",
+            r#"
+            SELECT totp_credential_id, encrypted_secret
+            FROM {}
+            WHERE subject_id = $1
+            FOR UPDATE
+            "#,
             self.table_names()?.verifier_table.quoted()
         );
         tx.record_database_operation(
             DatabaseOperationKind::FetchOptional,
-            "auth_core.totp.verify.fetch_locked_secret",
+            "auth_core.totp.verify.fetch_locked_verifier",
             Some(statement.as_str()),
         );
         pooler_safe_query(sqlx::AssertSqlSafe(statement.as_str()))
@@ -115,10 +123,21 @@ where
             .await
             .map_err(DbError::query)
             .map_err(PostgresTotpMethodError::Database)?
-            .map(|row| row.try_get::<Vec<u8>, _>("encrypted_secret"))
+            .map(|row| {
+                Ok(TotpVerifier {
+                    totp_credential_id: VerifiedProofSourceId::from_bytes(
+                        row.try_get::<Vec<u8>, _>("totp_credential_id")
+                            .map_err(DbError::query)
+                            .map_err(PostgresTotpMethodError::Database)?,
+                    )
+                    .map_err(PostgresTotpMethodError::Core)?,
+                    encrypted_secret: row
+                        .try_get::<Vec<u8>, _>("encrypted_secret")
+                        .map_err(DbError::query)
+                        .map_err(PostgresTotpMethodError::Database)?,
+                })
+            })
             .transpose()
-            .map_err(DbError::query)
-            .map_err(PostgresTotpMethodError::Database)
     }
 
     fn table_names(&self) -> Result<TotpTableNames, PostgresTotpMethodError> {
@@ -141,14 +160,19 @@ where
         let statement = format!(
             r#"
             CREATE TABLE IF NOT EXISTS {} (
-                subject_id BYTEA PRIMARY KEY,
+                totp_credential_id BYTEA PRIMARY KEY,
+                subject_id BYTEA NOT NULL UNIQUE,
                 encrypted_secret BYTEA NOT NULL,
                 verifier_version BIGINT NOT NULL,
                 created_at BIGINT NOT NULL,
-                updated_at BIGINT NOT NULL
+                updated_at BIGINT NOT NULL,
+                CHECK (octet_length(totp_credential_id) BETWEEN 1 AND {}),
+                CHECK (octet_length(subject_id) BETWEEN 1 AND {})
             )
             "#,
-            self.table_names_for_commit()?.verifier_table.quoted()
+            self.table_names_for_commit()?.verifier_table.quoted(),
+            ID_MAX_BYTES,
+            ID_MAX_BYTES,
         );
         tx.record_database_operation(
             DatabaseOperationKind::Execute,
@@ -174,28 +198,31 @@ where
         &self,
         pool: &Pool,
         subject_id: &SubjectId,
+        totp_credential_id: &VerifiedProofSourceId,
         secret: &[u8],
         now: UnixSeconds,
     ) -> Result<(), PostgresTotpMethodError> {
         let encrypted_secret = encrypt_plaintext_bytes_as::<TotpSecretEnvelope>(
             &self.secret_keyset,
             secret,
-            &totp_secret_context(subject_id),
+            &totp_secret_context(subject_id, totp_credential_id),
         )
         .map_err(PostgresTotpMethodError::Crypto)?
         .into_bytes();
         let statement = format!(
             r#"
             INSERT INTO {} (
+                totp_credential_id,
                 subject_id,
                 encrypted_secret,
                 verifier_version,
                 created_at,
                 updated_at
             )
-            VALUES ($1,$2,1,$3,$3)
+            VALUES ($1,$2,$3,1,$4,$4)
             ON CONFLICT (subject_id)
             DO UPDATE SET
+                totp_credential_id = EXCLUDED.totp_credential_id,
                 encrypted_secret = EXCLUDED.encrypted_secret,
                 verifier_version = {}.verifier_version + 1,
                 updated_at = EXCLUDED.updated_at
@@ -203,15 +230,27 @@ where
             self.table_names()?.verifier_table.quoted(),
             self.table_names()?.verifier_table.quoted(),
         );
-        pooler_safe_query(sqlx::AssertSqlSafe(statement.as_str()))
+        let mut tx = pool
+            .begin_transaction()
+            .await
+            .map_err(PostgresTotpMethodError::Database)?;
+        let result = pooler_safe_query(sqlx::AssertSqlSafe(statement.as_str()))
+            .bind(totp_credential_id.as_bytes())
             .bind(subject_id.as_bytes())
             .bind(encrypted_secret)
             .bind(i64_from_unix_seconds_for_method(now)?)
-            .execute(pool.sqlx_pool())
+            .execute(tx.sqlx_transaction().as_mut())
             .await
             .map_err(DbError::query)
-            .map_err(PostgresTotpMethodError::Database)?;
-        Ok(())
+            .map_err(PostgresTotpMethodError::Database)
+            .map(|_| ());
+        match result {
+            Ok(()) => tx.commit().await.map_err(PostgresTotpMethodError::Database),
+            Err(error) => {
+                let _ = tx.rollback().await;
+                Err(error)
+            }
+        }
     }
 
     #[cfg(test)]
@@ -224,12 +263,25 @@ where
             "SELECT count(*) FROM {} WHERE subject_id = $1",
             self.table_names()?.verifier_table.quoted()
         );
-        pooler_safe_query_scalar::<i64>(sqlx::AssertSqlSafe(statement.as_str()))
+        let mut tx = pool
+            .begin_transaction()
+            .await
+            .map_err(PostgresTotpMethodError::Database)?;
+        let result = pooler_safe_query_scalar::<i64>(sqlx::AssertSqlSafe(statement.as_str()))
             .bind(subject_id.as_bytes())
-            .fetch_one(pool.sqlx_pool())
+            .fetch_one(tx.sqlx_transaction().as_mut())
             .await
             .map_err(DbError::query)
-            .map_err(PostgresTotpMethodError::Database)
+            .map_err(PostgresTotpMethodError::Database);
+        let rollback_result = tx
+            .rollback()
+            .await
+            .map_err(PostgresTotpMethodError::Database);
+        match (result, rollback_result) {
+            (Ok(value), Ok(())) => Ok(value),
+            (Err(error), _) => Err(error),
+            (Ok(_), Err(error)) => Err(error),
+        }
     }
 }
 
@@ -403,12 +455,32 @@ impl std::error::Error for PostgresTotpMethodError {
 
 enum TotpSecretEnvelope {}
 
-fn totp_secret_context(subject_id: &SubjectId) -> Vec<u8> {
-    let mut context =
-        Vec::with_capacity(TOTP_SECRET_CONTEXT.len() + 16 + subject_id.as_bytes().len());
+struct TotpVerifier {
+    totp_credential_id: VerifiedProofSourceId,
+    encrypted_secret: Vec<u8>,
+}
+
+fn totp_secret_context(
+    subject_id: &SubjectId,
+    totp_credential_id: &VerifiedProofSourceId,
+) -> Vec<u8> {
+    let mut context = Vec::with_capacity(
+        TOTP_SECRET_CONTEXT.len()
+            + 16
+            + subject_id.as_bytes().len()
+            + totp_credential_id.as_bytes().len(),
+    );
     context.extend_from_slice(TOTP_SECRET_CONTEXT);
     push_len_prefixed_bytes(&mut context, subject_id.as_bytes());
+    push_len_prefixed_bytes(&mut context, totp_credential_id.as_bytes());
     context
+}
+
+fn totp_proof_source(totp_credential_id: VerifiedProofSourceId) -> VerifiedProofSource {
+    VerifiedProofSource::new(
+        VerifiedProofSourceKind::CredentialInstance,
+        totp_credential_id,
+    )
 }
 
 fn push_len_prefixed_bytes(target: &mut Vec<u8>, bytes: &[u8]) {

@@ -134,6 +134,16 @@ pub enum Error {
     StepUpCompletionRequiresRuntimeAttemptContinuation,
     /// Public unbound attempt start requires runtime-owned method challenge issue.
     UnboundActiveProofAttemptStartRequiresRuntimeMethodDispatch,
+    /// Credential reset planning requires runtime-owned lifecycle-authority loading.
+    CredentialResetPlanningRequiresRuntimeLifecycleDecision,
+    /// Credential reset execution requires runtime-owned method dispatch.
+    CredentialResetExecutionRequiresRuntimeMethodDispatch,
+    /// Pending credential reset cancellation requires runtime-owned lifecycle loading.
+    CredentialResetCancellationRequiresRuntimeLifecycleDecision,
+    /// Non-reset credential lifecycle execution requires runtime-owned method dispatch.
+    CredentialLifecycleExecutionRequiresRuntimeMethodDispatch,
+    /// Non-reset credential lifecycle cancellation requires runtime-owned lifecycle loading.
+    CredentialLifecycleCancellationRequiresRuntimeLifecycleDecision,
     /// Out-of-band proof completion must use the challenge-response runtime path.
     OutOfBandActiveProofCompletionRequiresChallengeResponse,
     /// A verified proof carried a subject even though its family cannot resolve subjects.
@@ -141,8 +151,18 @@ pub enum Error {
         /// Proof family that was rejected.
         family: ProofFamily,
     },
+    /// A proof family requiring credential or authority provenance did not carry it.
+    ProofFamilyRequiresVerifiedProofSource {
+        /// Proof family that was rejected.
+        family: ProofFamily,
+    },
     /// A proof stack is individually valid but insufficient for the requested transition.
     SatisfiedProofStackCannotSatisfyUse {
+        /// Requested transition use.
+        proof_use: ProofUse,
+    },
+    /// A proof stack matched required methods but lacked known distinct proof sources.
+    ProofStackRequiresKnownDistinctProofSources {
         /// Requested transition use.
         proof_use: ProofUse,
     },
@@ -155,6 +175,26 @@ pub enum Error {
     InvalidConfig(&'static str),
     /// A transition required fresh random material that was not supplied.
     MissingFreshValue(&'static str),
+    /// A delayed credential lifecycle action had impossible timing.
+    InvalidCredentialLifecyclePendingActionTiming,
+    /// A credential lifecycle transition was not authorized by loaded policy.
+    CredentialLifecycleActionNotAuthorized,
+    /// Credential reset execution requires method-owned verifier mutation work.
+    CredentialResetExecutionMissingMethodCommitWork,
+    /// Credential reset execution method work did not match the target credential.
+    CredentialResetExecutionMethodCommitWorkTargetMismatch,
+    /// A non-reset pending credential lifecycle command was given reset action state.
+    NonResetPendingCredentialLifecycleActionCannotBeReset,
+    /// Credential lifecycle execution requires method-owned work for this action.
+    CredentialLifecycleExecutionMissingMethodCommitWork,
+    /// Credential lifecycle execution method work did not match the target credential.
+    CredentialLifecycleExecutionMethodCommitWorkTargetMismatch,
+    /// Credential lifecycle execution was given method work for a core-only action.
+    CredentialLifecycleExecutionUnexpectedMethodCommitWork,
+    /// A pending credential lifecycle action was not executable at the transition time.
+    PendingCredentialLifecycleActionNotExecutable,
+    /// A pending credential lifecycle action was not open for cancellation.
+    PendingCredentialLifecycleActionNotCancellable,
     /// Fresh random material could not be generated.
     FreshRandomMaterialUnavailable,
     /// Credential secrets must not be empty.
@@ -169,6 +209,10 @@ pub enum Error {
     EmptyActiveProofMethodResponsePayload,
     /// Known-subject active-proof secret responses must not be empty.
     EmptyKnownSubjectActiveProofSecretResponse,
+    /// Credential reset method payloads must not be empty.
+    EmptyCredentialResetMethodPayload,
+    /// Credential lifecycle method payloads must not be empty.
+    EmptyCredentialLifecycleMethodPayload,
     /// Active-proof challenge fast-fail nonces must be exactly 32 bytes.
     InvalidActiveProofChallengeFastFailNonceLength {
         /// Actual byte length.
@@ -496,6 +540,36 @@ impl fmt::Display for Error {
                     "auth core: unbound active-proof attempt start requires runtime-owned method challenge issue"
                 )
             }
+            Self::CredentialResetPlanningRequiresRuntimeLifecycleDecision => {
+                write!(
+                    f,
+                    "auth core: credential reset planning requires runtime-owned lifecycle decision"
+                )
+            }
+            Self::CredentialResetExecutionRequiresRuntimeMethodDispatch => {
+                write!(
+                    f,
+                    "auth core: credential reset execution requires runtime-owned method dispatch"
+                )
+            }
+            Self::CredentialResetCancellationRequiresRuntimeLifecycleDecision => {
+                write!(
+                    f,
+                    "auth core: credential reset cancellation requires runtime-owned lifecycle decision"
+                )
+            }
+            Self::CredentialLifecycleExecutionRequiresRuntimeMethodDispatch => {
+                write!(
+                    f,
+                    "auth core: credential lifecycle execution requires runtime-owned method dispatch"
+                )
+            }
+            Self::CredentialLifecycleCancellationRequiresRuntimeLifecycleDecision => {
+                write!(
+                    f,
+                    "auth core: credential lifecycle cancellation requires runtime-owned lifecycle decision"
+                )
+            }
             Self::OutOfBandActiveProofCompletionRequiresChallengeResponse => {
                 write!(
                     f,
@@ -506,9 +580,17 @@ impl fmt::Display for Error {
                 f,
                 "auth core: proof family {family:?} cannot carry a verified subject"
             ),
+            Self::ProofFamilyRequiresVerifiedProofSource { family } => write!(
+                f,
+                "auth core: proof family {family:?} requires verified proof source provenance"
+            ),
             Self::SatisfiedProofStackCannotSatisfyUse { proof_use } => write!(
                 f,
                 "auth core: satisfied proof stack cannot satisfy use {proof_use:?}"
+            ),
+            Self::ProofStackRequiresKnownDistinctProofSources { proof_use } => write!(
+                f,
+                "auth core: proof stack for use {proof_use:?} requires known distinct proof sources"
             ),
             Self::ActiveProofUseCannotBeSatisfiedByActiveProof { proof_use } => write!(
                 f,
@@ -517,6 +599,66 @@ impl fmt::Display for Error {
             Self::InvalidConfig(message) => write!(f, "auth core: invalid config: {message}"),
             Self::MissingFreshValue(label) => {
                 write!(f, "auth core: missing fresh value: {label}")
+            }
+            Self::InvalidCredentialLifecyclePendingActionTiming => {
+                write!(
+                    f,
+                    "auth core: credential lifecycle pending action timing is invalid"
+                )
+            }
+            Self::CredentialLifecycleActionNotAuthorized => {
+                write!(
+                    f,
+                    "auth core: credential lifecycle action is not authorized"
+                )
+            }
+            Self::CredentialResetExecutionMissingMethodCommitWork => {
+                write!(
+                    f,
+                    "auth core: credential reset execution is missing method commit work"
+                )
+            }
+            Self::CredentialResetExecutionMethodCommitWorkTargetMismatch => {
+                write!(
+                    f,
+                    "auth core: credential reset execution method commit work does not match the target credential"
+                )
+            }
+            Self::NonResetPendingCredentialLifecycleActionCannotBeReset => {
+                write!(
+                    f,
+                    "auth core: non-reset pending credential lifecycle action cannot be reset"
+                )
+            }
+            Self::CredentialLifecycleExecutionMissingMethodCommitWork => {
+                write!(
+                    f,
+                    "auth core: credential lifecycle execution is missing required method commit work"
+                )
+            }
+            Self::CredentialLifecycleExecutionMethodCommitWorkTargetMismatch => {
+                write!(
+                    f,
+                    "auth core: credential lifecycle execution method commit work does not match the target credential"
+                )
+            }
+            Self::CredentialLifecycleExecutionUnexpectedMethodCommitWork => {
+                write!(
+                    f,
+                    "auth core: credential lifecycle execution has unexpected method commit work"
+                )
+            }
+            Self::PendingCredentialLifecycleActionNotExecutable => {
+                write!(
+                    f,
+                    "auth core: pending credential lifecycle action is not executable"
+                )
+            }
+            Self::PendingCredentialLifecycleActionNotCancellable => {
+                write!(
+                    f,
+                    "auth core: pending credential lifecycle action is not cancellable"
+                )
             }
             Self::FreshRandomMaterialUnavailable => {
                 write!(f, "auth core: fresh random material unavailable")
@@ -548,6 +690,12 @@ impl fmt::Display for Error {
                     f,
                     "auth core: known-subject active-proof secret response is empty"
                 )
+            }
+            Self::EmptyCredentialResetMethodPayload => {
+                write!(f, "auth core: credential reset method payload is empty")
+            }
+            Self::EmptyCredentialLifecycleMethodPayload => {
+                write!(f, "auth core: credential lifecycle method payload is empty")
             }
             Self::InvalidActiveProofChallengeFastFailNonceLength { actual } => {
                 write!(

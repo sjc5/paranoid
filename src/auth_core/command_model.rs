@@ -46,6 +46,18 @@ pub enum Command {
     RevokeTrustedDevice(RevokeTrustedDevice),
     /// Invalidate all auth state created at or before this timestamp for one subject.
     RevokeSubjectAuthState(RevokeSubjectAuthState),
+    /// Plan a credential reset from loaded lifecycle authority policy.
+    PlanCredentialReset(PlanCredentialReset),
+    /// Execute an authorized credential reset and atomically apply method-owned verifier work.
+    ExecuteCredentialReset(ExecuteCredentialReset),
+    /// Cancel an open delayed credential reset action.
+    CancelPendingCredentialReset(CancelPendingCredentialReset),
+    /// Execute a delayed non-reset credential lifecycle action.
+    ExecuteNonResetPendingCredentialLifecycleAction(
+        ExecuteNonResetPendingCredentialLifecycleAction,
+    ),
+    /// Cancel an open delayed non-reset credential lifecycle action.
+    CancelNonResetPendingCredentialLifecycleAction(CancelNonResetPendingCredentialLifecycleAction),
 }
 
 impl Command {
@@ -68,6 +80,11 @@ impl Command {
             Self::RevokeSession(command) => command.now,
             Self::RevokeTrustedDevice(command) => command.now,
             Self::RevokeSubjectAuthState(command) => command.now,
+            Self::PlanCredentialReset(command) => command.now,
+            Self::ExecuteCredentialReset(command) => command.now,
+            Self::CancelPendingCredentialReset(command) => command.now,
+            Self::ExecuteNonResetPendingCredentialLifecycleAction(command) => command.now,
+            Self::CancelNonResetPendingCredentialLifecycleAction(command) => command.now,
         }
     }
 }
@@ -206,4 +223,272 @@ pub struct RevokeSubjectAuthState {
     pub subject_id: SubjectId,
     /// Revocation reason.
     pub reason: RevocationReason,
+}
+
+/// Credential reset planning command.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PlanCredentialReset {
+    /// Server time for this transition.
+    pub now: UnixSeconds,
+    /// Loaded lifecycle-policy context for the target credential.
+    pub lifecycle_context: CredentialLifecycleActionContext,
+    /// Active-proof attempt consumed by this reset plan, if planning used a recovery proof.
+    pub active_proof_attempt_to_close: Option<ActiveProofAttemptRecord>,
+    /// Whether immediate reset requires an independent proof source.
+    pub independent_evidence_required: CredentialLifecycleIndependentEvidenceRequirement,
+    /// Pending-action schedule to use if policy requires delayed execution.
+    pub pending_action: Option<PendingCredentialLifecycleActionSchedule>,
+    /// Existing auth-state revocation policy for the immediate-reset branch.
+    pub immediate_subject_auth_revocation: CredentialResetSubjectAuthRevocation,
+}
+
+/// Fresh pending-action material supplied by the runtime for delayed credential reset.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PendingCredentialLifecycleActionSchedule {
+    /// Fresh pending action id.
+    pub pending_action_id: PendingCredentialLifecycleActionId,
+    /// Earliest time this delayed action may execute.
+    pub earliest_execute_at: UnixSeconds,
+    /// Last time this delayed action remains executable.
+    pub expires_at: UnixSeconds,
+}
+
+/// Delayed credential reset timing supplied to a runtime facade.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CredentialResetPendingActionTiming {
+    /// Earliest time this delayed action may execute.
+    pub earliest_execute_at: UnixSeconds,
+    /// Last time this delayed action remains executable.
+    pub expires_at: UnixSeconds,
+}
+
+/// Credential reset execution command.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ExecuteCredentialReset {
+    /// Server time for this transition.
+    pub now: UnixSeconds,
+    /// Authority that allows this reset to execute.
+    pub execution_authority: CredentialResetExecutionAuthority,
+    /// Method/plugin work that mutates the target credential verifier.
+    pub method_commit_work: Vec<MethodCommitWork>,
+    /// Existing auth-state revocation policy after the reset executes.
+    pub subject_auth_revocation: CredentialResetSubjectAuthRevocation,
+}
+
+/// Authority source for executing a credential reset.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum CredentialResetExecutionAuthority {
+    /// The current ceremony has immediate lifecycle authority.
+    Immediate {
+        /// Loaded lifecycle-policy context for the target credential.
+        lifecycle_context: CredentialLifecycleActionContext,
+        /// Whether immediate reset requires an independent proof source.
+        independent_evidence_required: CredentialLifecycleIndependentEvidenceRequirement,
+    },
+    /// A previously scheduled pending action has matured.
+    MaturePendingAction {
+        /// Loaded target credential metadata.
+        target_credential: CredentialInstanceMetadata,
+        /// Loaded pending action row.
+        pending_action: PendingCredentialLifecycleActionRecord,
+    },
+}
+
+/// Method-specific credential reset payload supplied to a registered method plugin.
+#[derive(Clone, Eq, PartialEq)]
+pub struct CredentialResetMethodPayload(Vec<u8>);
+
+impl CredentialResetMethodPayload {
+    /// Creates a bounded opaque reset payload.
+    pub fn try_from_bytes(bytes: impl Into<Vec<u8>>) -> Result<Self, Error> {
+        Ok(Self(bounded_non_empty_method_payload_bytes(
+            "credential reset method payload",
+            bytes.into(),
+            Error::EmptyCredentialResetMethodPayload,
+        )?))
+    }
+
+    /// Returns the opaque reset payload bytes.
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+impl std::fmt::Debug for CredentialResetMethodPayload {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CredentialResetMethodPayload").finish()
+    }
+}
+
+/// Method-specific payload supplied to a registered plugin for delayed lifecycle execution.
+#[derive(Clone, Eq, PartialEq)]
+pub struct CredentialLifecycleMethodPayload(Vec<u8>);
+
+impl CredentialLifecycleMethodPayload {
+    /// Creates a bounded opaque lifecycle payload.
+    pub fn try_from_bytes(bytes: impl Into<Vec<u8>>) -> Result<Self, Error> {
+        Ok(Self(bounded_non_empty_method_payload_bytes(
+            "credential lifecycle method payload",
+            bytes.into(),
+            Error::EmptyCredentialLifecycleMethodPayload,
+        )?))
+    }
+
+    /// Returns the opaque lifecycle payload bytes.
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+impl std::fmt::Debug for CredentialLifecycleMethodPayload {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CredentialLifecycleMethodPayload").finish()
+    }
+}
+
+fn bounded_non_empty_method_payload_bytes(
+    label: &'static str,
+    bytes: Vec<u8>,
+    empty_error: Error,
+) -> Result<Vec<u8>, Error> {
+    if bytes.is_empty() {
+        return Err(empty_error);
+    }
+    validate_auth_bytes_not_too_long(label, &bytes, METHOD_COMMIT_PAYLOAD_MAX_BYTES)?;
+    Ok(bytes)
+}
+
+/// Runtime-facing authenticated credential reset execution input.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ExecuteAuthenticatedCredentialResetInput {
+    /// Server time for this transition.
+    pub now: UnixSeconds,
+    /// Credential instance to reset.
+    pub target_credential_instance_id: VerifiedProofSourceId,
+    /// Method-specific reset payload.
+    pub method_payload: CredentialResetMethodPayload,
+    /// Whether immediate reset requires an independent proof source.
+    pub independent_evidence_required: CredentialLifecycleIndependentEvidenceRequirement,
+    /// Existing auth-state revocation policy after the reset executes.
+    pub subject_auth_revocation: CredentialResetSubjectAuthRevocation,
+}
+
+/// Runtime-facing authenticated credential reset planning input.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PlanAuthenticatedCredentialResetInput {
+    /// Server time for this transition.
+    pub now: UnixSeconds,
+    /// Credential instance to reset.
+    pub target_credential_instance_id: VerifiedProofSourceId,
+    /// Whether immediate reset requires an independent proof source.
+    pub independent_evidence_required: CredentialLifecycleIndependentEvidenceRequirement,
+    /// Delayed-action timing to use if lifecycle policy requires delayed execution.
+    pub pending_action_timing: Option<CredentialResetPendingActionTiming>,
+    /// Existing auth-state revocation policy for the immediate-reset branch.
+    pub immediate_subject_auth_revocation: CredentialResetSubjectAuthRevocation,
+}
+
+/// Runtime-facing unauthenticated credential reset planning input.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PlanUnauthenticatedCredentialResetInput {
+    /// Server time for this transition.
+    pub now: UnixSeconds,
+    /// Credential instance to reset.
+    pub target_credential_instance_id: VerifiedProofSourceId,
+    /// Whether immediate reset requires an independent proof source.
+    pub independent_evidence_required: CredentialLifecycleIndependentEvidenceRequirement,
+    /// Delayed-action timing to use if lifecycle policy requires delayed execution.
+    pub pending_action_timing: Option<CredentialResetPendingActionTiming>,
+    /// Existing auth-state revocation policy for the immediate-reset branch.
+    pub immediate_subject_auth_revocation: CredentialResetSubjectAuthRevocation,
+}
+
+/// Runtime-facing matured pending credential reset execution input.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ExecuteMaturePendingCredentialResetInput {
+    /// Server time for this transition.
+    pub now: UnixSeconds,
+    /// Pending action to execute.
+    pub pending_action_id: PendingCredentialLifecycleActionId,
+    /// Method-specific reset payload.
+    pub method_payload: CredentialResetMethodPayload,
+    /// Existing auth-state revocation policy after the reset executes.
+    pub subject_auth_revocation: CredentialResetSubjectAuthRevocation,
+}
+
+/// Pending credential reset cancellation command.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CancelPendingCredentialReset {
+    /// Server time for this transition.
+    pub now: UnixSeconds,
+    /// Loaded target credential metadata.
+    pub target_credential: CredentialInstanceMetadata,
+    /// Loaded pending action row to close.
+    pub pending_action: PendingCredentialLifecycleActionRecord,
+}
+
+/// Runtime-facing authenticated pending credential reset cancellation input.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CancelAuthenticatedPendingCredentialResetInput {
+    /// Server time for this transition.
+    pub now: UnixSeconds,
+    /// Pending action to cancel.
+    pub pending_action_id: PendingCredentialLifecycleActionId,
+}
+
+/// Whether executing a credential lifecycle action should revoke existing auth state.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum CredentialLifecycleSubjectAuthRevocation {
+    /// Existing sessions/devices stay live after the lifecycle action.
+    PreserveExistingAuthState,
+    /// Existing sessions/devices are invalidated by subject-wide auth-state revocation.
+    RevokeSubjectAuthState,
+}
+
+/// Delayed non-reset credential lifecycle action execution command.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ExecuteNonResetPendingCredentialLifecycleAction {
+    /// Server time for this transition.
+    pub now: UnixSeconds,
+    /// Loaded target credential metadata.
+    pub target_credential: CredentialInstanceMetadata,
+    /// Loaded pending action row.
+    pub pending_action: PendingCredentialLifecycleActionRecord,
+    /// Method/plugin work required by replacement or regeneration actions.
+    pub method_commit_work: Vec<MethodCommitWork>,
+    /// Auth-state revocation policy after the action executes.
+    pub subject_auth_revocation: CredentialLifecycleSubjectAuthRevocation,
+}
+
+/// Delayed non-reset credential lifecycle action cancellation command.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CancelNonResetPendingCredentialLifecycleAction {
+    /// Server time for this transition.
+    pub now: UnixSeconds,
+    /// Loaded target credential metadata.
+    pub target_credential: CredentialInstanceMetadata,
+    /// Loaded pending action row to close.
+    pub pending_action: PendingCredentialLifecycleActionRecord,
+}
+
+/// Runtime-facing matured pending credential lifecycle execution input.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ExecuteMaturePendingCredentialLifecycleActionInput {
+    /// Server time for this transition.
+    pub now: UnixSeconds,
+    /// Pending action to execute.
+    pub pending_action_id: PendingCredentialLifecycleActionId,
+    /// Method-specific payload for replacement or regeneration actions.
+    pub method_payload: Option<CredentialLifecycleMethodPayload>,
+    /// Auth-state revocation policy after the action executes.
+    pub subject_auth_revocation: CredentialLifecycleSubjectAuthRevocation,
+}
+
+/// Runtime-facing authenticated pending credential lifecycle cancellation input.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CancelAuthenticatedPendingCredentialLifecycleActionInput {
+    /// Server time for this transition.
+    pub now: UnixSeconds,
+    /// Pending action to cancel.
+    pub pending_action_id: PendingCredentialLifecycleActionId,
 }

@@ -31,6 +31,10 @@ fn core_storage_schema_contract_names_reducer_owned_record_families() {
             CoreStorageRecordKind::ActiveProofContinuationSecret,
             CoreStorageRecordKind::ActiveProofChallenge,
             CoreStorageRecordKind::SubjectAuthState,
+            CoreStorageRecordKind::CredentialInstance,
+            CoreStorageRecordKind::CredentialRecoveryAuthority,
+            CoreStorageRecordKind::LifecycleAuthoritySource,
+            CoreStorageRecordKind::PendingCredentialLifecycleAction,
             CoreStorageRecordKind::AuditEvent,
             CoreStorageRecordKind::CoreDurableEffectCommand,
         ]
@@ -52,6 +56,10 @@ fn postgres_schema_contract_names_table_families() {
             PostgresAuthCoreTable::ActiveProofChallenge,
             PostgresAuthCoreTable::ActiveProofChallengeDeliveryKey,
             PostgresAuthCoreTable::SubjectAuthState,
+            PostgresAuthCoreTable::CredentialInstance,
+            PostgresAuthCoreTable::CredentialRecoveryAuthority,
+            PostgresAuthCoreTable::LifecycleAuthoritySource,
+            PostgresAuthCoreTable::PendingCredentialLifecycleAction,
             PostgresAuthCoreTable::AuditEvent,
             PostgresAuthCoreTable::CoreDurableEffectCommand,
         ]
@@ -63,6 +71,14 @@ fn postgres_schema_contract_names_table_families() {
     assert_eq!(
         PostgresAuthCoreTable::ActiveProofChallengeDeliveryKey.default_suffix(),
         "auth_active_proof_challenge_delivery_keys"
+    );
+    assert_eq!(
+        PostgresAuthCoreTable::CredentialInstance.default_suffix(),
+        "auth_credential_instances"
+    );
+    assert_eq!(
+        PostgresAuthCoreTable::PendingCredentialLifecycleAction.default_suffix(),
+        "auth_credential_lifecycle_pending_actions"
     );
 }
 
@@ -243,6 +259,21 @@ fn postgres_schema_contract_maps_storage_targets_to_table_families() {
         ),
         PostgresAuthCoreTable::ActiveProofChallenge,
     );
+    assert_eq!(
+        PostgresAuthCoreSchemaContract::table_for_storage_target(
+            &CoreStorageTarget::CredentialInstance(id("credential"))
+        ),
+        PostgresAuthCoreTable::CredentialInstance,
+    );
+    assert_eq!(
+        PostgresAuthCoreSchemaContract::table_for_storage_target(
+            &CoreStorageTarget::OpenPendingCredentialLifecycleActionForTarget {
+                target_credential_instance_id: id("credential"),
+                action: CredentialLifecycleAction::Reset,
+            }
+        ),
+        PostgresAuthCoreTable::PendingCredentialLifecycleAction,
+    );
 }
 
 #[test]
@@ -279,6 +310,58 @@ fn postgres_schema_contract_pins_uniqueness_for_open_challenges_and_child_rows()
             .expect("satisfied proof primary key")
             .columns(),
         &["attempt_id", "proof_family"]
+    );
+
+    let recovery_authority_table =
+        postgres_table(PostgresAuthCoreTable::CredentialRecoveryAuthority);
+    assert_eq!(
+        recovery_authority_table
+            .uniqueness()
+            .iter()
+            .find(|constraint| constraint.name() == "primary_key")
+            .expect("recovery authority primary key")
+            .columns(),
+        &[
+            "target_credential_instance_id",
+            "lifecycle_action",
+            "authority_id",
+            "authority_timing"
+        ]
+    );
+
+    let lifecycle_authority_source_table =
+        postgres_table(PostgresAuthCoreTable::LifecycleAuthoritySource);
+    assert_eq!(
+        lifecycle_authority_source_table
+            .uniqueness()
+            .iter()
+            .find(|constraint| constraint.name() == "primary_key")
+            .expect("lifecycle authority source primary key")
+            .columns(),
+        &["source_kind", "source_id", "authority_id"]
+    );
+
+    let pending_lifecycle_action_table =
+        postgres_table(PostgresAuthCoreTable::PendingCredentialLifecycleAction);
+    assert_eq!(
+        pending_lifecycle_action_table
+            .uniqueness()
+            .iter()
+            .find(|constraint| constraint.name() == "primary_key")
+            .expect("pending action primary key")
+            .columns(),
+        &["pending_action_id"]
+    );
+    assert!(
+        pending_lifecycle_action_table
+            .uniqueness()
+            .iter()
+            .any(
+                |constraint| constraint.name() == "credential_lifecycle_open_pending_action"
+                    && constraint.columns()
+                        == ["target_credential_instance_id", "lifecycle_action"]
+                    && constraint.predicate() == Some(PostgresUniquePredicate::OpenRow)
+            )
     );
 }
 
@@ -399,6 +482,129 @@ fn postgres_precondition_execution_uses_unique_index_for_open_challenge_dedupe()
 }
 
 #[test]
+fn postgres_precondition_execution_guards_credential_reset_target_and_pending_uniqueness() {
+    let target_guard = PostgresPreconditionExecutionContract::for_precondition(
+        &Precondition::CredentialInstanceStillActive {
+            credential_instance_id: id("credential"),
+            subject_id: id("subject"),
+        },
+    );
+    assert_eq!(
+        target_guard.kind(),
+        CorePreconditionKind::CredentialInstanceStillActive
+    );
+    assert_eq!(
+        target_guard.lock_steps(),
+        &[PostgresPreconditionLockStep::SelectExistingRowForUpdate {
+            target: CoreStorageTarget::CredentialInstance(id("credential")),
+            table: PostgresAuthCoreTable::CredentialInstance,
+        }]
+    );
+    assert_eq!(
+        target_guard.validation_steps(),
+        &[
+            PostgresPreconditionValidationStep::CredentialInstanceStillActiveWithSubject {
+                subject_id: id("subject"),
+            }
+        ]
+    );
+
+    let pending_guard = PostgresPreconditionExecutionContract::for_precondition(
+        &Precondition::NoOpenPendingCredentialLifecycleActionForTarget {
+            target_credential_instance_id: id("credential"),
+            action: CredentialLifecycleAction::Reset,
+            now: at(100),
+        },
+    );
+    assert_eq!(
+        pending_guard.kind(),
+        CorePreconditionKind::NoOpenPendingCredentialLifecycleActionForTarget
+    );
+    assert_eq!(
+        pending_guard.lock_steps(),
+        &[
+            PostgresPreconditionLockStep::UseOpenPendingCredentialLifecycleActionUniqueIndex {
+                target_credential_instance_id: id("credential"),
+                action: CredentialLifecycleAction::Reset,
+            }
+        ]
+    );
+    assert_eq!(
+        pending_guard.validation_steps(),
+        &[
+            PostgresPreconditionValidationStep::CloseExpiredOpenPendingCredentialLifecycleActionsBeforeUniquenessCheck {
+                now: at(100),
+            },
+            PostgresPreconditionValidationStep::TreatOpenPendingCredentialLifecycleActionUniqueViolationAsPreconditionFailure,
+        ]
+    );
+
+    let pending_execution_guard = PostgresPreconditionExecutionContract::for_precondition(
+        &Precondition::PendingCredentialLifecycleActionStillExecutable {
+            pending_action_id: id("pending-reset"),
+            subject_id: id("subject"),
+            target_credential_instance_id: id("credential"),
+            action: CredentialLifecycleAction::Reset,
+            now: at(250),
+        },
+    );
+    assert_eq!(
+        pending_execution_guard.kind(),
+        CorePreconditionKind::PendingCredentialLifecycleActionStillExecutable
+    );
+    assert_eq!(
+        pending_execution_guard.lock_steps(),
+        &[PostgresPreconditionLockStep::SelectExistingRowForUpdate {
+            target: CoreStorageTarget::PendingCredentialLifecycleAction(id("pending-reset")),
+            table: PostgresAuthCoreTable::PendingCredentialLifecycleAction,
+        }]
+    );
+    assert_eq!(
+        pending_execution_guard.validation_steps(),
+        &[
+            PostgresPreconditionValidationStep::PendingCredentialLifecycleActionOpenMatureUnexpiredAndTargetMatched {
+                subject_id: id("subject"),
+                target_credential_instance_id: id("credential"),
+                action: CredentialLifecycleAction::Reset,
+                now: at(250),
+            }
+        ]
+    );
+
+    let pending_cancellation_guard = PostgresPreconditionExecutionContract::for_precondition(
+        &Precondition::PendingCredentialLifecycleActionStillCancellableForTarget {
+            pending_action_id: id("pending-reset"),
+            subject_id: id("subject"),
+            target_credential_instance_id: id("credential"),
+            action: CredentialLifecycleAction::Reset,
+            now: at(250),
+        },
+    );
+    assert_eq!(
+        pending_cancellation_guard.kind(),
+        CorePreconditionKind::PendingCredentialLifecycleActionStillCancellableForTarget
+    );
+    assert_eq!(
+        pending_cancellation_guard.lock_steps(),
+        &[PostgresPreconditionLockStep::SelectExistingRowForUpdate {
+            target: CoreStorageTarget::PendingCredentialLifecycleAction(id("pending-reset")),
+            table: PostgresAuthCoreTable::PendingCredentialLifecycleAction,
+        }]
+    );
+    assert_eq!(
+        pending_cancellation_guard.validation_steps(),
+        &[
+            PostgresPreconditionValidationStep::PendingCredentialLifecycleActionOpenUnexpiredAndTargetMatched {
+                subject_id: id("subject"),
+                target_credential_instance_id: id("credential"),
+                action: CredentialLifecycleAction::Reset,
+                now: at(250),
+            }
+        ]
+    );
+}
+
+#[test]
 fn postgres_mutation_execution_distinguishes_locked_delete_and_monotonic_upsert() {
     let delete_attempt =
         PostgresMutationExecutionContract::for_mutation(&Mutation::DeleteActiveProofAttempt {
@@ -434,6 +640,106 @@ fn postgres_mutation_execution_distinguishes_locked_delete_and_monotonic_upsert(
         revoke_subject.write_step(),
         &PostgresMutationWriteStep::MonotonicUpsertSubjectAuthRevocationCutoff {
             subject_id: id("subject"),
+        }
+    );
+
+    let authorize_reset = PostgresMutationExecutionContract::for_mutation(
+        &Mutation::RecordCredentialLifecycleActionAuthorized {
+            target_credential_instance_id: id("credential"),
+            action: CredentialLifecycleAction::Reset,
+            authorized_at: at(100),
+        },
+    );
+    assert_eq!(
+        authorize_reset.kind(),
+        CoreMutationKind::RecordCredentialLifecycleActionAuthorized
+    );
+    assert_eq!(
+        authorize_reset.write_step(),
+        &PostgresMutationWriteStep::UpdatePreviouslyLockedRow {
+            target: CoreStorageTarget::CredentialInstance(id("credential")),
+            table: PostgresAuthCoreTable::CredentialInstance,
+        }
+    );
+
+    let create_pending = PostgresMutationExecutionContract::for_mutation(
+        &Mutation::CreatePendingCredentialLifecycleAction(
+            PendingCredentialLifecycleActionRecord::new_open(
+                id("pending-reset"),
+                id("subject"),
+                id("credential"),
+                CredentialLifecycleAction::Reset,
+                at(100),
+                at(200),
+                at(300),
+            )
+            .expect("pending action"),
+        ),
+    );
+    assert_eq!(
+        create_pending.kind(),
+        CoreMutationKind::CreatePendingCredentialLifecycleAction
+    );
+    assert_eq!(
+        create_pending.write_step(),
+        &PostgresMutationWriteStep::InsertUniqueRow {
+            target: CoreStorageTarget::PendingCredentialLifecycleAction(id("pending-reset")),
+            table: PostgresAuthCoreTable::PendingCredentialLifecycleAction,
+        }
+    );
+
+    let execute_reset = PostgresMutationExecutionContract::for_mutation(
+        &Mutation::RecordCredentialLifecycleActionExecuted {
+            target_credential_instance_id: id("credential"),
+            action: CredentialLifecycleAction::Reset,
+            executed_at: at(250),
+        },
+    );
+    assert_eq!(
+        execute_reset.kind(),
+        CoreMutationKind::RecordCredentialLifecycleActionExecuted
+    );
+    assert_eq!(
+        execute_reset.write_step(),
+        &PostgresMutationWriteStep::UpdatePreviouslyLockedRow {
+            target: CoreStorageTarget::CredentialInstance(id("credential")),
+            table: PostgresAuthCoreTable::CredentialInstance,
+        }
+    );
+
+    let set_lifecycle_state =
+        PostgresMutationExecutionContract::for_mutation(&Mutation::SetCredentialLifecycleState {
+            credential_instance_id: id("credential"),
+            lifecycle_state: CredentialLifecycleState::Superseded,
+            updated_at: at(250),
+        });
+    assert_eq!(
+        set_lifecycle_state.kind(),
+        CoreMutationKind::SetCredentialLifecycleState
+    );
+    assert_eq!(
+        set_lifecycle_state.write_step(),
+        &PostgresMutationWriteStep::UpdatePreviouslyLockedRow {
+            target: CoreStorageTarget::CredentialInstance(id("credential")),
+            table: PostgresAuthCoreTable::CredentialInstance,
+        }
+    );
+
+    let close_pending = PostgresMutationExecutionContract::for_mutation(
+        &Mutation::ClosePendingCredentialLifecycleAction {
+            pending_action_id: id("pending-reset"),
+            closed_at: at(250),
+        },
+    );
+    assert_eq!(
+        close_pending.kind(),
+        CoreMutationKind::ClosePendingCredentialLifecycleAction
+    );
+    assert_eq!(
+        close_pending.write_step(),
+        &PostgresMutationWriteStep::UpdatePreviouslyLockedRow {
+            target: CoreStorageTarget::PendingCredentialLifecycleAction(id("pending-reset")),
+            table: PostgresAuthCoreTable::PendingCredentialLifecycleAction,
         }
     );
 }
@@ -753,6 +1059,103 @@ fn out_of_band_dedupe_precondition_requires_uniqueness_not_absent_row_locking() 
 }
 
 #[test]
+fn credential_lifecycle_preconditions_lock_target_and_enforce_pending_uniqueness() {
+    let target_guard = CorePreconditionStorageContract::for_precondition(
+        &Precondition::CredentialInstanceStillActive {
+            credential_instance_id: id("credential"),
+            subject_id: id("subject"),
+        },
+    );
+    assert_eq!(
+        target_guard.kind(),
+        CorePreconditionKind::CredentialInstanceStillActive
+    );
+    assert_eq!(
+        target_guard.lock_requirements(),
+        &[StorageLockRequirement::LockExistingRowForUpdate(
+            CoreStorageTarget::CredentialInstance(id("credential")),
+        )]
+    );
+    assert_eq!(
+        target_guard.validation_requirements(),
+        &[StorageValidationRequirement::CredentialInstanceStillActive]
+    );
+
+    let pending_guard = CorePreconditionStorageContract::for_precondition(
+        &Precondition::NoOpenPendingCredentialLifecycleActionForTarget {
+            target_credential_instance_id: id("credential"),
+            action: CredentialLifecycleAction::Reset,
+            now: at(100),
+        },
+    );
+    assert_eq!(
+        pending_guard.kind(),
+        CorePreconditionKind::NoOpenPendingCredentialLifecycleActionForTarget
+    );
+    assert_eq!(
+        pending_guard.lock_requirements(),
+        &[
+            StorageLockRequirement::EnforceOpenPendingCredentialLifecycleActionUniqueness {
+                target_credential_instance_id: id("credential"),
+                action: CredentialLifecycleAction::Reset,
+            }
+        ]
+    );
+    assert_eq!(
+        pending_guard.validation_requirements(),
+        &[StorageValidationRequirement::NoOpenPendingCredentialLifecycleActionForTarget]
+    );
+
+    let pending_execution_guard = CorePreconditionStorageContract::for_precondition(
+        &Precondition::PendingCredentialLifecycleActionStillExecutable {
+            pending_action_id: id("pending-reset"),
+            subject_id: id("subject"),
+            target_credential_instance_id: id("credential"),
+            action: CredentialLifecycleAction::Reset,
+            now: at(250),
+        },
+    );
+    assert_eq!(
+        pending_execution_guard.kind(),
+        CorePreconditionKind::PendingCredentialLifecycleActionStillExecutable
+    );
+    assert_eq!(
+        pending_execution_guard.lock_requirements(),
+        &[StorageLockRequirement::LockExistingRowForUpdate(
+            CoreStorageTarget::PendingCredentialLifecycleAction(id("pending-reset"))
+        )]
+    );
+    assert_eq!(
+        pending_execution_guard.validation_requirements(),
+        &[StorageValidationRequirement::PendingCredentialLifecycleActionStillExecutable]
+    );
+
+    let pending_cancellation_guard = CorePreconditionStorageContract::for_precondition(
+        &Precondition::PendingCredentialLifecycleActionStillCancellableForTarget {
+            pending_action_id: id("pending-reset"),
+            subject_id: id("subject"),
+            target_credential_instance_id: id("credential"),
+            action: CredentialLifecycleAction::Reset,
+            now: at(250),
+        },
+    );
+    assert_eq!(
+        pending_cancellation_guard.kind(),
+        CorePreconditionKind::PendingCredentialLifecycleActionStillCancellableForTarget
+    );
+    assert_eq!(
+        pending_cancellation_guard.lock_requirements(),
+        &[StorageLockRequirement::LockExistingRowForUpdate(
+            CoreStorageTarget::PendingCredentialLifecycleAction(id("pending-reset"))
+        )]
+    );
+    assert_eq!(
+        pending_cancellation_guard.validation_requirements(),
+        &[StorageValidationRequirement::PendingCredentialLifecycleActionStillCancellableForTarget]
+    );
+}
+
+#[test]
 fn active_proof_attempt_precondition_locks_subject_auth_state_only_when_subject_known() {
     let without_subject = CorePreconditionStorageContract::for_precondition(
         &Precondition::ActiveProofAttemptStillOpen {
@@ -853,6 +1256,84 @@ fn mutation_storage_contract_distinguishes_updates_hard_deletes_and_monotonic_up
         &StorageWriteRequirement::MonotonicUpsertSubjectAuthRevocationCutoff {
             subject_id: id("subject"),
         }
+    );
+
+    let authorize_reset = CoreMutationStorageContract::for_mutation(
+        &Mutation::RecordCredentialLifecycleActionAuthorized {
+            target_credential_instance_id: id("credential"),
+            action: CredentialLifecycleAction::Reset,
+            authorized_at: at(100),
+        },
+    );
+    assert_eq!(
+        authorize_reset.kind(),
+        CoreMutationKind::RecordCredentialLifecycleActionAuthorized
+    );
+    assert_eq!(
+        authorize_reset.write_requirement(),
+        &StorageWriteRequirement::UpdateLockedRow(CoreStorageTarget::CredentialInstance(id(
+            "credential"
+        )))
+    );
+
+    let create_pending = CoreMutationStorageContract::for_mutation(
+        &Mutation::CreatePendingCredentialLifecycleAction(
+            PendingCredentialLifecycleActionRecord::new_open(
+                id("pending-reset"),
+                id("subject"),
+                id("credential"),
+                CredentialLifecycleAction::Reset,
+                at(100),
+                at(200),
+                at(300),
+            )
+            .expect("pending action"),
+        ),
+    );
+    assert_eq!(
+        create_pending.kind(),
+        CoreMutationKind::CreatePendingCredentialLifecycleAction
+    );
+    assert_eq!(
+        create_pending.write_requirement(),
+        &StorageWriteRequirement::InsertUnique(
+            CoreStorageTarget::PendingCredentialLifecycleAction(id("pending-reset"))
+        )
+    );
+
+    let execute_reset = CoreMutationStorageContract::for_mutation(
+        &Mutation::RecordCredentialLifecycleActionExecuted {
+            target_credential_instance_id: id("credential"),
+            action: CredentialLifecycleAction::Reset,
+            executed_at: at(250),
+        },
+    );
+    assert_eq!(
+        execute_reset.kind(),
+        CoreMutationKind::RecordCredentialLifecycleActionExecuted
+    );
+    assert_eq!(
+        execute_reset.write_requirement(),
+        &StorageWriteRequirement::UpdateLockedRow(CoreStorageTarget::CredentialInstance(id(
+            "credential"
+        )))
+    );
+
+    let close_pending = CoreMutationStorageContract::for_mutation(
+        &Mutation::ClosePendingCredentialLifecycleAction {
+            pending_action_id: id("pending-reset"),
+            closed_at: at(250),
+        },
+    );
+    assert_eq!(
+        close_pending.kind(),
+        CoreMutationKind::ClosePendingCredentialLifecycleAction
+    );
+    assert_eq!(
+        close_pending.write_requirement(),
+        &StorageWriteRequirement::UpdateLockedRow(
+            CoreStorageTarget::PendingCredentialLifecycleAction(id("pending-reset"))
+        )
     );
 }
 

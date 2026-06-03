@@ -64,4 +64,24 @@ pub struct SecurityNotificationCommand {
 pub enum SecurityNotificationKind {
     /// A trusted-device credential was created.
     TrustedDeviceCreated,
+    /// A credential reset was authorized for immediate execution.
+    CredentialResetAuthorized,
+    /// A delayed credential reset action was scheduled.
+    CredentialResetPendingActionScheduled,
+    /// A credential reset was executed.
+    CredentialResetExecuted,
+    /// A delayed credential reset action was cancelled.
+    CredentialResetPendingActionCancelled,
+    /// A delayed credential replacement action was executed.
+    CredentialReplacementExecuted,
+    /// A delayed credential replacement action was cancelled.
+    CredentialReplacementPendingActionCancelled,
+    /// A delayed credential removal action was executed.
+    CredentialRemovalExecuted,
+    /// A delayed credential removal action was cancelled.
+    CredentialRemovalPendingActionCancelled,
+    /// A delayed credential-set regeneration action was executed.
+    CredentialRegenerationExecuted,
+    /// A delayed credential-set regeneration action was cancelled.
+    CredentialRegenerationPendingActionCancelled,
 }

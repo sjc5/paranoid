@@ -44,6 +44,16 @@ impl Config {
                 "session_refresh_window must be shorter than short_session_lifetime",
             ));
         }
+        if self.stale_secret_grace_lifetime.is_zero() {
+            return Err(Error::InvalidConfig(
+                "stale_secret_grace_lifetime must be non-zero",
+            ));
+        }
+        if self.stale_secret_grace_lifetime >= self.session_refresh_window {
+            return Err(Error::InvalidConfig(
+                "stale_secret_grace_lifetime must be shorter than session_refresh_window",
+            ));
+        }
         if self.trusted_device_silent_revival_lifetime.is_zero() {
             return Err(Error::InvalidConfig(
                 "trusted_device_silent_revival_lifetime must be non-zero",
@@ -52,6 +62,11 @@ impl Config {
         if self.trusted_device_credential_lifetime.is_zero() {
             return Err(Error::InvalidConfig(
                 "trusted_device_credential_lifetime must be non-zero",
+            ));
+        }
+        if self.stale_secret_grace_lifetime >= self.trusted_device_credential_lifetime {
+            return Err(Error::InvalidConfig(
+                "stale_secret_grace_lifetime must be shorter than trusted_device_credential_lifetime",
             ));
         }
         if self.step_up_lifetime.is_zero() {

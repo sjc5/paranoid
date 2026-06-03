@@ -17,29 +17,45 @@ pub fn test_database_url_from_env(env_names: &[&str]) -> Option<String> {
     })
 }
 
-fn required_test_database_url_from_env(env_names: &[&str]) -> String {
+fn required_test_env_value(env_names: &[&str]) -> String {
     test_database_url_from_env(env_names).unwrap_or_else(|| {
         panic!(
-            "required Postgres test database URL missing; set one of: {}",
+            "required Postgres test environment value missing; set one of: {}",
             env_names.join(", ")
         )
     })
 }
 
 pub fn standard_test_database_url() -> String {
-    required_test_database_url_from_env(&["TEST_DSN", "PARANOID_TEST_DATABASE_URL"])
+    required_test_env_value(&["TEST_DSN", "PARANOID_TEST_DATABASE_URL"])
 }
 
 pub fn queue_test_database_url() -> String {
-    required_test_database_url_from_env(&[
+    required_test_env_value(&[
         "TEST_DATABASE_URL",
         "TEST_DSN",
         "PARANOID_TEST_DATABASE_URL",
     ])
 }
 
-pub fn direct_test_database_url() -> String {
-    required_test_database_url_from_env(&["TEST_DSN_DIRECT", "PARANOID_TEST_DATABASE_DIRECT_URL"])
+pub fn non_bypass_test_database_url() -> String {
+    required_test_env_value(&["PARANOID_TEST_NON_BYPASS_DATABASE_URL"])
+}
+
+pub fn non_bypass_test_role_name() -> String {
+    required_test_env_value(&["PARANOID_TEST_NON_BYPASS_ROLE"])
+}
+
+pub fn read_only_test_database_url() -> String {
+    required_test_env_value(&["PARANOID_TEST_READ_ONLY_DATABASE_URL"])
+}
+
+pub fn read_only_test_role_name() -> String {
+    required_test_env_value(&["PARANOID_TEST_READ_ONLY_ROLE"])
+}
+
+pub fn statement_timeout_test_database_url() -> String {
+    required_test_env_value(&["PARANOID_TEST_STATEMENT_TIMEOUT_DATABASE_URL"])
 }
 
 pub async fn connect_sqlx_pool_for_harness(

@@ -163,7 +163,8 @@ The intended shape is:
 1. Starting an attempt creates an attempt row and a fresh continuation secret.
 2. Storage stores only a MAC of that continuation secret.
 3. The response sets an encrypted active-proof continuation cookie carrying attempt id,
-   proof use, deadline, and the fresh secret.
+   proof use, optional subject id for already subject-bound attempts, deadline, and the
+   fresh secret.
 4. Challenge issue, configured-secret completion, full-authentication completion, step-up
    completion, and trusted-device active revival derive the attempt id from this cookie.
 5. The runtime can reject an expired or malformed continuation cookie before DB.
@@ -191,6 +192,56 @@ The lifecycle model preserves the `7.txt` intent:
 - DB state accepts, refreshes, revives, and revokes;
 - trusted-device revival is separate from session refresh;
 - subject-wide revocation must be checked before stateful success.
+
+The previous-secret grace window is a concurrency grace only. It must be configured as a
+short bounded race window, not as a second refresh lifetime. Active sessions refresh only
+inside the configured refresh window. Requests before that window may reissue a
+safe-read-capable cookie after authoritative validation, but they must not rotate session
+secrets, cycle CSRF, or write session refresh state. Stale previous secrets are accepted
+only through authoritative state while inside the grace deadline. Once the grace deadline
+has passed, a structurally valid cookie for an otherwise live record trips the mismatch
+policy instead of silently extending the old credential.
+
+### Tripwire Policy
+
+Paranoid's live model uses rotating credential secrets with MACs stored in authoritative
+state. Session and trusted-device cookies carry an id, secret, and secret version.
+Authoritative storage classifies the presented secret as:
+
+- current;
+- previous within the configured concurrency grace window;
+- previous after that grace window;
+- unknown.
+
+This is a deliberate hardening beyond the older strict version-counter sketch. It keeps
+database rows from becoming bearer credentials and lets sessions, trusted devices, and
+active-proof continuation credentials share the same possession-proof shape.
+
+Tripwire is not generic cookie rejection. Missing cookies, malformed encrypted cookies,
+expired cookie ceilings, missing records, expired records, and already-revoked records are
+rejected or cleared without tripwire. Those requests cannot produce access from that
+credential.
+
+Tripwire applies only when a request presents a structurally valid Paranoid cookie for an
+otherwise live authoritative session or trusted-device record, but the presented
+credential secret is no longer acceptable:
+
+- previous after grace;
+- unknown.
+
+For a session tripwire, Paranoid revokes that session record with
+`RevocationReason::Tripwire`, clears the session cookie, audits the mismatch and
+revocation, and cycles CSRF. If that session is associated with a trusted-device
+credential, Paranoid also revokes that trusted-device credential and clears the
+trusted-device cookie because the browser/device context has evidence of compromise.
+
+For a trusted-device tripwire, Paranoid revokes that trusted-device credential with
+`RevocationReason::Tripwire`, clears the trusted-device cookie, and audits the mismatch
+and revocation.
+
+Tripwire does not perform subject-wide mass logout by default. That preserves the original
+"kill the compromised session" spirit while extending it to the associated device token
+when there is evidence that browser/device context is compromised.
 
 ## Proof Policy Model
 
@@ -262,6 +313,33 @@ The core should not use additive proof scores. Scores hide why a proof stack is 
 make incoherent mixes look acceptable. Policies should be transition-specific proof-stack
 requirements inside a core-validated vocabulary.
 
+## Public Alpha Method Set
+
+Public alpha should include these first-party methods and lifecycle primitives:
+
+- email OTP as the first out-of-band code method;
+- password-derived message signature as the first message-signature method;
+- trusted-device lifecycle;
+- TOTP as the first shared-secret OTP method;
+- recovery codes as the first one-time recovery credential method.
+
+TOTP alpha includes both lanes:
+
+- direct known-subject TOTP, where another credential or active proof has already fixed
+  the subject and the weak gate is the only pre-state rejection gate;
+- challenge-bound TOTP Bloom fast-fail, where the runtime issues an encrypted challenge
+  cookie containing a Bloom filter that can reject definite non-matches before DB work.
+
+The Bloom lane fits the core thesis: false positives are acceptable because they only
+continue to authoritative verification, while false negatives are not acceptable. The
+implementation must therefore test no-false-negative behavior for the encoded challenge
+window and must budget cookie size explicitly.
+
+WebAuthn/passkeys, OIDC, SAML, SMS OTP, postal out-of-band codes, and concrete
+blockchain/wallet signature plugins are post-alpha method scopes unless a later product
+decision moves one into alpha. The proof families and plugin contracts should still leave
+room for them.
+
 Non-overridable safety rules include:
 
 - a passive trusted-device proof cannot satisfy step-up by itself;
@@ -309,6 +387,15 @@ Examples:
 
 - If a password-derived signature credential can be reset by email OTP alone, then
   password plus that same email OTP is not two independent factors for high-risk recovery.
+- If a password-derived signature credential can be reset through email alone with no
+  independent second factor and no waiting period, then password auth is effectively a
+  convenience bypass for email OTP. It should not be counted as an independent factor from
+  that email path.
+- Password reset by email-only recovery can be immediate only when the subject has no
+  stronger independent credentials. If the subject does have stronger independent
+  credentials but presents only email control, reset must become a delayed pending action.
+  The exact delay is configurable policy, but the delay itself is part of preserving
+  factor independence and account availability.
 - If TOTP can be reset by an active session alone, then TOTP should not be treated as a
   durable second factor against session theft for the reset transition.
 - If a support/admin action can replace a factor without a waiting period or user-visible
@@ -319,6 +406,40 @@ Examples:
 - If recovery codes are generated only after a strong authenticated ceremony and consumed
   one time, they can be an independent recovery credential, but they must not also be
   resettable by the weak factor they are meant to rescue.
+
+### Password Reset Non-Degradation
+
+Password reset policy must preserve the subject's current effective authentication
+strength. It is not enough to ask whether email can reset a password in isolation. The
+policy must ask what credentials the subject already has and whether the reset ceremony
+would downgrade that subject.
+
+If the subject has only one effective factor, such as email OTP, then immediate email-only
+password reset does not weaken the account. Paranoid would already allow that subject to
+authenticate with email OTP alone. In that case a password-derived signature is a
+convenience credential over the same recovery authority, not an independent second factor.
+
+If the subject has independent active credentials, immediate email-only password reset
+does weaken the account. Examples of independent credentials for this transition include a
+valid trusted-device credential, TOTP, recovery code, SMS OTP when configured as a second
+factor, passkey/WebAuthn credential, or another accepted independent proof source. The
+exact accepted set is transition policy, but the invariant is fixed: a subject with
+stronger configured auth should not be instantly downgraded by clicking "reset password"
+from an untrusted environment and proving only email control.
+
+For those stronger subjects, password reset must either:
+
+- include an accepted independent proof, such as a valid trusted-device credential, TOTP,
+  recovery code, or configured second factor; or
+- become a delayed pending action with durable notice, cancellation policy, expiration,
+  and atomic execution preconditions.
+
+A trusted-device credential can count as independent possession evidence for password
+reset non-degradation when it is valid, unrevoked, and accepted by the transition policy.
+That does not imply a passive trusted-device proof can satisfy step-up or destructive
+actions by itself. Each transition decides what the credential is allowed to do, but reset
+policy must not pretend trusted-device possession is irrelevant when it is part of the
+subject's current effective auth strength.
 
 This suggests a second policy layer alongside `ProofPolicy`:
 
@@ -366,8 +487,10 @@ One possible model is a small dependency graph:
   it;
 - each proof used in a lifecycle transition references the credential instance or external
   authority that produced it;
-- policy evaluation rejects proof stacks whose effective recovery authorities overlap when
-  independence is required;
+- proof-stack policy rejects source-less or same-source multi-proof stacks when known
+  distinct sources are required;
+- lifecycle policy rejects proof stacks whose effective recovery authorities overlap when
+  deeper independence is required;
 - policies can intentionally allow non-independent proofs for lower-risk transitions, but
   the allowance must be explicit in the transition policy.
 
@@ -401,6 +524,218 @@ work, durable effects, active-proof attempts, and satisfied-proof source provena
 is not enough. It is scaffolding for a credential lifecycle policy layer that still needs
 explicit design and tests.
 
+The first concrete credential metadata foothold is `CredentialInstanceMetadata`. It
+represents app-owned credential instances only:
+
+- message-signature verifiers;
+- shared-secret OTP verifiers such as TOTP;
+- origin-bound public-key credentials such as WebAuthn/passkeys;
+- recovery-code credentials;
+- trusted-device credentials.
+
+Out-of-band identifiers and federated identity authorities remain distinct proof-source
+kinds, not credential instances. That separation matters because email ownership and OIDC
+authority can participate in recovery policy, but they must not be silently treated as the
+same kind of app-owned credential as a TOTP secret or passkey credential.
+
+Credential-instance metadata currently records subject id, credential-instance id,
+credential kind, method label, and lifecycle state. Only `Active` credential instances may
+produce new proofs. Pending, consumed, revoked, expired, superseded, scheduled, or
+admin-suspended credentials are metadata the policy may inspect, not proof sources the
+runtime may accept as fresh proof producers.
+
+Recovery-authority metadata is modeled with effective `RecoveryAuthorityId`s. A recovery
+authority id is not a proof-source id and not a credential id. It represents one effective
+authority that can recover or mutate credentials. Multiple distinct proof sources can
+share one recovery authority id when they depend on the same upstream control. For
+example, an email OTP proof source and an OIDC provider proof source can be different raw
+proof sources while both representing the same Google Workspace authority for lifecycle
+policy.
+
+Lifecycle authority evidence can currently come from:
+
+- a satisfied proof source;
+- a live authenticated session;
+- a Paranoid-shaped admin/support intervention.
+
+Each evidence source carries one or more effective recovery authority ids. Two evidence
+sources are lifecycle-independent only when their effective recovery-authority id sets are
+disjoint. This is stricter than proof-stack source distinctness. Distinct raw proof
+sources are not enough when they collapse to the same upstream recovery authority.
+
+Each target credential lifecycle action can declare which effective recovery authorities
+can perform it and whether that authority is immediate or delayed. Immediate authorities
+collapse factor independence for that target/action. Delayed authorities do not count as
+immediate reset authority, which preserves the password-reset non-degradation model:
+email-only reset can be allowed as a delayed pending action for stronger subjects without
+pretending email is an immediate independent second factor.
+
+Current lifecycle actions modeled for recovery-authority metadata are:
+
+- create credential;
+- reset credential;
+- replace credential;
+- remove credential;
+- disable credential;
+- regenerate credential set;
+- recover subject access.
+
+This metadata supports the first factor-collapse checks:
+
+- a password resettable immediately by email is not independent from that email proof;
+- a trusted-device credential can remain independent from email-only password reset when
+  it has a separate recovery authority;
+- a TOTP credential resettable by session alone is not independent from that session for
+  the reset transition;
+- recovery-code regeneration by email is not independent from that email proof;
+- passkey removal by session alone is not independent from that session;
+- OIDC and email proofs sharing the same upstream authority are not lifecycle-independent
+  despite being distinct proof sources;
+- immediate admin/support intervention is an explicit recovery authority, not an invisible
+  side door.
+
+The production Postgres core now has first-class reducer-owned storage for this metadata:
+
+- credential-instance rows store subject id, credential-instance id, credential kind,
+  method label, and lifecycle state;
+- credential recovery-authority rows store target credential id, lifecycle action,
+  effective recovery authority id, and whether the authority is immediate or delayed;
+- lifecycle authority-source rows map verified proof sources, authenticated sessions, and
+  admin/support interventions to effective recovery authority ids;
+- pending credential-lifecycle action rows store subject id, target credential id,
+  lifecycle action, requested-at, earliest-execute-at, expires-at, and closed-at.
+
+The current concrete lifecycle decision boundary is intentionally narrow. Given a target
+credential and already verified lifecycle evidence, the Postgres store can load the
+credential metadata, recovery-authority graph, and authority-source bindings inside the
+current transaction and evaluate a lifecycle action. The decision distinguishes:
+
+- immediate authorization;
+- delayed-action requirement because configured authority is delayed-only;
+- delayed-action requirement because the only authorizing evidence would collapse factor
+  independence;
+- rejection because the target is inactive, absent, or not authorized by the graph.
+
+The first concrete credential reset planning and execution transitions now consume this
+boundary. Planning either:
+
+- commits immediate reset authorization, optional subject auth-state revocation, audit,
+  and a durable security notice; or
+- creates one delayed pending reset action guarded by target-credential liveness and
+  open-pending-action uniqueness, with audit and durable notice committed in the same
+  transaction.
+
+Execution accepts either an immediate lifecycle-authorized context or one matured pending
+reset action. It requires method/plugin commit work for the target credential family and
+method, locks the target credential, locks the pending action when one is being consumed,
+applies method-owned verifier mutation work in the same atomic commit, closes the pending
+action when applicable, records execution, optionally raises subject auth-state
+revocation, and schedules an execution security notice.
+
+The Postgres runtime now protects the planning and execution boundaries from
+application-shaped shortcuts. The general web runtime rejects direct credential-reset
+planning and execution commands. Authenticated reset planning derives the live session and
+lifecycle authority inside the runtime, loads the target credential lifecycle decision in
+the transaction, and generates any pending-action id internally. Unauthenticated recovery
+planning derives lifecycle evidence from a validated `RecoverOrReplaceCredential`
+active-proof attempt, verifies that the attempt subject matches the target credential,
+generates any pending-action id internally, and closes that active-proof attempt in the
+same commit as the reset plan. Authenticated reset execution derives the live session and
+lifecycle authority inside the runtime, loads the target credential lifecycle decision in
+the transaction, and asks the registered method plugin to build method-owned reset work
+for the target credential. Matured pending reset execution loads the pending action and
+target credential inside the transaction, verifies that the pending action is still
+executable during commit, and asks the registered method plugin to build the method-owned
+reset work. Applications do not pass `method_commit_work`, pending-action authority,
+satisfied lifecycle authority facts, or preassembled reset planning/execution commands
+through these facades.
+
+This is still only the first credential-reset execution boundary. Public mounted reset
+facades, concrete password/TOTP/recovery-code reset method implementations,
+add/remove/replace credential scheduling, deletion waits, Postgres runtime facades for
+non-reset pending actions, and admin/support intervention are not built. Future password
+reset, TOTP reset, recovery-code regeneration, and pending-action commands should consume
+this boundary instead of reimplementing factor-collapse checks.
+
+Credential-reset pending-action cancellation now exists as a separate lifecycle
+transition. The runtime derives the cancelling subject from a live authenticated session,
+loads the pending action and target credential inside the transaction, verifies the
+pending action belongs to that subject, and then asks the reducer to close only an open
+and unexpired pending reset action for that exact target/action. Commit-time preconditions
+lock the target credential and prove the pending action is still open, unexpired, and
+target-matched before the close mutation, cancellation audit event, and cancellation
+security notice commit.
+
+Credential-reset pending-action expiry is deadline-derived, not a separate positive auth
+decision. Once `now >= expires_at`, the pending reset cannot execute or be cancelled as a
+user-visible cancellation. Expired rows may still have `closed_at IS NULL` until a
+maintenance path touches them, but they are semantically expired immediately by time.
+Storage preconditions that schedule a new pending reset quietly close expired open rows
+for the same target/action before enforcing open-action uniqueness. That quiet cleanup
+does not enqueue a cancellation notice or create a user-facing cancellation outcome.
+
+The shared pending-action semantics are no longer reset-only. Credential-targeted delayed
+actions have a common contract:
+
+- `Reset`, `Replace`, `Remove`, and `Regenerate` can be credential-targeted pending
+  actions.
+- `Reset`, `Replace`, and `Regenerate` require method-owned credential mutation work at
+  execution.
+- `Remove` is primarily a core credential lifecycle-state mutation; method-owned cleanup
+  can be layered on later, but proof production must already be blocked by core credential
+  metadata.
+- `Replace` supersedes the target credential on execution.
+- `Remove` revokes or removes the target credential from proof production on execution.
+- All credential-targeted pending actions share the same cancellation and expiry shape:
+  explicit cancellation is only for open, unexpired actions and emits cancellation
+  audit/notice; expiry is deadline-derived and quiet cleanup may close expired rows
+  without producing a cancellation outcome or notice.
+- Subject-wide auth-state revocation is not implicit for credential-targeted pending
+  execution. Each concrete transition must choose and record its revocation policy.
+
+The reducer now has concrete non-reset pending-action execution and cancellation commands
+for credential-targeted `Replace`, `Remove`, and `Regenerate` actions. These commands are
+still lower-core WIP commands, not mounted application APIs. The generic web runtime
+rejects direct calls to them. Their current contracts are:
+
+- replacement execution locks the pending action and target credential, requires
+  method-owned work matching the target credential family/method, closes the pending
+  action, records execution, marks the old target credential `Superseded`, optionally
+  raises subject auth-state revocation, and commits a replacement notice;
+- removal execution locks the pending action and target credential, forbids method-owned
+  work in the current contract, closes the pending action, records execution, marks the
+  target credential `Revoked`, optionally raises subject auth-state revocation, and
+  commits a removal notice;
+- regeneration execution locks the pending action and target credential, requires
+  method-owned work matching the target credential family/method, closes the pending
+  action, records execution, preserves the target credential lifecycle state, optionally
+  raises subject auth-state revocation, and commits a regeneration notice;
+- cancellation for these non-reset credential-targeted actions closes only open,
+  unexpired, target-matched pending actions and commits the action-specific cancellation
+  audit/notice.
+
+Concrete Postgres runtime facades now execute matured credential-targeted replacement,
+removal, and regeneration actions by loading the pending row and target credential inside
+the transaction. Replacement and regeneration ask the registered target-credential method
+plugin to construct method-owned mutation work from an opaque runtime input payload.
+Removal is core-owned and rejects method work. The same runtime boundary provides
+authenticated cancellation for open, unexpired non-reset credential-targeted actions.
+Applications still do not pass pending action records, target credential metadata,
+lifecycle authority facts, or method commit work.
+
+Delayed subject/account deletion is deliberately not forced into the credential-targeted
+pending-action row. It is a subject-targeted lifecycle action. Its pending action must
+target subject auth state, not a fake credential id. Execution of subject deletion
+requires subject-wide auth-state revocation semantics and app-facing deletion integration
+once the mounted runtime exists.
+
+"Second-factor reset" is also not a separate credential kind and must not be inferred from
+TOTP, WebAuthn, SMS, or any other plugin label. It is a lifecycle policy role over a
+credential reset transition. The same `Reset` pending-action contract can represent a
+password reset, TOTP reset, passkey reset, or other verifier reset; policy decides whether
+the target credential is acting as a second factor and therefore which delay, proof,
+notice, and revocation requirements apply.
+
 ## Fast-Fail Transition Matrix
 
 This matrix is the design checklist for every auth transition. The goal is not merely to
@@ -408,38 +743,77 @@ use fast-fail where it falls out naturally. The goal is to actively search for s
 protocol shapes where impossible or abusive requests can be rejected before authoritative
 storage work.
 
-| Transition                                                           | Pre-state rejection gate                                                                                                                                 | Sealed or presented state                                                                                                             | Authoritative work after gate                                                                                                             | Current live shape                                                                                                                                 |
-| -------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Safe read with fresh safe-read cache                                 | Encrypted session cookie deadline rejects expired cache without DB.                                                                                      | Session cookie carries session id, secret, hard session ceiling, and bounded safe-read deadline.                                      | None for accepted safe reads; state-changing and sensitive requests still load state.                                                     | Modeled and covered by request-resolution/load-contract tests.                                                                                     |
-| Session resolution after cache miss or unsafe request                | Cookie expiry ceilings reject impossible sessions before session lookup.                                                                                 | Session cookie carries id and secret; storage keeps MACs and version state.                                                           | Load session, classify secret, check revocation, refresh window, step-up freshness, and subject-wide revocation.                          | Modeled in reducer, Postgres runtime, and request-resolution tests.                                                                                |
-| Trusted-device silent revival                                        | Trusted-device cookie expiry and silent-revival deadline reject impossible passive revival before DB.                                                    | Trusted-device cookie carries credential id, secret, hard credential ceiling, and silent-revival ceiling.                             | Load credential, classify secret, check revocation, create session, rotate device credential.                                             | Modeled in reducer, Postgres runtime, and lifecycle tests.                                                                                         |
-| Start step-up active-proof attempt                                   | Session cookie expiry rejects impossible step-up starts before DB.                                                                                       | Session cookie supplies the current subject/session context; caller supplies no subject id.                                           | Load session and subject revocation, validate session secret, create subject-bound attempt and continuation credential.                   | Runtime has current-session start facades; generic and Postgres tests prove missing sessions do not write and valid starts derive subject.         |
-| Start trusted-device active-revival proof attempt                    | Trusted-device cookie expiry rejects impossible active-revival starts before DB.                                                                         | Trusted-device cookie supplies the subject/device context; caller supplies no subject id.                                             | Load device credential and subject revocation, validate device secret, create subject-bound attempt and continuation credential.          | Postgres lifecycle coverage starts active revival from the validated trusted-device cookie rather than a caller-supplied subject.                  |
-| Trusted-device active revival                                        | Trusted-device cookie expiry and active-proof continuation cookie deadline/secret can reject impossible revival before DB.                               | Trusted-device cookie supplies known subject/device context; active-proof continuation cookie supplies attempt id plus secret.        | Validate device record and active-proof attempt, then issue a session and rotate device credential after proof-stack policy passes.       | Postgres runtime derives the attempt id from the continuation cookie and covers active revival through PgBouncer-backed tests.                     |
-| Start unauthenticated active-proof attempt and issue first challenge | Runtime-owned weak gate can reject write-amplifying challenge starts before attempt/challenge writes.                                                    | Challenge issue request names intended proof use and method; no app-supplied proof verification facts are accepted.                   | Commit attempt start and challenge issue atomically, including continuation credential, method work, and durable delivery command.        | Postgres runtime has fused start-and-issue paths with preflight verification and continuation-cookie response materialization.                     |
-| Issue out-of-band challenge on an existing attempt                   | Active-proof continuation cookie deadline/secret rejects impossible challenge issue before attempt load; no caller may preassemble the fast-fail cookie. | Continuation cookie carries attempt id plus secret; encrypted challenge cookie carries challenge id, proof summary, nonce, and MAC.   | Load attempt and subject revocation, enforce dedupe/open-attempt preconditions, store challenge, enqueue delivery.                        | Runtime derives the attempt id from the continuation cookie; Postgres method registry supplies generated response-secret material and method work. |
-| Resend out-of-band challenge                                         | Encrypted challenge cookie must validate as an unexpired out-of-band ceremony before any DB load.                                                        | Same challenge cookie identifies the existing attempt and challenge; caller supplies only a fresh delivery idempotency key.           | Load attempt/challenge, enforce open challenge and resend budget, append delivery work.                                                   | Postgres runtime validates cookie before loading state and obtains method work from the registry.                                                  |
-| Complete out-of-band challenge                                       | Wrong submitted response rejects by MAC from the encrypted challenge cookie before any DB load.                                                          | Encrypted cookie carries response MAC and challenge context; submitted response is secret material.                                   | Load attempt/challenge and subject revocation, resolve subject through method state, close challenge, consume method state, record proof. | Postgres runtime verifies MAC first, then resolves subject and method work through the registry inside the post-gate transaction.                  |
-| Issue message-signature challenge                                    | Runtime-issued nonce and method-sealed verifier/context must be generated during challenge issue; any necessary lookup belongs here, not on completion.  | Encrypted challenge cookie carries nonce and method state such as canonical-message hash or sealed verifier material.                 | Store any method challenge state only through method commit work if needed.                                                               | Runtime supports active-method challenge issue; concrete password-derived signature plugin is not built.                                           |
-| Complete message-signature challenge                                 | Signature over the bound challenge should reject before DB when verifier material was sealed at issue time.                                              | Encrypted cookie carries proof summary, nonce, deadline, and method challenge state.                                                  | After signature success, load attempt/challenge and authoritative verifier/version state before accepting proof.                          | Test plugins cover pre-state proof verification plus optional authoritative confirmation; first-party signature methods are not built.             |
-| Issue origin-bound public-key challenge                              | Runtime-issued challenge, origin/RP context, and credential lookup context are sealed before completion.                                                 | Encrypted cookie carries nonce, origin/RP binding, credential/challenge state, and deadline.                                          | Authoritative credential state must still validate credential status, subject mapping, and replay/sign-count rules.                       | Contract and test-plugin paths exist; mature WebAuthn/passkey plugin is not built.                                                                 |
-| Complete origin-bound public-key challenge                           | Assertion structure, origin/RP binding, and signed challenge can reject before DB when sealed challenge state is sufficient.                             | Encrypted cookie carries proof identity and method challenge state.                                                                   | Load attempt/challenge and authoritative credential state before accepting proof or mutating counters.                                    | Test-plugin paths cover the family shape; concrete WebAuthn/passkey implementation is not built.                                                   |
-| Issue federated-identity challenge                                   | Runtime-generated state/nonce/redirect binding rejects mismatched callbacks before subject mapping.                                                      | Encrypted state cookie carries issuer, audience/client, redirect binding, nonce, state, deadline, and provider context.               | Authoritative issuer config, external subject mapping, and account-link policy still gate success.                                        | Contract and test-plugin paths exist; concrete OIDC/SAML implementation is not built.                                                              |
-| Complete federated-identity assertion                                | Invalid state, nonce, issuer, audience, or assertion signature can reject before local account mapping.                                                  | Encrypted state cookie binds the callback to the initiated ceremony.                                                                  | Load attempt/challenge and authoritative mapping/linking state before accepting proof.                                                    | Test-plugin paths cover the family shape; concrete OIDC/SAML implementation is not built.                                                          |
-| Direct known-subject TOTP                                            | Weak gate rejects before DB; direct code verification cannot reject wrong TOTP before fetching the subject verifier.                                     | Existing session, trusted device, or prior proof supplies the subject-bound attempt.                                                  | Load attempt and subject verifier, verify code, record success or weak failure.                                                           | Postgres TOTP plugin implements direct known-subject verification; no Bloom challenge lane is wired.                                               |
-| Challenge-bound TOTP                                                 | Encrypted challenge cookie plus Bloom filter can reject definite non-matches before DB; weak gate must also pass before state load.                      | Encrypted cookie carries TOTP challenge context and Bloom bitset for the acceptable human window.                                     | Possible Bloom hits still load attempt, subject revocation, and authoritative verifier/replay state.                                      | Bloom primitive and adapter contract exist; runtime/plugin lane is not yet implemented.                                                            |
-| Recovery code                                                        | Shape validation and future code-id/prefix gates should reject malformed or impossible codes before expensive lookup.                                    | Existing subject-bound attempt plus submitted one-time secret; future shape may include non-secret lookup prefix.                     | Lookup locked unused code, verify MAC, consume atomically with proof success.                                                             | Postgres recovery-code plugin consumes atomically; stronger pre-lookup fast-fail shape is not built.                                               |
-| Add credential                                                       | Existing session, step-up freshness, active-proof continuation, and challenge cookies reject impossible add requests before target credential work.      | Current session plus active proof stack identify subject and proposed credential context.                                             | Evaluate lifecycle policy, verify proof independence when required, create pending or active credential, enqueue notices.                 | Not built; lower core must preserve credential-instance ids and lifecycle metadata.                                                                |
-| Replace or reset credential                                          | Existing session/trusted-device/proof cookies and weak gates reject impossible reset ceremonies before target credential lookup where possible.          | Active proof stack plus target credential context.                                                                                    | Evaluate dependency graph, reject collapsed factors, enforce wait/admin/recovery-code rules, replace credential atomically.               | Not built; `RecoverOrReplaceCredential` is only scaffolding.                                                                                       |
-| Remove credential                                                    | Session and step-up material reject impossible remove requests before loading target credential when no live authority exists.                           | Current subject context plus target credential instance.                                                                              | Enforce last-credential and independence policy, mark removed/revoked, revoke sessions/devices when policy requires it.                   | Not built.                                                                                                                                         |
-| Schedule delayed deletion or reset                                   | Session/proof cookies and weak gates reject impossible schedule requests before writes.                                                                  | Subject context, requested action kind, target credential or subject, cancellation rules, and notice requirements.                    | Create durable pending-action record, enqueue notices, define earliest execution time and expiration.                                     | Not built.                                                                                                                                         |
-| Execute pending deletion or reset                                    | Pending-action id plus deadline can reject too-early or expired execution before broader state work.                                                     | Pending-action record identifies subject, action, target, earliest execution time, expiration, and required prior notices.            | Lock pending action and target state, enforce stale-action preconditions, execute mutation, revoke sessions/devices, audit.               | Not built.                                                                                                                                         |
-| Cancel pending deletion or reset                                     | Session/proof cookies and pending-action deadline can reject impossible cancellation before target mutation work.                                        | Subject context plus pending-action id.                                                                                               | Verify cancellation policy, close pending action, enqueue cancellation notice.                                                            | Not built.                                                                                                                                         |
-| Admin/support recovery intervention                                  | Runtime must reject unverified app claims; only a Paranoid-shaped verified intervention can reach stateful recovery work.                                | Verified admin/support authority, subject/credential target, configured wait/notice policy, and active proof if required.             | Audit intervention, create or execute pending action, enforce notices and revocation policy.                                              | Not built; must not become an app-owned side-door mutation.                                                                                        |
-| Complete full authentication                                         | Active-proof continuation cookie deadline and secret can reject impossible or stolen-id completions before loading the attempt.                          | Active-proof continuation cookie carries attempt id plus secret; attempt records carry satisfied proof summaries and subject binding. | Load attempt, validate proof-stack policy, check subject revocation, create session and optional trusted device.                          | Postgres runtime derives the attempt id from the continuation cookie and covers full-authentication completion through PgBouncer-backed tests.     |
-| Complete step-up                                                     | Fresh session cookie and active-proof continuation cookie deadlines can reject impossible completion before loading old session state.                   | Session cookie plus active-proof continuation cookie.                                                                                 | Load session and attempt, validate subject match and proof-stack policy, refresh step-up freshness.                                       | Postgres runtime derives the attempt id from the continuation cookie and covers step-up completion through PgBouncer-backed tests.                 |
-| Logout and targeted revocation                                       | Missing or expired cookies can avoid unnecessary state work when no live credential can be affected.                                                     | Presented session or trusted-device cookie identifies target context.                                                                 | Load and lock target credential when needed, mark revoked, clear cookies.                                                                 | Modeled in reducer and Postgres runtime tests.                                                                                                     |
-| Subject-wide revocation                                              | Caller must already have an authenticated subject context; no stateless material alone may revoke a subject.                                             | Authenticated session context identifies the subject.                                                                                 | Commit subject auth-state revocation and ensure older sessions/devices cannot succeed afterward.                                          | Modeled in reducer and Postgres runtime tests.                                                                                                     |
+| Transition                                                           | Pre-state rejection gate                                                                                                                                                     | Sealed or presented state                                                                                                             | Authoritative work after gate                                                                                                             | Current live shape                                                                                                                                                                                            |
+| -------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Safe read with fresh safe-read cache                                 | Encrypted session cookie deadline rejects expired cache without DB.                                                                                                          | Session cookie carries session id, secret, hard session ceiling, and bounded safe-read deadline.                                      | None for accepted safe reads; state-changing and sensitive requests still load state.                                                     | Modeled and covered by request-resolution/load-contract tests.                                                                                                                                                |
+| Session resolution after cache miss or unsafe request                | Cookie expiry ceilings reject impossible sessions before session lookup.                                                                                                     | Session cookie carries id and secret; storage keeps MACs and version state.                                                           | Load session, classify secret, check revocation, refresh window, step-up freshness, and subject-wide revocation.                          | Modeled in reducer, Postgres runtime, and request-resolution tests.                                                                                                                                           |
+| Trusted-device silent revival                                        | Trusted-device cookie expiry and silent-revival deadline reject impossible passive revival before DB.                                                                        | Trusted-device cookie carries credential id, secret, hard credential ceiling, and silent-revival ceiling.                             | Load credential, classify secret, check revocation, create session, rotate device credential.                                             | Modeled in reducer, Postgres runtime, and lifecycle tests.                                                                                                                                                    |
+| Start step-up active-proof attempt                                   | Session cookie expiry rejects impossible step-up starts before DB.                                                                                                           | Session cookie supplies the current subject/session context; caller supplies no subject id.                                           | Load session and subject revocation, validate session secret, create subject-bound attempt and continuation credential.                   | Runtime has current-session start facades; generic and Postgres tests prove missing sessions do not write and valid starts derive subject.                                                                    |
+| Start trusted-device active-revival proof attempt                    | Trusted-device cookie expiry rejects impossible active-revival starts before DB.                                                                                             | Trusted-device cookie supplies the subject/device context; caller supplies no subject id.                                             | Load device credential and subject revocation, validate device secret, create subject-bound attempt and continuation credential.          | Postgres lifecycle coverage starts active revival from the validated trusted-device cookie rather than a caller-supplied subject.                                                                             |
+| Trusted-device active revival                                        | Trusted-device cookie expiry and active-proof continuation cookie deadline/secret can reject impossible revival before DB.                                                   | Trusted-device cookie supplies known subject/device context; active-proof continuation cookie supplies attempt id plus secret.        | Validate device record and active-proof attempt, then issue a session and rotate device credential after proof-stack policy passes.       | Postgres runtime derives the attempt id from the continuation cookie and covers active revival through PgBouncer-backed tests.                                                                                |
+| Start unauthenticated active-proof attempt and issue first challenge | Runtime-owned weak gate can reject write-amplifying challenge starts before attempt/challenge writes.                                                                        | Challenge issue request names intended proof use and method; no app-supplied proof verification facts are accepted.                   | Commit attempt start and challenge issue atomically, including continuation credential, method work, and durable delivery command.        | Postgres runtime has fused start-and-issue paths with preflight verification and continuation-cookie response materialization.                                                                                |
+| Issue out-of-band challenge on an existing attempt                   | Active-proof continuation cookie deadline/secret rejects impossible challenge issue before attempt load; no caller may preassemble the fast-fail cookie.                     | Continuation cookie carries attempt id plus secret; encrypted challenge cookie carries challenge id, proof summary, nonce, and MAC.   | Load attempt and subject revocation, enforce dedupe/open-attempt preconditions, store challenge, enqueue delivery.                        | Runtime derives the attempt id from the continuation cookie; Postgres method registry supplies generated response-secret material and method work.                                                            |
+| Resend out-of-band challenge                                         | Encrypted challenge cookie must validate as an unexpired out-of-band ceremony before any DB load.                                                                            | Same challenge cookie identifies the existing attempt and challenge; caller supplies only a fresh delivery idempotency key.           | Load attempt/challenge, enforce open challenge and resend budget, append delivery work.                                                   | Postgres runtime validates cookie before loading state and obtains method work from the registry.                                                                                                             |
+| Complete out-of-band challenge                                       | Wrong submitted response rejects by MAC from the encrypted challenge cookie before any DB load.                                                                              | Encrypted cookie carries response MAC and challenge context; submitted response is secret material.                                   | Load attempt/challenge and subject revocation, resolve subject through method state, close challenge, consume method state, record proof. | Postgres runtime verifies MAC first, then resolves subject and method work through the registry inside the post-gate transaction.                                                                             |
+| Issue message-signature challenge                                    | Runtime-issued nonce and method-sealed verifier/context must be generated during challenge issue; any necessary lookup belongs here, not on completion.                      | Encrypted challenge cookie carries nonce and method state such as canonical-message hash or sealed verifier material.                 | Store any method challenge state only through method commit work if needed.                                                               | Runtime supports active-method challenge issue; concrete password-derived signature plugin is not built.                                                                                                      |
+| Complete message-signature challenge                                 | Signature over the bound challenge should reject before DB when verifier material was sealed at issue time.                                                                  | Encrypted cookie carries proof summary, nonce, deadline, and method challenge state.                                                  | After signature success, load attempt/challenge and authoritative verifier/version state before accepting proof.                          | Test plugins cover pre-state proof verification plus optional authoritative confirmation; first-party signature methods are not built.                                                                        |
+| Issue origin-bound public-key challenge                              | Runtime-issued challenge, origin/RP context, and credential lookup context are sealed before completion.                                                                     | Encrypted cookie carries nonce, origin/RP binding, credential/challenge state, and deadline.                                          | Authoritative credential state must still validate credential status, subject mapping, and replay/sign-count rules.                       | Contract and test-plugin paths exist; mature WebAuthn/passkey plugin is not built.                                                                                                                            |
+| Complete origin-bound public-key challenge                           | Assertion structure, origin/RP binding, and signed challenge can reject before DB when sealed challenge state is sufficient.                                                 | Encrypted cookie carries proof identity and method challenge state.                                                                   | Load attempt/challenge and authoritative credential state before accepting proof or mutating counters.                                    | Test-plugin paths cover the family shape; concrete WebAuthn/passkey implementation is not built.                                                                                                              |
+| Issue federated-identity challenge                                   | Runtime-generated state/nonce/redirect binding rejects mismatched callbacks before subject mapping.                                                                          | Encrypted state cookie carries issuer, audience/client, redirect binding, nonce, state, deadline, and provider context.               | Authoritative issuer config, external subject mapping, and account-link policy still gate success.                                        | Contract and test-plugin paths exist; concrete OIDC/SAML implementation is not built.                                                                                                                         |
+| Complete federated-identity assertion                                | Invalid state, nonce, issuer, audience, or assertion signature can reject before local account mapping.                                                                      | Encrypted state cookie binds the callback to the initiated ceremony.                                                                  | Load attempt/challenge and authoritative mapping/linking state before accepting proof.                                                    | Test-plugin paths cover the family shape; concrete OIDC/SAML implementation is not built.                                                                                                                     |
+| Direct known-subject TOTP                                            | Weak gate rejects before DB; direct code verification cannot reject wrong TOTP before fetching the subject verifier.                                                         | Existing session, trusted device, or prior proof supplies the subject-bound attempt.                                                  | Load attempt and subject verifier, verify code, record success or weak failure.                                                           | Postgres TOTP plugin implements direct known-subject verification; no Bloom challenge lane is wired.                                                                                                          |
+| Challenge-bound TOTP                                                 | Encrypted challenge cookie plus Bloom filter can reject definite non-matches before DB; weak gate must also pass before state load.                                          | Encrypted cookie carries TOTP challenge context and Bloom bitset for the acceptable human window.                                     | Possible Bloom hits still load attempt, subject revocation, and authoritative verifier/replay state.                                      | Bloom primitive and adapter contract exist; runtime/plugin lane is not yet implemented.                                                                                                                       |
+| Recovery code                                                        | Canonical base58 parsing plus AEAD decrypt/tag verification rejects malformed or guessed sealed codes before DB; known-subject flows also reject subject mismatch before DB. | Opaque sealed recovery code carries subject id plus random token; no public prefix or lookup id is exposed.                           | MAC the decrypted random token, lock the unused code row for that subject, and consume atomically with proof success.                     | Postgres recovery-code plugin consumes atomically; sealed-token parsing/decrypt and subject-mismatch rejection are covered before DB.                                                                         |
+| Add credential                                                       | Existing session, step-up freshness, active-proof continuation, and challenge cookies reject impossible add requests before target credential work.                          | Current session plus active proof stack identify subject and proposed credential context.                                             | Evaluate lifecycle policy, verify proof independence when required, create pending or active credential, enqueue notices.                 | Not built; lower core must preserve credential-instance ids and lifecycle metadata.                                                                                                                           |
+| Replace or reset credential                                          | Existing session/trusted-device/proof cookies and weak gates reject impossible reset ceremonies before target credential lookup where possible.                              | Active proof stack plus target credential context.                                                                                    | Evaluate dependency graph, reject collapsed factors, enforce wait/admin/recovery-code rules, replace credential atomically.               | Credential reset planning and execution boundary exist; concrete mounted reset flows and first-party method reset implementations are not built.                                                              |
+| Remove credential                                                    | Session and step-up material reject impossible remove requests before loading target credential when no live authority exists.                                               | Current subject context plus target credential instance.                                                                              | Enforce last-credential and independence policy, mark removed/revoked, revoke sessions/devices when policy requires it.                   | Not built.                                                                                                                                                                                                    |
+| Schedule delayed deletion or reset                                   | Session/proof cookies and weak gates reject impossible schedule requests before writes.                                                                                      | Subject context, requested action kind, target credential or subject, cancellation rules, and notice requirements.                    | Create durable pending-action record, enqueue notices, define earliest execution time and expiration.                                     | Delayed credential-reset scheduling exists; shared pending-action semantics cover reset, replacement, removal, regeneration, and subject deletion; concrete non-reset scheduling is not built.                |
+| Execute pending deletion or reset                                    | Pending-action id plus deadline can reject too-early or expired execution before broader state work.                                                                         | Pending-action record identifies subject, action, target, earliest execution time, expiration, and required prior notices.            | Lock pending action and target state, enforce stale-action preconditions, execute mutation, revoke sessions/devices, audit.               | Pending credential-reset execution boundary exists; lower-core non-reset credential-targeted execution exists for replace/remove/regenerate; deletion execution and Postgres non-reset facades are not built. |
+| Cancel pending deletion or reset                                     | Session/proof cookies can reject impossible cancellation before pending-action or target mutation work.                                                                      | Subject context plus pending-action id.                                                                                               | Verify cancellation policy, close unexpired pending action, enqueue cancellation notice.                                                  | Built for authenticated credential-reset pending actions; lower-core non-reset credential-targeted cancellation exists; deletion cancellation and Postgres non-reset facades are not built.                   |
+| Admin/support recovery intervention                                  | Runtime must reject unverified app claims; only a Paranoid-shaped verified intervention can reach stateful recovery work.                                                    | Verified admin/support authority, subject/credential target, configured wait/notice policy, and active proof if required.             | Audit intervention, create or execute pending action, enforce notices and revocation policy.                                              | Not built; must not become an app-owned side-door mutation.                                                                                                                                                   |
+| Complete full authentication                                         | Active-proof continuation cookie deadline and secret can reject impossible or stolen-id completions before loading the attempt.                                              | Active-proof continuation cookie carries attempt id plus secret; attempt records carry satisfied proof summaries and subject binding. | Load attempt, validate proof-stack policy, check subject revocation, create session and optional trusted device.                          | Postgres runtime derives the attempt id from the continuation cookie and covers full-authentication completion through PgBouncer-backed tests.                                                                |
+| Complete step-up                                                     | Fresh session cookie and active-proof continuation cookie deadlines can reject impossible completion before loading old session state.                                       | Session cookie plus active-proof continuation cookie.                                                                                 | Load session and attempt, validate subject match and proof-stack policy, refresh step-up freshness.                                       | Postgres runtime derives the attempt id from the continuation cookie and covers step-up completion through PgBouncer-backed tests.                                                                            |
+| Logout and targeted revocation                                       | Missing or expired cookies can avoid unnecessary state work when no live credential can be affected.                                                                         | Presented session or trusted-device cookie identifies target context.                                                                 | Load and lock target credential when needed, mark revoked, clear cookies.                                                                 | Modeled in reducer and Postgres runtime tests.                                                                                                                                                                |
+| Subject-wide revocation                                              | Caller must already have an authenticated subject context; no stateless material alone may revoke a subject.                                                                 | Authenticated session context identifies the subject.                                                                                 | Commit subject auth-state revocation and ensure older sessions/devices cannot succeed afterward.                                          | Modeled in reducer and Postgres runtime tests.                                                                                                                                                                |
+
+## Fast-Fail Audit Status
+
+This audit records the current live status of the matrix above. "Live and covered" means
+the current code and tests exercise the ordering claim. It does not mean every final
+operation-count test, first-party plugin, public API, or lifecycle policy is finished.
+
+| Transition                                                           | Audit result                                                                                                                                      | Evidence or remaining work                                                                                                                                                  |
+| -------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Safe read with fresh safe-read cache                                 | Live and covered at request-resolution/load-contract level.                                                                                       | Add final mounted-runtime operation-count coverage once the public request path exists.                                                                                     |
+| Session resolution after cache miss or unsafe request                | Live and covered at reducer, load-contract, and Postgres runtime level.                                                                           | Add final mounted-runtime tests proving expired/impossible cookies do not perform storage work.                                                                             |
+| Trusted-device silent revival                                        | Live and covered at reducer and Postgres runtime level.                                                                                           | Add final operation-count coverage for impossible passive revival cookies.                                                                                                  |
+| Start step-up active-proof attempt                                   | Live and covered.                                                                                                                                 | Runtime derives subject from validated session state; tests cover missing-session starts without writes.                                                                    |
+| Start trusted-device active-revival proof attempt                    | Live and covered.                                                                                                                                 | Runtime derives subject/device from the trusted-device cookie and authoritative device state.                                                                               |
+| Trusted-device active revival                                        | Live and covered.                                                                                                                                 | Postgres tests cover revival through continuation cookies and trusted-device rotation.                                                                                      |
+| Start unauthenticated active-proof attempt and issue first challenge | Live and covered for runtime-owned preflight and fused atomic start/issue.                                                                        | Final anti-abuse policy still needs concrete progressive-friction and delivery-cooldown design.                                                                             |
+| Issue out-of-band challenge on an existing attempt                   | Live and covered for continuation-cookie derivation and runtime-owned challenge-cookie construction.                                              | Final operation-count tests should prove invalid continuation material avoids state work.                                                                                   |
+| Resend out-of-band challenge                                         | Live and covered for missing, malformed, and expired challenge-cookie rejection before method work.                                               | Add direct storage-call accounting for every resend rejection shape when the final Postgres harness exposes query counts.                                                   |
+| Complete out-of-band challenge                                       | Live and covered.                                                                                                                                 | Generic runtime tests assert bad response MAC causes zero load/commit; Postgres email OTP tests assert wrong OTP skips subject resolution.                                  |
+| Issue message-signature challenge                                    | Runtime challenge path is modeled; first-party methods are not built.                                                                             | Password-derived, SSH, wallet, and similar plugins must seal verifier/context at issue so completion can reject bad signatures before DB.                                   |
+| Complete message-signature challenge                                 | Pre-state plugin contract exists and is testable; first-party methods are not built.                                                              | Add first-party signature plugins and tests proving wrong signatures avoid completion-time state loads when verifier material was sealed at issue.                          |
+| Issue origin-bound public-key challenge                              | Contract shape exists; concrete WebAuthn/passkey plugin is not built.                                                                             | Mature crate selection and origin/RP challenge-state design are still open implementation work.                                                                             |
+| Complete origin-bound public-key challenge                           | Contract shape exists; concrete WebAuthn/passkey plugin is not built.                                                                             | Tests must prove origin/RP/challenge failures reject before local state and that authoritative credential state still gates success.                                        |
+| Issue federated-identity challenge                                   | Contract shape exists; concrete OIDC/SAML plugin is not built.                                                                                    | Mature crate selection and state/nonce/redirect/issuer/audience binding design are still open implementation work.                                                          |
+| Complete federated-identity assertion                                | Contract shape exists; concrete OIDC/SAML plugin is not built.                                                                                    | Tests must prove invalid state, nonce, issuer, audience, and assertion signature fail before local mapping, while mapping/linking remains authoritative.                    |
+| Direct known-subject TOTP                                            | Runtime lane is live for weak-gate-before-load and credential-instance proof provenance.                                                          | Postgres tests cover invalid weak gate before active-proof state load and accepted proof source recording. Mature TOTP crate or audited implementation choice remains open. |
+| Challenge-bound TOTP                                                 | Bloom primitive and adapter contract exist; runtime/plugin lane is not implemented.                                                               | Public alpha includes this lane; implement cookie-budget, false-positive tolerance, and no-false-negative tests before exposing it.                                         |
+| Recovery code                                                        | Runtime/plugin skeleton exists for atomic consume-on-success and sealed-token pre-state rejection.                                                | Implement the lifecycle/runtime path that generates and stores new user-visible recovery codes.                                                                             |
+| Add credential                                                       | Not built.                                                                                                                                        | Requires credential-instance metadata, recovery-authority graph, lifecycle policy, durable notices, and mounted API design.                                                 |
+| Replace or reset credential                                          | Partially built for credential reset planning and execution boundary.                                                                             | Concrete mounted reset flows, first-party method reset implementations, admin/support policy, cancellation, and broader replacement flows remain.                           |
+| Remove credential                                                    | Not built.                                                                                                                                        | Requires last-credential and independence policy plus post-mutation revocation rules.                                                                                       |
+| Schedule delayed deletion or reset                                   | Partially built for credential-reset pending action scheduling plus shared pending-action semantics.                                              | Concrete deletion, second-factor reset, delayed replacement scheduling, cancellation policy, and broader notice policy remain.                                              |
+| Execute pending deletion or reset                                    | Partially built for pending credential-reset execution and lower-core non-reset credential-targeted execution.                                    | Pending deletion, Postgres non-reset runtime facades, and final mounted-runtime stale-action tests remain.                                                                  |
+| Cancel pending deletion or reset                                     | Partially built for authenticated credential-reset cancellation, reset expiry cleanup, and lower-core non-reset credential-targeted cancellation. | Deletion cancellation, Postgres non-reset runtime facades, and final mounted-runtime cancellation tests remain.                                                             |
+| Admin/support recovery intervention                                  | Not built.                                                                                                                                        | Requires Paranoid-shaped verified intervention, wait/notice policy, audit, and revocation rules.                                                                            |
+| Complete full authentication                                         | Live and covered.                                                                                                                                 | Postgres runtime derives attempt id from continuation cookie and creates session/trusted-device state only after authoritative proof-stack validation.                      |
+| Complete step-up                                                     | Live and covered.                                                                                                                                 | Postgres runtime derives attempt id from continuation cookie and validates session/attempt subject match before updating freshness.                                         |
+| Logout and targeted revocation                                       | Live and covered.                                                                                                                                 | Postgres runtime tests cover cookie clearing and stale DB state rejection after revocation.                                                                                 |
+| Subject-wide revocation                                              | Live and covered.                                                                                                                                 | Postgres runtime tests cover sessions and trusted devices created before revocation being rejected afterward.                                                               |
 
 ## Fast-Fail Shapes
 
@@ -494,6 +868,13 @@ TOTP and similar configured secrets are known-subject proofs. Direct TOTP cannot
 a subject from nothing. It must have subject context from an existing session, trusted
 device, or prior active proof.
 
+The alpha direct TOTP verifier row carries a stable TOTP credential-instance id.
+Successful TOTP verification records that id as a `CredentialInstance` proof source, not
+merely a source-less "TOTP succeeded" fact. The encrypted TOTP secret is
+associated-data-bound to both subject id and credential-instance id, so verifier
+ciphertext cannot be silently moved to a different credential instance and still decrypt
+as valid method state.
+
 The direct known-subject lane requires a weak-proof gate before DB work. That is the
 conventional path, but it is not the only Paranoid-shaped path.
 
@@ -516,8 +897,27 @@ permit DB-backed verification. False negatives are not acceptable.
 Recovery codes are high-entropy one-time proofs. Success requires method-owned commit work
 that atomically consumes the code. Failure must not consume anything.
 
-The future public shape should likely include a statelessly checkable prefix or code id so
-malformed or impossible submissions can fail before expensive lookup work.
+The alpha public shape is an opaque sealed token:
+
+```text
+recovery_code = base58(encrypt({ subject_id, random_token }))
+```
+
+The encrypted payload is intentionally minimal. It carries only the subject id and the
+random token needed for authoritative one-time lookup. It does not expose a public prefix,
+lookup id, timestamp, expiry, or other routing fields unless a concrete lifecycle policy
+later proves one is needed.
+
+Submitted recovery codes fast-fail before DB when they are not canonical base58, do not
+decode to a valid encrypted payload, fail AEAD/tag verification, or, in a known-subject
+flow, decrypt to a different subject. On decrypt success, the database is still
+authoritative: the runtime MACs the random token in a subject-bound context, locks the
+unused recovery-code row for that subject, verifies it is unused, and consumes it
+atomically with proof success.
+
+This is fast-fail for code-spray traffic, not stateless success. Random guesses should
+usually die at parse/decrypt/tag verification. Plausible sealed tokens continue to
+authoritative one-time consume.
 
 ### Origin-Bound Public Keys
 
@@ -661,6 +1061,7 @@ The reducer model currently includes:
 - optional source provenance on satisfied proofs;
 - recovery-code satisfied-proof provenance from the consumed credential instance;
 - trusted-device passive credential provenance through core-owned credential ids;
+- credential reset planning and execution boundaries over recovery-authority metadata;
 - logout;
 - session revocation;
 - trusted-device revocation;
@@ -725,8 +1126,9 @@ runtime-owned cookies and secrets.
 - Queue-backed durable delivery integration for every effect class.
 - Complete first-party method plugins.
 - Mature-crate-backed TOTP, WebAuthn/passkey, OIDC, or SAML implementations.
-- Credential lifecycle and recovery policy layer, including factor-independence analysis,
-  delayed actions, credential reset/replacement, and admin/support intervention.
+- Complete credential lifecycle and recovery policy layer, including add/remove/replace
+  credential flows, concrete method reset implementations, deletion waits,
+  subject-targeted pending actions, and admin/support intervention.
 - Full audit coverage matrix.
 - Realistic adversarial application-lifecycle test suite through the mounted public
   runtime.

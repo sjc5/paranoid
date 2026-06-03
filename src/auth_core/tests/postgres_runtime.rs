@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use super::super::email_otp_method::{
     EmailOtpCompleteChallengeResponse, EmailOtpIssueChallenge, EmailOtpResendChallenge,
     PostgresEmailOtpMethodPlugin, PostgresEmailOtpMethodPluginConfig,
-    PostgresEmailOtpSubjectResolver,
+    PostgresEmailOtpSubjectResolver, PostgresEmailOtpVerifiedIdentifier,
 };
 use super::super::postgres_recovery_code_method::{
     PostgresRecoveryCodeMethodPlugin, PostgresRecoveryCodeMethodPluginConfig,
@@ -20,8 +20,9 @@ use super::super::postgres_totp_method::{
 };
 use crate::crypto::SecretBytes;
 use crate::db::{
-    PgIdentifier, PgQualifiedTableName, PgSchemaName, Pool, PoolConfig, Tx, pooler_safe_query,
-    pooler_safe_query_as, pooler_safe_query_scalar, unparameterized_simple_query,
+    DatabaseOperationObserver, PgIdentifier, PgQualifiedTableName, PgSchemaName, Pool, PoolConfig,
+    Tx, pooler_safe_query, pooler_safe_query_as, pooler_safe_query_scalar,
+    unparameterized_simple_query,
 };
 use http::HeaderMap;
 use http::header::{COOKIE, HeaderValue};
@@ -31,8 +32,43 @@ static AUTH_POSTGRES_RUNTIME_TEST_COUNTER: AtomicU64 = AtomicU64::new(1);
 static AUTH_POSTGRES_RUNTIME_TEST_LOCK: LazyLock<tokio::sync::Mutex<()>> =
     LazyLock::new(|| tokio::sync::Mutex::new(()));
 
+macro_rules! auth_runtime_test_fetch_one_in_transaction {
+    ($pool:expr, $query:expr, $expect_message:literal) => {{
+        let mut tx = $pool
+            .begin_transaction()
+            .await
+            .expect("begin auth runtime test read transaction");
+        let value = $query
+            .fetch_one(tx.sqlx_transaction().as_mut())
+            .await
+            .expect($expect_message);
+        tx.rollback()
+            .await
+            .expect("rollback auth runtime test read transaction");
+        value
+    }};
+}
+
+macro_rules! auth_runtime_test_fetch_optional_in_transaction {
+    ($pool:expr, $query:expr, $expect_message:literal) => {{
+        let mut tx = $pool
+            .begin_transaction()
+            .await
+            .expect("begin auth runtime test read transaction");
+        let value = $query
+            .fetch_optional(tx.sqlx_transaction().as_mut())
+            .await
+            .expect($expect_message);
+        tx.rollback()
+            .await
+            .expect("rollback auth runtime test read transaction");
+        value
+    }};
+}
+
 struct PostgresRuntimeTestHarness {
     pool: Pool,
+    database_operation_observer: DatabaseOperationObserver,
     store_config: super::super::postgres_store::PostgresAuthStoreConfig,
     runtime: super::super::postgres_runtime::PostgresAuthWebRuntime,
     schema: PgSchemaName,
@@ -215,14 +251,17 @@ impl PostgresRuntimeTestHarness {
             return None;
         };
 
-        let pool = Pool::connect(PoolConfig::new(SecretString::from(database_url)))
+        let raw_pool = Pool::connect(PoolConfig::new(SecretString::from(database_url)))
             .await
             .expect("connect test database");
+        let database_operation_observer = DatabaseOperationObserver::default();
+        let pool =
+            raw_pool.clone_with_database_operation_observer(database_operation_observer.clone());
         let schema_name = unique_runtime_test_schema_name();
         let schema = PgSchemaName::new(schema_name.clone());
         let create_schema = format!("CREATE SCHEMA {}", schema_name.quoted());
         unparameterized_simple_query(sqlx::AssertSqlSafe(create_schema.as_str()))
-            .execute(pool.sqlx_pool())
+            .execute(raw_pool.sqlx_pool())
             .await
             .expect("create auth runtime test schema");
 
@@ -342,6 +381,7 @@ impl PostgresRuntimeTestHarness {
 
         Some(Self {
             pool,
+            database_operation_observer,
             store_config,
             runtime,
             schema,
@@ -373,7 +413,7 @@ fn email_otp_plugin_for_harness(
 struct EmbeddedSubjectEmailOtpResolver;
 
 impl PostgresEmailOtpSubjectResolver for EmbeddedSubjectEmailOtpResolver {
-    fn resolve_subject_id_for_recipient_handle<'a, 'tx>(
+    fn resolve_verified_identifier_for_recipient_handle<'a, 'tx>(
         &'a self,
         _tx: &'a mut Tx<'tx>,
         recipient_handle: &'a str,
@@ -381,7 +421,7 @@ impl PostgresEmailOtpSubjectResolver for EmbeddedSubjectEmailOtpResolver {
         Box<
             dyn Future<
                     Output = Result<
-                        Option<SubjectId>,
+                        PostgresEmailOtpVerifiedIdentifier,
                         super::super::email_otp_method::PostgresEmailOtpMethodError,
                     >,
                 > + Send
@@ -393,11 +433,16 @@ impl PostgresEmailOtpSubjectResolver for EmbeddedSubjectEmailOtpResolver {
                 .rsplit_once(":subject:")
                 .map(|(_, label)| label)
             else {
-                return Ok(None);
+                return Ok(PostgresEmailOtpVerifiedIdentifier::new(
+                    None,
+                    id("embedded-email-otp-unresolved-source"),
+                ));
             };
-            Ok(Some(
-                SubjectId::from_bytes(subject_label.as_bytes().to_vec())
-                    .map_err(super::super::email_otp_method::PostgresEmailOtpMethodError::Core)?,
+            let subject_id = SubjectId::from_bytes(subject_label.as_bytes().to_vec())
+                .map_err(super::super::email_otp_method::PostgresEmailOtpMethodError::Core)?;
+            Ok(PostgresEmailOtpVerifiedIdentifier::new(
+                Some(subject_id),
+                id(&format!("embedded-email-source:{subject_label}")),
             ))
         })
     }
@@ -406,14 +451,20 @@ impl PostgresEmailOtpSubjectResolver for EmbeddedSubjectEmailOtpResolver {
 struct StaticEmailOtpSubjectResolver {
     recipient_handle: String,
     subject_id: SubjectId,
+    source_id: VerifiedProofSourceId,
     calls: AtomicU64,
 }
 
 impl StaticEmailOtpSubjectResolver {
-    fn new(recipient_handle: &str, subject_id: SubjectId) -> Self {
+    fn new(
+        recipient_handle: &str,
+        subject_id: SubjectId,
+        source_id: VerifiedProofSourceId,
+    ) -> Self {
         Self {
             recipient_handle: recipient_handle.to_owned(),
             subject_id,
+            source_id,
             calls: AtomicU64::new(0),
         }
     }
@@ -424,7 +475,7 @@ impl StaticEmailOtpSubjectResolver {
 }
 
 impl PostgresEmailOtpSubjectResolver for StaticEmailOtpSubjectResolver {
-    fn resolve_subject_id_for_recipient_handle<'a, 'tx>(
+    fn resolve_verified_identifier_for_recipient_handle<'a, 'tx>(
         &'a self,
         _tx: &'a mut Tx<'tx>,
         recipient_handle: &'a str,
@@ -432,7 +483,7 @@ impl PostgresEmailOtpSubjectResolver for StaticEmailOtpSubjectResolver {
         Box<
             dyn Future<
                     Output = Result<
-                        Option<SubjectId>,
+                        PostgresEmailOtpVerifiedIdentifier,
                         super::super::email_otp_method::PostgresEmailOtpMethodError,
                     >,
                 > + Send
@@ -442,9 +493,15 @@ impl PostgresEmailOtpSubjectResolver for StaticEmailOtpSubjectResolver {
         Box::pin(async move {
             self.calls.fetch_add(1, Ordering::SeqCst);
             if recipient_handle == self.recipient_handle {
-                Ok(Some(self.subject_id.clone()))
+                Ok(PostgresEmailOtpVerifiedIdentifier::new(
+                    Some(self.subject_id.clone()),
+                    self.source_id.clone(),
+                ))
             } else {
-                Ok(None)
+                Ok(PostgresEmailOtpVerifiedIdentifier::new(
+                    None,
+                    id("static-email-otp-unresolved-source"),
+                ))
             }
         })
     }
@@ -583,10 +640,11 @@ impl TestPostgresAuthMethodPlugin {
 
     async fn count_state_rows(&self, pool: &Pool) -> i64 {
         let statement = format!("SELECT count(*) FROM {}", self.state_table.quoted());
-        pooler_safe_query_scalar::<i64>(sqlx::AssertSqlSafe(statement.as_str()))
-            .fetch_one(pool.sqlx_pool())
-            .await
-            .expect("count test method state rows")
+        auth_runtime_test_fetch_one_in_transaction!(
+            pool,
+            pooler_safe_query_scalar::<i64>(sqlx::AssertSqlSafe(statement.as_str())),
+            "count test method state rows"
+        )
     }
 
     async fn count_durable_effect_rows(&self, pool: &Pool) -> i64 {
@@ -594,10 +652,11 @@ impl TestPostgresAuthMethodPlugin {
             "SELECT count(*) FROM {}",
             self.durable_effect_table.quoted()
         );
-        pooler_safe_query_scalar::<i64>(sqlx::AssertSqlSafe(statement.as_str()))
-            .fetch_one(pool.sqlx_pool())
-            .await
-            .expect("count test method durable effect rows")
+        auth_runtime_test_fetch_one_in_transaction!(
+            pool,
+            pooler_safe_query_scalar::<i64>(sqlx::AssertSqlSafe(statement.as_str())),
+            "count test method durable effect rows"
+        )
     }
 
     fn validate_operation(
@@ -641,12 +700,14 @@ impl TestPostgresAuthMethodPlugin {
         })
     }
 
-    fn parse_active_method_response_subject(
+    fn parse_active_method_response_subject_and_source(
         &self,
         challenge: &ActiveProofMethodChallengeMaterial,
         response: &CompleteActiveProofMethodResponse,
-    ) -> Result<SubjectId, super::super::postgres_method_runtime::PostgresAuthMethodBuildError>
-    {
+    ) -> Result<
+        (SubjectId, VerifiedProofSourceId),
+        super::super::postgres_method_runtime::PostgresAuthMethodBuildError,
+    > {
         if challenge.proof != self.method.verified_proof_summary() {
             return Err(
                 super::super::postgres_method_runtime::PostgresAuthMethodBuildError::plugin_rejected(
@@ -700,20 +761,44 @@ impl TestPostgresAuthMethodPlugin {
                         .to_owned(),
                 )
             })?;
-        let subject_id_bytes = response_after_state.strip_prefix(b";subject:").ok_or_else(|| {
-            super::super::postgres_method_runtime::PostgresAuthMethodBuildError::plugin_rejected(
-                &self.method,
-                "active_proof_completion",
-                "active proof response subject binding is malformed".to_owned(),
-            )
-        })?;
-        SubjectId::from_bytes(subject_id_bytes.to_vec()).map_err(|error| {
+        let subject_and_source = response_after_state
+            .strip_prefix(b";subject:")
+            .ok_or_else(|| {
+                super::super::postgres_method_runtime::PostgresAuthMethodBuildError::plugin_rejected(
+                    &self.method,
+                    "active_proof_completion",
+                    "active proof response subject binding is malformed".to_owned(),
+                )
+            })?;
+        let source_marker = b";source:";
+        let source_marker_start = subject_and_source
+            .windows(source_marker.len())
+            .position(|window| window == source_marker)
+            .ok_or_else(|| {
+                super::super::postgres_method_runtime::PostgresAuthMethodBuildError::plugin_rejected(
+                    &self.method,
+                    "active_proof_completion",
+                    "active proof response source binding is missing".to_owned(),
+                )
+            })?;
+        let (subject_id_bytes, source_with_marker) =
+            subject_and_source.split_at(source_marker_start);
+        let source_id_bytes = &source_with_marker[source_marker.len()..];
+        let subject_id = SubjectId::from_bytes(subject_id_bytes.to_vec()).map_err(|error| {
             super::super::postgres_method_runtime::PostgresAuthMethodBuildError::plugin_rejected(
                 &self.method,
                 "active_proof_completion",
                 error.to_string(),
             )
-        })
+        })?;
+        let source_id = VerifiedProofSourceId::from_bytes(source_id_bytes.to_vec()).map_err(|error| {
+            super::super::postgres_method_runtime::PostgresAuthMethodBuildError::plugin_rejected(
+                &self.method,
+                "active_proof_completion",
+                error.to_string(),
+            )
+        })?;
+        Ok((subject_id, source_id))
     }
 
     fn verify_active_method_response(
@@ -724,11 +809,12 @@ impl TestPostgresAuthMethodPlugin {
         super::super::postgres_method_runtime::VerifiedActiveProofMethodResponse,
         super::super::postgres_method_runtime::PostgresAuthMethodBuildError,
     > {
-        let subject_id = self.parse_active_method_response_subject(challenge, response)?;
+        let (subject_id, source_id) =
+            self.parse_active_method_response_subject_and_source(challenge, response)?;
         let verified_proof = VerifiedActiveProof::from_summary_with_source(
             challenge.proof.clone(),
             Some(subject_id),
-            test_active_method_proof_source(),
+            test_active_method_proof_source(self.method.family(), source_id),
         )
         .map_err(|error| {
             super::super::postgres_method_runtime::PostgresAuthMethodBuildError::plugin_rejected(
@@ -741,7 +827,14 @@ impl TestPostgresAuthMethodPlugin {
             super::super::postgres_method_runtime::VerifiedActiveProofMethodResponse::new(
                 verified_proof,
                 Vec::new(),
-            ),
+            )
+            .map_err(|error| {
+                super::super::postgres_method_runtime::PostgresAuthMethodBuildError::plugin_rejected(
+                    &self.method,
+                    "active_proof_completion",
+                    error.to_string(),
+                )
+            })?,
         )
     }
 }
@@ -759,8 +852,54 @@ fn test_challenge_presentation_prefix(family: ProofFamily) -> Option<&'static [u
     }
 }
 
-fn test_active_method_proof_source() -> VerifiedProofSource {
-    proof_source("test-active-method-source")
+fn test_active_method_proof_source(
+    family: ProofFamily,
+    source_id: VerifiedProofSourceId,
+) -> VerifiedProofSource {
+    let source_kind = match family {
+        ProofFamily::MessageSignature | ProofFamily::OriginBoundPublicKey => {
+            VerifiedProofSourceKind::CredentialInstance
+        }
+        ProofFamily::FederatedIdentityAssertion => VerifiedProofSourceKind::ExternalAuthority,
+        other => panic!("unexpected active method proof family {other:?}"),
+    };
+    VerifiedProofSource::new(source_kind, source_id)
+}
+
+fn test_known_subject_method_proof_source(
+    family: ProofFamily,
+    subject_id: &SubjectId,
+) -> Option<VerifiedProofSource> {
+    match family {
+        ProofFamily::SharedSecretOtp | ProofFamily::RecoveryCode => {
+            let mut source_id = b"known-subject-method-source:".to_vec();
+            source_id.extend_from_slice(format!("{family:?}:").as_bytes());
+            source_id.extend_from_slice(subject_id.as_bytes());
+            Some(VerifiedProofSource::new(
+                VerifiedProofSourceKind::CredentialInstance,
+                VerifiedProofSourceId::from_bytes(source_id)
+                    .expect("known-subject test method source id"),
+            ))
+        }
+        _ => None,
+    }
+}
+
+fn test_active_method_source_id(
+    family: ProofFamily,
+    subject_id: &SubjectId,
+) -> VerifiedProofSourceId {
+    let prefix = match family {
+        ProofFamily::MessageSignature => b"message-signature-key:".as_slice(),
+        ProofFamily::OriginBoundPublicKey => b"origin-bound-public-key-credential:".as_slice(),
+        ProofFamily::FederatedIdentityAssertion => {
+            b"federated-identity-subject-mapping:".as_slice()
+        }
+        other => panic!("unexpected active method proof family {other:?}"),
+    };
+    let mut bytes = prefix.to_vec();
+    bytes.extend_from_slice(subject_id.as_bytes());
+    VerifiedProofSourceId::from_bytes(bytes).expect("test active method source id")
 }
 
 fn test_response_challenge_prefix(family: ProofFamily) -> Option<&'static [u8]> {
@@ -795,6 +934,7 @@ fn test_method_response_payload(
 ) -> ActiveProofMethodResponsePayload {
     test_method_response_payload_with_prefix(
         test_response_challenge_prefix(family).expect("test method response prefix"),
+        family,
         nonce,
         subject_id,
     )
@@ -802,6 +942,7 @@ fn test_method_response_payload(
 
 fn test_method_response_payload_with_prefix(
     response_prefix: &[u8],
+    family: ProofFamily,
     nonce: &[u8],
     subject_id: &SubjectId,
 ) -> ActiveProofMethodResponsePayload {
@@ -809,6 +950,8 @@ fn test_method_response_payload_with_prefix(
     response_payload.extend_from_slice(nonce);
     response_payload.extend_from_slice(b";subject:");
     response_payload.extend_from_slice(subject_id.as_bytes());
+    response_payload.extend_from_slice(b";source:");
+    response_payload.extend_from_slice(test_active_method_source_id(family, subject_id).as_bytes());
     ActiveProofMethodResponsePayload::try_from_bytes(response_payload)
         .expect("test method response payload")
 }
@@ -832,6 +975,7 @@ fn mismatched_federated_issuer_test_method_response_payload(
 ) -> ActiveProofMethodResponsePayload {
     test_method_response_payload_with_prefix(
         b"test-federated-identity-assertion:issuer=https://evil.example;audience=paranoid-client;redirect=https://app.example/auth/callback;state:",
+        ProofFamily::FederatedIdentityAssertion,
         nonce,
         subject_id,
     )
@@ -875,17 +1019,15 @@ fn mismatched_totp_test_method_response_payload() -> KnownSubjectActiveProofSecr
         .expect("mismatched totp test method response payload")
 }
 
-fn recovery_code_test_method_response_payload(
-    secret: &[u8],
-) -> KnownSubjectActiveProofSecretResponse {
-    KnownSubjectActiveProofSecretResponse::try_from_bytes(secret.to_vec())
-        .expect("recovery code test method response payload")
-}
-
 fn mismatched_recovery_code_test_method_response_payload() -> KnownSubjectActiveProofSecretResponse
 {
     KnownSubjectActiveProofSecretResponse::try_from_bytes(b"wrong-recovery-code".as_slice())
         .expect("mismatched recovery code test method response payload")
+}
+
+fn guessed_recovery_code_test_method_response_payload() -> KnownSubjectActiveProofSecretResponse {
+    KnownSubjectActiveProofSecretResponse::try_from_bytes(b"1111111111111111".as_slice())
+        .expect("guessed recovery code test method response payload")
 }
 
 async fn validate_test_method_table_exists(
@@ -1017,7 +1159,7 @@ impl super::super::postgres_method_runtime::PostgresAuthMethodPlugin
         super::super::postgres_method_runtime::ActiveProofMethodPreStateVerification,
         super::super::postgres_method_runtime::PostgresAuthMethodBuildError,
     > {
-        self.parse_active_method_response_subject(challenge, response)?;
+        self.parse_active_method_response_subject_and_source(challenge, response)?;
         match self.active_method_verification_mode {
             TestActiveMethodVerificationMode::BeforeStateLoad => Ok(
                 super::super::postgres_method_runtime::ActiveProofMethodPreStateVerification::Accepted(
@@ -1142,10 +1284,20 @@ impl super::super::postgres_method_runtime::PostgresAuthMethodPlugin
             } else {
                 Vec::new()
             };
-            let verified_proof = VerifiedActiveProof::from_summary(
-                self.method.verified_proof_summary(),
-                None,
-            )
+            let verified_proof = match test_known_subject_method_proof_source(
+                self.method.family(),
+                subject_id,
+            ) {
+                Some(source) => VerifiedActiveProof::from_summary_with_source(
+                    self.method.verified_proof_summary(),
+                    None,
+                    source,
+                ),
+                None => VerifiedActiveProof::from_summary(
+                    self.method.verified_proof_summary(),
+                    None,
+                ),
+            }
             .map_err(|error| {
                 super::super::postgres_method_runtime::PostgresAuthMethodBuildError::plugin_rejected(
                     self.method(),
@@ -1157,8 +1309,138 @@ impl super::super::postgres_method_runtime::PostgresAuthMethodPlugin
                 super::super::postgres_method_runtime::VerifiedActiveProofMethodResponse::new(
                     verified_proof,
                     method_commit_work,
-                ),
+                )
+                .map_err(|error| {
+                    super::super::postgres_method_runtime::PostgresAuthMethodBuildError::plugin_rejected(
+                        self.method(),
+                        "known_subject_active_proof_completion",
+                        error.to_string(),
+                    )
+                })?,
             ))
+        })
+    }
+
+    fn build_credential_reset_commit_work<'a, 'tx>(
+        &'a self,
+        _tx: &'a mut Tx<'tx>,
+        request: super::super::postgres_method_runtime::CredentialResetMethodWorkBuildRequest<'a>,
+    ) -> Pin<
+        Box<
+            dyn Future<
+                    Output = Result<
+                        Vec<MethodCommitWork>,
+                        super::super::postgres_method_runtime::PostgresAuthMethodBuildError,
+                    >,
+                > + Send
+                + 'a,
+        >,
+    > {
+        Box::pin(async move {
+            if request.target_credential.proof_family() != self.method.family()
+                || request.target_credential.method_label() != self.method.method_label()
+            {
+                return Err(
+                    super::super::postgres_method_runtime::PostgresAuthMethodBuildError::plugin_rejected(
+                        self.method(),
+                        "credential_reset",
+                        "credential reset target used a different method".to_owned(),
+                    ),
+                );
+            }
+            Ok(vec![
+                MethodCommitWork::new(
+                    self.method.verified_proof_summary(),
+                    vec![
+                        MethodCommitPrecondition::new(
+                            "password_verifier_version_current",
+                            request.method_payload.as_bytes(),
+                        )
+                        .expect("method work item"),
+                    ],
+                    vec![
+                        MethodCommitMutation::new(
+                            "replace_password_verifier",
+                            request.method_payload.as_bytes(),
+                        )
+                        .expect("method work item"),
+                    ],
+                    Vec::new(),
+                )
+                .expect("credential reset method commit work"),
+            ])
+        })
+    }
+
+    fn build_credential_lifecycle_commit_work<'a, 'tx>(
+        &'a self,
+        _tx: &'a mut Tx<'tx>,
+        request: super::super::postgres_method_runtime::CredentialLifecycleMethodWorkBuildRequest<
+            'a,
+        >,
+    ) -> Pin<
+        Box<
+            dyn Future<
+                    Output = Result<
+                        Vec<MethodCommitWork>,
+                        super::super::postgres_method_runtime::PostgresAuthMethodBuildError,
+                    >,
+                > + Send
+                + 'a,
+        >,
+    > {
+        Box::pin(async move {
+            if request.target_credential.proof_family() != self.method.family()
+                || request.target_credential.method_label() != self.method.method_label()
+            {
+                return Err(
+                    super::super::postgres_method_runtime::PostgresAuthMethodBuildError::plugin_rejected(
+                        self.method(),
+                        "credential_lifecycle",
+                        "credential lifecycle target used a different method".to_owned(),
+                    ),
+                );
+            }
+            let (precondition_operation, mutation_operation) = match request.pending_action.action {
+                CredentialLifecycleAction::Replace => (
+                    "replacement_candidate_current",
+                    "replace_credential_from_pending_action",
+                ),
+                CredentialLifecycleAction::Regenerate => (
+                    "regeneration_candidate_current",
+                    "regenerate_credential_from_pending_action",
+                ),
+                _ => {
+                    return Err(
+                        super::super::postgres_method_runtime::PostgresAuthMethodBuildError::plugin_rejected(
+                            self.method(),
+                            "credential_lifecycle",
+                            "credential lifecycle action does not require method work".to_owned(),
+                        ),
+                    );
+                }
+            };
+            Ok(vec![
+                MethodCommitWork::new(
+                    self.method.verified_proof_summary(),
+                    vec![
+                        MethodCommitPrecondition::new(
+                            precondition_operation,
+                            request.method_payload.as_bytes(),
+                        )
+                        .expect("method work item"),
+                    ],
+                    vec![
+                        MethodCommitMutation::new(
+                            mutation_operation,
+                            request.method_payload.as_bytes(),
+                        )
+                        .expect("method work item"),
+                    ],
+                    Vec::new(),
+                )
+                .expect("credential lifecycle method commit work"),
+            ])
         })
     }
 
@@ -1214,7 +1496,11 @@ impl super::super::postgres_method_runtime::PostgresAuthMethodPlugin
     > {
         Box::pin(async move {
             match precondition.operation().as_str() {
-                "otp_state_absent" | "recovery_code_still_unused" => {}
+                "otp_state_absent"
+                | "recovery_code_still_unused"
+                | "password_verifier_version_current"
+                | "replacement_candidate_current"
+                | "regeneration_candidate_current" => {}
                 other => Self::validate_operation(other, "otp_state_absent")?,
             }
             let statement = format!(
@@ -1262,7 +1548,11 @@ impl super::super::postgres_method_runtime::PostgresAuthMethodPlugin
     > {
         Box::pin(async move {
             match mutation.operation().as_str() {
-                "store_otp_state" | "consume_recovery_code" => {}
+                "store_otp_state"
+                | "consume_recovery_code"
+                | "replace_password_verifier"
+                | "replace_credential_from_pending_action"
+                | "regenerate_credential_from_pending_action" => {}
                 other => Self::validate_operation(other, "store_otp_state")?,
             }
             if matches!(self.failure_mode, TestMethodCommitFailureMode::FailMutation) {
@@ -1512,7 +1802,10 @@ async fn postgres_runtime_completes_message_signature_through_method_registry() 
     );
     assert_eq!(
         fetch_satisfied_proof_source_for_attempt(pool, store_config, &attempt_id).await,
-        Some(test_active_method_proof_source())
+        Some(test_active_method_proof_source(
+            ProofFamily::MessageSignature,
+            test_active_method_source_id(ProofFamily::MessageSignature, &subject_id),
+        ))
     );
     assert_eq!(
         count_open_challenges_for_challenge(pool, store_config, &challenge_id).await,
@@ -1597,6 +1890,13 @@ async fn postgres_runtime_completes_message_signature_after_authoritative_confir
     assert_eq!(
         count_satisfied_proofs_for_attempt(pool, store_config, &attempt_id).await,
         1
+    );
+    assert_eq!(
+        fetch_satisfied_proof_source_for_attempt(pool, store_config, &attempt_id).await,
+        Some(test_active_method_proof_source(
+            ProofFamily::MessageSignature,
+            test_active_method_source_id(ProofFamily::MessageSignature, &subject_id),
+        ))
     );
 
     harness.drop_schema().await;
@@ -1942,6 +2242,13 @@ async fn postgres_runtime_completes_origin_bound_public_key_through_method_regis
         1
     );
     assert_eq!(
+        fetch_satisfied_proof_source_for_attempt(pool, store_config, &attempt_id).await,
+        Some(test_active_method_proof_source(
+            ProofFamily::OriginBoundPublicKey,
+            test_active_method_source_id(ProofFamily::OriginBoundPublicKey, &subject_id),
+        ))
+    );
+    assert_eq!(
         count_open_challenges_for_challenge(pool, store_config, &challenge_id).await,
         0
     );
@@ -2076,6 +2383,13 @@ async fn postgres_runtime_completes_federated_identity_through_method_registry()
         1
     );
     assert_eq!(
+        fetch_satisfied_proof_source_for_attempt(pool, store_config, &attempt_id).await,
+        Some(test_active_method_proof_source(
+            ProofFamily::FederatedIdentityAssertion,
+            test_active_method_source_id(ProofFamily::FederatedIdentityAssertion, &subject_id),
+        ))
+    );
+    assert_eq!(
         count_open_challenges_for_challenge(pool, store_config, &challenge_id).await,
         0
     );
@@ -2095,12 +2409,13 @@ async fn postgres_runtime_completes_totp_through_known_subject_method_registry()
     let totp_plugin = harness.totp_plugin.as_ref().expect("TOTP method plugin");
     let email_otp = email_otp_plugin_for_harness(&harness);
     let subject_id: SubjectId = id("totp-known-subject");
+    let totp_credential_id: VerifiedProofSourceId = id("totp-known-credential");
     let totp_secret = b"totp-known-subject-secret";
     let method =
         ProofMethodDeclaration::new(ProofFamily::SharedSecretOtp, "totp").expect("TOTP method");
 
     totp_plugin
-        .store_secret_for_test(pool, &subject_id, totp_secret, at(10))
+        .store_secret_for_test(pool, &subject_id, &totp_credential_id, totp_secret, at(10))
         .await
         .expect("store TOTP verifier state");
 
@@ -2180,6 +2495,13 @@ async fn postgres_runtime_completes_totp_through_known_subject_method_registry()
         count_satisfied_proofs_for_attempt(pool, store_config, &attempt_id).await,
         1
     );
+    assert_eq!(
+        fetch_satisfied_proof_source_for_attempt(pool, store_config, &attempt_id).await,
+        Some(VerifiedProofSource::new(
+            VerifiedProofSourceKind::CredentialInstance,
+            totp_credential_id,
+        ))
+    );
 
     harness.drop_schema().await;
 }
@@ -2196,6 +2518,7 @@ async fn postgres_runtime_deletes_attempt_after_totp_failure_budget() {
     let totp_plugin = harness.totp_plugin.as_ref().expect("TOTP method plugin");
     let email_otp = email_otp_plugin_for_harness(&harness);
     let subject_id: SubjectId = id("totp-budget-subject");
+    let totp_credential_id: VerifiedProofSourceId = id("totp-budget-credential");
     let method =
         ProofMethodDeclaration::new(ProofFamily::SharedSecretOtp, "totp").expect("TOTP method");
 
@@ -2222,7 +2545,13 @@ async fn postgres_runtime_deletes_attempt_after_totp_failure_budget() {
     let continuation_headers = headers_from_cookie_pairs(&[continuation_cookie_pair.as_str()]);
 
     totp_plugin
-        .store_secret_for_test(pool, &subject_id, b"totp-budget-secret", at(10))
+        .store_secret_for_test(
+            pool,
+            &subject_id,
+            &totp_credential_id,
+            b"totp-budget-secret",
+            at(10),
+        )
         .await
         .expect("store TOTP verifier state");
 
@@ -2369,7 +2698,8 @@ async fn postgres_runtime_completes_recovery_code_through_known_subject_method_r
     let continuation_cookie_pair = started.continuation_cookie_pair;
     let continuation_headers = headers_from_cookie_pairs(&[continuation_cookie_pair.as_str()]);
 
-    let failed = runtime
+    harness.database_operation_observer.clear();
+    let pre_state_rejected = runtime
         .execute_known_subject_active_proof_method_response_from_headers(
             &continuation_headers,
             CompleteKnownSubjectActiveProofMethodResponse {
@@ -2380,15 +2710,18 @@ async fn postgres_runtime_completes_recovery_code_through_known_subject_method_r
             },
         )
         .await
-        .expect("failed recovery code proof should not consume method state");
-    assert_eq!(
-        failed.outcome(),
-        &Outcome::ActiveProofFailureRecorded {
-            attempt_id: attempt_id.clone(),
-            attempt_was_deleted: false,
-        }
+        .expect_err("malformed sealed recovery code must reject before state load");
+    assert!(
+        matches!(
+            pre_state_rejected,
+            super::super::postgres_runtime::AuthPostgresWebRuntimeExecutionError::MethodBuild(_)
+        ),
+        "expected method pre-state rejection, got {pre_state_rejected:?}"
     );
-    assert!(failed.set_cookie_headers().is_empty());
+    assert!(
+        harness.database_operation_observer.records().is_empty(),
+        "malformed sealed recovery code must reject before any database operation"
+    );
     assert_eq!(
         recovery_code_plugin
             .count_recovery_codes_for_subject_for_test(pool, &subject_id)
@@ -2411,6 +2744,71 @@ async fn postgres_runtime_completes_recovery_code_through_known_subject_method_r
         count_active_proof_attempts_for_attempt(pool, store_config, &attempt_id).await,
         1
     );
+    harness.database_operation_observer.clear();
+    let guessed_sealed_rejected = runtime
+        .execute_known_subject_active_proof_method_response_from_headers(
+            &continuation_headers,
+            CompleteKnownSubjectActiveProofMethodResponse {
+                now: at(81),
+                method: method.clone(),
+                secret_response: guessed_recovery_code_test_method_response_payload(),
+                weak_proof_gate_response: None,
+            },
+        )
+        .await
+        .expect_err("guessed sealed recovery code must reject before state load");
+    assert!(
+        matches!(
+            guessed_sealed_rejected,
+            super::super::postgres_runtime::AuthPostgresWebRuntimeExecutionError::MethodBuild(_)
+        ),
+        "expected guessed sealed code method pre-state rejection, got {guessed_sealed_rejected:?}"
+    );
+    assert!(
+        harness.database_operation_observer.records().is_empty(),
+        "guessed sealed recovery code must reject before any database operation"
+    );
+    let wrong_subject_sealed_response = recovery_code_plugin
+        .sealed_recovery_code_response_for_test(&id("other-recovery-subject"), recovery_code_secret)
+        .expect("wrong-subject sealed recovery code response");
+    harness.database_operation_observer.clear();
+    let wrong_subject_rejected = runtime
+        .execute_known_subject_active_proof_method_response_from_headers(
+            &continuation_headers,
+            CompleteKnownSubjectActiveProofMethodResponse {
+                now: at(82),
+                method: method.clone(),
+                secret_response: wrong_subject_sealed_response,
+                weak_proof_gate_response: None,
+            },
+        )
+        .await
+        .expect_err("wrong-subject sealed recovery code must reject before state load");
+    assert!(
+        matches!(
+            wrong_subject_rejected,
+            super::super::postgres_runtime::AuthPostgresWebRuntimeExecutionError::MethodBuild(_)
+        ),
+        "expected wrong-subject method pre-state rejection, got {wrong_subject_rejected:?}"
+    );
+    assert!(
+        harness.database_operation_observer.records().is_empty(),
+        "wrong-subject sealed recovery code must reject before any database operation"
+    );
+    assert_eq!(
+        recovery_code_plugin
+            .count_unused_recovery_codes_for_subject_for_test(pool, &subject_id)
+            .await
+            .expect("count unused recovery codes"),
+        1
+    );
+    assert_eq!(
+        count_satisfied_proofs_for_attempt(pool, store_config, &attempt_id).await,
+        0
+    );
+    let sealed_response = recovery_code_plugin
+        .sealed_recovery_code_response_for_test(&subject_id, recovery_code_secret)
+        .expect("sealed recovery code response");
 
     let completed = runtime
         .execute_known_subject_active_proof_method_response_from_headers(
@@ -2418,7 +2816,7 @@ async fn postgres_runtime_completes_recovery_code_through_known_subject_method_r
             CompleteKnownSubjectActiveProofMethodResponse {
                 now: at(85),
                 method,
-                secret_response: recovery_code_test_method_response_payload(recovery_code_secret),
+                secret_response: sealed_response,
                 weak_proof_gate_response: None,
             },
         )
@@ -2735,6 +3133,1409 @@ async fn postgres_runtime_rejects_direct_active_proof_failure_recording() {
 }
 
 #[tokio::test]
+async fn postgres_runtime_rejects_direct_credential_reset_commands() {
+    let _postgres_runtime_test_guard = AUTH_POSTGRES_RUNTIME_TEST_LOCK.lock().await;
+    let Some(harness) = PostgresRuntimeTestHarness::connect_or_skip().await else {
+        return;
+    };
+    let runtime = &harness.runtime;
+    let target_credential_id = id("direct-reset-password-credential");
+    let direct_plan = Command::PlanCredentialReset(PlanCredentialReset {
+        now: at(30),
+        lifecycle_context: credential_lifecycle_context(
+            message_signature_credential_metadata("direct-reset-password-credential"),
+            [CredentialRecoveryAuthority::new(
+                target_credential_id.clone(),
+                CredentialLifecycleAction::Reset,
+                id("direct-reset-authority"),
+                RecoveryAuthorityTiming::Immediate,
+            )],
+            [credential_instance_lifecycle_evidence(
+                "direct-reset-source",
+                [id("direct-reset-authority")],
+            )],
+        ),
+        active_proof_attempt_to_close: None,
+        independent_evidence_required:
+            CredentialLifecycleIndependentEvidenceRequirement::NotRequired,
+        pending_action: None,
+        immediate_subject_auth_revocation:
+            CredentialResetSubjectAuthRevocation::RevokeSubjectAuthState,
+    });
+
+    let plan_error = runtime
+        .execute_from_headers(&HeaderMap::new(), direct_plan)
+        .await
+        .expect_err("runtime must not accept caller-provided credential reset lifecycle context");
+
+    assert!(matches!(
+        plan_error,
+        super::super::postgres_runtime::AuthPostgresWebRuntimeExecutionError::Core(
+            Error::CredentialResetPlanningRequiresRuntimeLifecycleDecision
+        )
+    ));
+
+    let direct_execute = Command::ExecuteCredentialReset(ExecuteCredentialReset {
+        now: at(30),
+        execution_authority: CredentialResetExecutionAuthority::Immediate {
+            lifecycle_context: credential_lifecycle_context(
+                message_signature_credential_metadata("direct-reset-password-credential"),
+                [CredentialRecoveryAuthority::new(
+                    target_credential_id,
+                    CredentialLifecycleAction::Reset,
+                    id("direct-reset-authority"),
+                    RecoveryAuthorityTiming::Immediate,
+                )],
+                [credential_instance_lifecycle_evidence(
+                    "direct-reset-source",
+                    [id("direct-reset-authority")],
+                )],
+            ),
+            independent_evidence_required:
+                CredentialLifecycleIndependentEvidenceRequirement::NotRequired,
+        },
+        method_commit_work: vec![password_reset_method_commit_work(b"direct-reset-verifier")],
+        subject_auth_revocation: CredentialResetSubjectAuthRevocation::RevokeSubjectAuthState,
+    });
+
+    let execute_error = runtime
+        .execute_from_headers(&HeaderMap::new(), direct_execute)
+        .await
+        .expect_err("runtime must not accept caller-provided credential reset method work");
+
+    assert!(matches!(
+        execute_error,
+        super::super::postgres_runtime::AuthPostgresWebRuntimeExecutionError::Core(
+            Error::CredentialResetExecutionRequiresRuntimeMethodDispatch
+        )
+    ));
+
+    let direct_cancel = Command::CancelPendingCredentialReset(CancelPendingCredentialReset {
+        now: at(30),
+        target_credential: message_signature_credential_metadata(
+            "direct-reset-password-credential",
+        ),
+        pending_action: PendingCredentialLifecycleActionRecord::new_open(
+            id("direct-reset-pending-action"),
+            id("subject"),
+            id("direct-reset-password-credential"),
+            CredentialLifecycleAction::Reset,
+            at(10),
+            at(100),
+            at(200),
+        )
+        .expect("pending reset action"),
+    });
+
+    let cancel_error = runtime
+        .execute_from_headers(&HeaderMap::new(), direct_cancel)
+        .await
+        .expect_err("runtime must not accept caller-provided credential reset cancellation facts");
+
+    assert!(matches!(
+        cancel_error,
+        super::super::postgres_runtime::AuthPostgresWebRuntimeExecutionError::Core(
+            Error::CredentialResetCancellationRequiresRuntimeLifecycleDecision
+        )
+    ));
+
+    let direct_lifecycle_execute = Command::ExecuteNonResetPendingCredentialLifecycleAction(
+        ExecuteNonResetPendingCredentialLifecycleAction {
+            now: at(30),
+            target_credential: message_signature_credential_metadata(
+                "direct-replacement-password-credential",
+            ),
+            pending_action: PendingCredentialLifecycleActionRecord::new_open(
+                id("direct-replacement-pending-action"),
+                id("subject"),
+                id("direct-replacement-password-credential"),
+                CredentialLifecycleAction::Replace,
+                at(10),
+                at(20),
+                at(200),
+            )
+            .expect("pending replacement action"),
+            method_commit_work: vec![password_reset_method_commit_work(
+                b"direct-replacement-verifier",
+            )],
+            subject_auth_revocation:
+                CredentialLifecycleSubjectAuthRevocation::PreserveExistingAuthState,
+        },
+    );
+
+    let lifecycle_execute_error = runtime
+        .execute_from_headers(&HeaderMap::new(), direct_lifecycle_execute)
+        .await
+        .expect_err("runtime must not accept caller-provided lifecycle execution facts");
+
+    assert!(matches!(
+        lifecycle_execute_error,
+        super::super::postgres_runtime::AuthPostgresWebRuntimeExecutionError::Core(
+            Error::CredentialLifecycleExecutionRequiresRuntimeMethodDispatch
+        )
+    ));
+
+    let direct_lifecycle_cancel = Command::CancelNonResetPendingCredentialLifecycleAction(
+        CancelNonResetPendingCredentialLifecycleAction {
+            now: at(30),
+            target_credential: message_signature_credential_metadata(
+                "direct-replacement-password-credential",
+            ),
+            pending_action: PendingCredentialLifecycleActionRecord::new_open(
+                id("direct-replacement-pending-action"),
+                id("subject"),
+                id("direct-replacement-password-credential"),
+                CredentialLifecycleAction::Replace,
+                at(10),
+                at(100),
+                at(200),
+            )
+            .expect("pending replacement action"),
+        },
+    );
+
+    let lifecycle_cancel_error = runtime
+        .execute_from_headers(&HeaderMap::new(), direct_lifecycle_cancel)
+        .await
+        .expect_err("runtime must not accept caller-provided lifecycle cancellation facts");
+
+    assert!(matches!(
+        lifecycle_cancel_error,
+        super::super::postgres_runtime::AuthPostgresWebRuntimeExecutionError::Core(
+            Error::CredentialLifecycleCancellationRequiresRuntimeLifecycleDecision
+        )
+    ));
+
+    harness.drop_schema().await;
+}
+
+#[tokio::test]
+async fn postgres_runtime_authenticated_credential_reset_planning_builds_lifecycle_context_internally()
+ {
+    let _postgres_runtime_test_guard = AUTH_POSTGRES_RUNTIME_TEST_LOCK.lock().await;
+    let Some(harness) = PostgresRuntimeTestHarness::connect_or_skip_with_email_otp_method().await
+    else {
+        return;
+    };
+    let pool = &harness.pool;
+    let store_config = &harness.store_config;
+    let runtime = &harness.runtime;
+    let subject_id = id("authenticated-reset-plan-subject");
+    let issued_auth = complete_full_authentication_through_runtime(
+        runtime,
+        pool,
+        store_config,
+        email_otp_plugin_for_harness(&harness),
+        "authenticated-reset-plan-bootstrap",
+        20,
+        subject_id.clone(),
+        false,
+    )
+    .await;
+    let target_credential_id = id("authenticated-reset-plan-password");
+    let session_authority = id("authenticated-reset-plan-session-authority");
+    let seed_store = super::super::postgres_store::PostgresAuthStore::new(
+        store_config.clone(),
+        test_keyset("tests.auth.postgres-runtime.credentials.v1"),
+    );
+    seed_store
+        .store_credential_lifecycle_metadata_for_test(
+            pool,
+            &[CredentialInstanceMetadata::new(
+                target_credential_id.clone(),
+                subject_id.clone(),
+                CredentialInstanceKind::MessageSignatureVerifier,
+                "password_signature",
+                CredentialLifecycleState::Active,
+            )
+            .expect("credential metadata")],
+            &[CredentialRecoveryAuthority::new(
+                target_credential_id.clone(),
+                CredentialLifecycleAction::Reset,
+                session_authority.clone(),
+                RecoveryAuthorityTiming::Immediate,
+            )],
+            &[LifecycleAuthorityEvidence::authenticated_session(
+                issued_auth.session_id.clone(),
+                [session_authority],
+            )
+            .expect("session lifecycle evidence")],
+            at(50),
+        )
+        .await
+        .expect("seed credential lifecycle metadata");
+    let headers = headers_from_cookie_pairs(&[issued_auth.session_cookie_pair.as_str()]);
+
+    let execution = runtime
+        .execute_authenticated_credential_reset_planning_from_headers(
+            &headers,
+            PlanAuthenticatedCredentialResetInput {
+                now: at(80),
+                target_credential_instance_id: target_credential_id.clone(),
+                independent_evidence_required:
+                    CredentialLifecycleIndependentEvidenceRequirement::NotRequired,
+                pending_action_timing: None,
+                immediate_subject_auth_revocation:
+                    CredentialResetSubjectAuthRevocation::RevokeSubjectAuthState,
+            },
+        )
+        .await
+        .expect("plan authenticated credential reset");
+
+    assert_eq!(
+        execution.outcome(),
+        &Outcome::CredentialResetPlanned(CredentialResetOutcome::AuthorizedImmediate {
+            subject_id: subject_id.clone(),
+            target_credential_instance_id: target_credential_id.clone(),
+        })
+    );
+    assert_eq!(
+        count_security_notification_effects_for_subject(pool, store_config, &subject_id).await,
+        1,
+        "credential reset planning must atomically schedule an authorization notice"
+    );
+    assert_eq!(
+        count_open_pending_credential_reset_actions_for_target(
+            pool,
+            store_config,
+            &target_credential_id,
+        )
+        .await,
+        0,
+        "immediate reset planning must not create a pending action"
+    );
+
+    harness.drop_schema().await;
+}
+
+#[tokio::test]
+async fn postgres_runtime_authenticated_credential_reset_planning_generates_pending_action_internally()
+ {
+    let _postgres_runtime_test_guard = AUTH_POSTGRES_RUNTIME_TEST_LOCK.lock().await;
+    let Some(harness) = PostgresRuntimeTestHarness::connect_or_skip_with_email_otp_method().await
+    else {
+        return;
+    };
+    let pool = &harness.pool;
+    let store_config = &harness.store_config;
+    let runtime = &harness.runtime;
+    let subject_id = id("authenticated-delayed-reset-plan-subject");
+    let issued_auth = complete_full_authentication_through_runtime(
+        runtime,
+        pool,
+        store_config,
+        email_otp_plugin_for_harness(&harness),
+        "authenticated-delayed-reset-plan-bootstrap",
+        20,
+        subject_id.clone(),
+        false,
+    )
+    .await;
+    let target_credential_id = id("authenticated-delayed-reset-password");
+    let session_authority = id("authenticated-delayed-reset-session-authority");
+    let seed_store = super::super::postgres_store::PostgresAuthStore::new(
+        store_config.clone(),
+        test_keyset("tests.auth.postgres-runtime.credentials.v1"),
+    );
+    seed_store
+        .store_credential_lifecycle_metadata_for_test(
+            pool,
+            &[CredentialInstanceMetadata::new(
+                target_credential_id.clone(),
+                subject_id.clone(),
+                CredentialInstanceKind::MessageSignatureVerifier,
+                "password_signature",
+                CredentialLifecycleState::Active,
+            )
+            .expect("credential metadata")],
+            &[CredentialRecoveryAuthority::new(
+                target_credential_id.clone(),
+                CredentialLifecycleAction::Reset,
+                session_authority.clone(),
+                RecoveryAuthorityTiming::Delayed,
+            )],
+            &[LifecycleAuthorityEvidence::authenticated_session(
+                issued_auth.session_id.clone(),
+                [session_authority],
+            )
+            .expect("session lifecycle evidence")],
+            at(50),
+        )
+        .await
+        .expect("seed credential lifecycle metadata");
+    let headers = headers_from_cookie_pairs(&[issued_auth.session_cookie_pair.as_str()]);
+
+    let execution = runtime
+        .execute_authenticated_credential_reset_planning_from_headers(
+            &headers,
+            PlanAuthenticatedCredentialResetInput {
+                now: at(80),
+                target_credential_instance_id: target_credential_id.clone(),
+                independent_evidence_required:
+                    CredentialLifecycleIndependentEvidenceRequirement::NotRequired,
+                pending_action_timing: Some(CredentialResetPendingActionTiming {
+                    earliest_execute_at: at(200),
+                    expires_at: at(300),
+                }),
+                immediate_subject_auth_revocation:
+                    CredentialResetSubjectAuthRevocation::RevokeSubjectAuthState,
+            },
+        )
+        .await
+        .expect("plan delayed authenticated credential reset");
+
+    let pending_action_id = match execution.outcome() {
+        Outcome::CredentialResetPlanned(CredentialResetOutcome::PendingActionCreated {
+            subject_id: actual_subject_id,
+            target_credential_instance_id,
+            pending_action_id,
+            earliest_execute_at,
+            expires_at,
+        }) => {
+            assert_eq!(actual_subject_id, &subject_id);
+            assert_eq!(target_credential_instance_id, &target_credential_id);
+            assert_eq!(earliest_execute_at, &at(200));
+            assert_eq!(expires_at, &at(300));
+            pending_action_id.clone()
+        }
+        outcome => panic!("expected pending reset action, got {outcome:?}"),
+    };
+    assert_eq!(
+        count_open_pending_credential_reset_actions_for_pending_action(
+            pool,
+            store_config,
+            &pending_action_id,
+        )
+        .await,
+        1,
+        "runtime-generated pending action id must be committed"
+    );
+
+    harness.drop_schema().await;
+}
+
+#[tokio::test]
+async fn postgres_runtime_reschedules_reset_after_expiry_with_quiet_cleanup() {
+    let _postgres_runtime_test_guard = AUTH_POSTGRES_RUNTIME_TEST_LOCK.lock().await;
+    let Some(harness) = PostgresRuntimeTestHarness::connect_or_skip_with_email_otp_method().await
+    else {
+        return;
+    };
+    let pool = &harness.pool;
+    let store_config = &harness.store_config;
+    let runtime = &harness.runtime;
+    let subject_id = id("authenticated-expired-reset-reschedule-subject");
+    let issued_auth = complete_full_authentication_through_runtime(
+        runtime,
+        pool,
+        store_config,
+        email_otp_plugin_for_harness(&harness),
+        "authenticated-expired-reset-reschedule-bootstrap",
+        20,
+        subject_id.clone(),
+        false,
+    )
+    .await;
+    let target_credential_id = id("authenticated-expired-reset-password");
+    let session_authority = id("authenticated-expired-reset-session-authority");
+    let seed_store = super::super::postgres_store::PostgresAuthStore::new(
+        store_config.clone(),
+        test_keyset("tests.auth.postgres-runtime.credentials.v1"),
+    );
+    seed_store
+        .store_credential_lifecycle_metadata_for_test(
+            pool,
+            &[CredentialInstanceMetadata::new(
+                target_credential_id.clone(),
+                subject_id.clone(),
+                CredentialInstanceKind::MessageSignatureVerifier,
+                "password_signature",
+                CredentialLifecycleState::Active,
+            )
+            .expect("credential metadata")],
+            &[CredentialRecoveryAuthority::new(
+                target_credential_id.clone(),
+                CredentialLifecycleAction::Reset,
+                session_authority.clone(),
+                RecoveryAuthorityTiming::Delayed,
+            )],
+            &[LifecycleAuthorityEvidence::authenticated_session(
+                issued_auth.session_id.clone(),
+                [session_authority],
+            )
+            .expect("session lifecycle evidence")],
+            at(50),
+        )
+        .await
+        .expect("seed credential lifecycle metadata");
+    let headers = headers_from_cookie_pairs(&[issued_auth.session_cookie_pair.as_str()]);
+
+    let expired_planned = runtime
+        .execute_authenticated_credential_reset_planning_from_headers(
+            &headers,
+            PlanAuthenticatedCredentialResetInput {
+                now: at(80),
+                target_credential_instance_id: target_credential_id.clone(),
+                independent_evidence_required:
+                    CredentialLifecycleIndependentEvidenceRequirement::NotRequired,
+                pending_action_timing: Some(CredentialResetPendingActionTiming {
+                    earliest_execute_at: at(82),
+                    expires_at: at(83),
+                }),
+                immediate_subject_auth_revocation:
+                    CredentialResetSubjectAuthRevocation::RevokeSubjectAuthState,
+            },
+        )
+        .await
+        .expect("plan soon-expiring authenticated credential reset");
+    let expired_pending_action_id = match expired_planned.outcome() {
+        Outcome::CredentialResetPlanned(CredentialResetOutcome::PendingActionCreated {
+            pending_action_id,
+            ..
+        }) => pending_action_id.clone(),
+        outcome => panic!("expected pending reset action, got {outcome:?}"),
+    };
+    assert_eq!(
+        count_open_pending_credential_reset_actions_for_pending_action(
+            pool,
+            store_config,
+            &expired_pending_action_id,
+        )
+        .await,
+        1,
+        "first pending reset starts open"
+    );
+
+    let replacement_planned = runtime
+        .execute_authenticated_credential_reset_planning_from_headers(
+            &headers,
+            PlanAuthenticatedCredentialResetInput {
+                now: at(84),
+                target_credential_instance_id: target_credential_id.clone(),
+                independent_evidence_required:
+                    CredentialLifecycleIndependentEvidenceRequirement::NotRequired,
+                pending_action_timing: Some(CredentialResetPendingActionTiming {
+                    earliest_execute_at: at(200),
+                    expires_at: at(300),
+                }),
+                immediate_subject_auth_revocation:
+                    CredentialResetSubjectAuthRevocation::RevokeSubjectAuthState,
+            },
+        )
+        .await
+        .expect("expired pending reset must not block replacement scheduling");
+    let replacement_pending_action_id = match replacement_planned.outcome() {
+        Outcome::CredentialResetPlanned(CredentialResetOutcome::PendingActionCreated {
+            pending_action_id,
+            ..
+        }) => pending_action_id.clone(),
+        outcome => panic!("expected replacement pending reset action, got {outcome:?}"),
+    };
+
+    assert_eq!(
+        pending_credential_reset_closed_at_for_pending_action(
+            pool,
+            store_config,
+            &expired_pending_action_id,
+        )
+        .await,
+        Some(84),
+        "expired pending reset cleanup is a quiet close at transition time"
+    );
+    assert_eq!(
+        count_open_pending_credential_reset_actions_for_pending_action(
+            pool,
+            store_config,
+            &replacement_pending_action_id,
+        )
+        .await,
+        1,
+        "replacement pending reset remains open"
+    );
+
+    harness.drop_schema().await;
+}
+
+#[tokio::test]
+async fn postgres_runtime_authenticated_pending_credential_reset_cancellation_closes_open_action() {
+    let _postgres_runtime_test_guard = AUTH_POSTGRES_RUNTIME_TEST_LOCK.lock().await;
+    let Some(harness) = PostgresRuntimeTestHarness::connect_or_skip_with_email_otp_method().await
+    else {
+        return;
+    };
+    let pool = &harness.pool;
+    let store_config = &harness.store_config;
+    let runtime = &harness.runtime;
+    let subject_id = id("authenticated-reset-cancel-subject");
+    let issued_auth = complete_full_authentication_through_runtime(
+        runtime,
+        pool,
+        store_config,
+        email_otp_plugin_for_harness(&harness),
+        "authenticated-reset-cancel-bootstrap",
+        20,
+        subject_id.clone(),
+        false,
+    )
+    .await;
+    let target_credential_id = id("authenticated-reset-cancel-password");
+    let session_authority = id("authenticated-reset-cancel-session-authority");
+    let seed_store = super::super::postgres_store::PostgresAuthStore::new(
+        store_config.clone(),
+        test_keyset("tests.auth.postgres-runtime.credentials.v1"),
+    );
+    seed_store
+        .store_credential_lifecycle_metadata_for_test(
+            pool,
+            &[CredentialInstanceMetadata::new(
+                target_credential_id.clone(),
+                subject_id.clone(),
+                CredentialInstanceKind::MessageSignatureVerifier,
+                "password_signature",
+                CredentialLifecycleState::Active,
+            )
+            .expect("credential metadata")],
+            &[CredentialRecoveryAuthority::new(
+                target_credential_id.clone(),
+                CredentialLifecycleAction::Reset,
+                session_authority.clone(),
+                RecoveryAuthorityTiming::Delayed,
+            )],
+            &[LifecycleAuthorityEvidence::authenticated_session(
+                issued_auth.session_id.clone(),
+                [session_authority],
+            )
+            .expect("session lifecycle evidence")],
+            at(50),
+        )
+        .await
+        .expect("seed credential lifecycle metadata");
+    let headers = headers_from_cookie_pairs(&[issued_auth.session_cookie_pair.as_str()]);
+
+    let planned = runtime
+        .execute_authenticated_credential_reset_planning_from_headers(
+            &headers,
+            PlanAuthenticatedCredentialResetInput {
+                now: at(80),
+                target_credential_instance_id: target_credential_id.clone(),
+                independent_evidence_required:
+                    CredentialLifecycleIndependentEvidenceRequirement::NotRequired,
+                pending_action_timing: Some(CredentialResetPendingActionTiming {
+                    earliest_execute_at: at(200),
+                    expires_at: at(300),
+                }),
+                immediate_subject_auth_revocation:
+                    CredentialResetSubjectAuthRevocation::RevokeSubjectAuthState,
+            },
+        )
+        .await
+        .expect("plan delayed authenticated credential reset");
+    let pending_action_id = match planned.outcome() {
+        Outcome::CredentialResetPlanned(CredentialResetOutcome::PendingActionCreated {
+            pending_action_id,
+            ..
+        }) => pending_action_id.clone(),
+        outcome => panic!("expected pending reset action, got {outcome:?}"),
+    };
+
+    let cancellation = runtime
+        .execute_authenticated_pending_credential_reset_cancellation_from_headers(
+            &headers,
+            CancelAuthenticatedPendingCredentialResetInput {
+                now: at(90),
+                pending_action_id: pending_action_id.clone(),
+            },
+        )
+        .await
+        .expect("cancel pending credential reset");
+
+    assert_eq!(
+        cancellation.outcome(),
+        &Outcome::CredentialResetPendingActionCancelled(CredentialResetCancellationOutcome {
+            subject_id: subject_id.clone(),
+            target_credential_instance_id: target_credential_id,
+            pending_action_id: pending_action_id.clone(),
+        })
+    );
+    assert_eq!(
+        count_open_pending_credential_reset_actions_for_pending_action(
+            pool,
+            store_config,
+            &pending_action_id,
+        )
+        .await,
+        0,
+        "cancellation must close the pending reset action"
+    );
+    assert_eq!(
+        count_security_notification_effects_for_subject(pool, store_config, &subject_id).await,
+        2,
+        "scheduling and cancellation must both commit security notices"
+    );
+
+    let replay_error = runtime
+        .execute_authenticated_pending_credential_reset_cancellation_from_headers(
+            &headers,
+            CancelAuthenticatedPendingCredentialResetInput {
+                now: at(95),
+                pending_action_id,
+            },
+        )
+        .await
+        .expect_err("closed pending reset cancellation must not replay");
+
+    assert!(matches!(
+        replay_error,
+        super::super::postgres_runtime::AuthPostgresWebRuntimeExecutionError::Core(
+            Error::PendingCredentialLifecycleActionNotCancellable
+        )
+    ));
+
+    harness.drop_schema().await;
+}
+
+#[tokio::test]
+async fn postgres_runtime_unauthenticated_credential_reset_planning_consumes_recovery_attempt() {
+    let _postgres_runtime_test_guard = AUTH_POSTGRES_RUNTIME_TEST_LOCK.lock().await;
+    let Some(harness) =
+        PostgresRuntimeTestHarness::connect_or_skip_with_recovery_code_method().await
+    else {
+        return;
+    };
+    let pool = &harness.pool;
+    let store_config = &harness.store_config;
+    let runtime = &harness.runtime;
+    let recovery_code_plugin = harness
+        .recovery_code_plugin
+        .as_ref()
+        .expect("recovery code method plugin");
+    let subject_id: SubjectId = id("unauthenticated-reset-plan-subject");
+    let target_credential_id = id("unauthenticated-reset-plan-password");
+    let recovery_authority = id("unauthenticated-reset-plan-recovery-authority");
+    let recovery_code_id = b"recovery-plan-id";
+    let recovery_code_secret = b"correct-recovery";
+    let recovery_code_source = VerifiedProofSource::new(
+        VerifiedProofSourceKind::CredentialInstance,
+        VerifiedProofSourceId::from_bytes(recovery_code_id.as_slice())
+            .expect("recovery code source id"),
+    );
+    recovery_code_plugin
+        .store_recovery_code_for_test(
+            pool,
+            &subject_id,
+            recovery_code_id,
+            recovery_code_secret,
+            at(10),
+        )
+        .await
+        .expect("store recovery code verifier state");
+    let seed_store = super::super::postgres_store::PostgresAuthStore::new(
+        store_config.clone(),
+        test_keyset("tests.auth.postgres-runtime.credentials.v1"),
+    );
+    seed_store
+        .store_credential_lifecycle_metadata_for_test(
+            pool,
+            &[CredentialInstanceMetadata::new(
+                target_credential_id.clone(),
+                subject_id.clone(),
+                CredentialInstanceKind::MessageSignatureVerifier,
+                "password_signature",
+                CredentialLifecycleState::Active,
+            )
+            .expect("credential metadata")],
+            &[CredentialRecoveryAuthority::new(
+                target_credential_id.clone(),
+                CredentialLifecycleAction::Reset,
+                recovery_authority.clone(),
+                RecoveryAuthorityTiming::Delayed,
+            )],
+            &[LifecycleAuthorityEvidence::from_verified_proof_source(
+                recovery_code_source,
+                [recovery_authority],
+            )
+            .expect("recovery code lifecycle evidence")],
+            at(50),
+        )
+        .await
+        .expect("seed credential lifecycle metadata");
+    let issued_auth = complete_full_authentication_through_runtime(
+        runtime,
+        pool,
+        store_config,
+        email_otp_plugin_for_harness(&harness),
+        "unauthenticated-reset-plan-bootstrap",
+        20,
+        subject_id.clone(),
+        false,
+    )
+    .await;
+    let started = start_current_session_active_proof_attempt_through_runtime(
+        runtime,
+        issued_auth.session_cookie_pair.as_str(),
+        at(70),
+        ProofUse::RecoverOrReplaceCredential,
+    )
+    .await;
+    let continuation_headers =
+        headers_from_cookie_pairs(&[started.continuation_cookie_pair.as_str()]);
+    let sealed_response = recovery_code_plugin
+        .sealed_recovery_code_response_for_test(&subject_id, recovery_code_secret)
+        .expect("sealed recovery code response");
+    runtime
+        .execute_known_subject_active_proof_method_response_from_headers(
+            &continuation_headers,
+            CompleteKnownSubjectActiveProofMethodResponse {
+                now: at(80),
+                method: ProofMethodDeclaration::new(ProofFamily::RecoveryCode, "recovery_code")
+                    .expect("recovery code method"),
+                secret_response: sealed_response,
+                weak_proof_gate_response: None,
+            },
+        )
+        .await
+        .expect("complete recovery code proof");
+
+    let execution = runtime
+        .execute_unauthenticated_credential_reset_planning_from_headers(
+            &continuation_headers,
+            PlanUnauthenticatedCredentialResetInput {
+                now: at(90),
+                target_credential_instance_id: target_credential_id.clone(),
+                independent_evidence_required:
+                    CredentialLifecycleIndependentEvidenceRequirement::NotRequired,
+                pending_action_timing: Some(CredentialResetPendingActionTiming {
+                    earliest_execute_at: at(200),
+                    expires_at: at(300),
+                }),
+                immediate_subject_auth_revocation:
+                    CredentialResetSubjectAuthRevocation::RevokeSubjectAuthState,
+            },
+        )
+        .await
+        .expect("plan unauthenticated credential reset");
+
+    let pending_action_id = match execution.outcome() {
+        Outcome::CredentialResetPlanned(CredentialResetOutcome::PendingActionCreated {
+            subject_id: actual_subject_id,
+            target_credential_instance_id,
+            pending_action_id,
+            ..
+        }) => {
+            assert_eq!(actual_subject_id, &subject_id);
+            assert_eq!(target_credential_instance_id, &target_credential_id);
+            pending_action_id.clone()
+        }
+        outcome => panic!("expected pending reset action, got {outcome:?}"),
+    };
+    assert_eq!(
+        count_open_pending_credential_reset_actions_for_pending_action(
+            pool,
+            store_config,
+            &pending_action_id,
+        )
+        .await,
+        1,
+        "recovery planning must create the pending action inside the runtime commit"
+    );
+    assert_eq!(
+        count_active_proof_attempts_for_attempt(pool, store_config, &started.attempt_id).await,
+        0,
+        "recovery planning must consume the active-proof attempt it used as lifecycle evidence"
+    );
+
+    harness.drop_schema().await;
+}
+
+#[tokio::test]
+async fn postgres_runtime_authenticated_credential_reset_builds_method_work_internally() {
+    let _postgres_runtime_test_guard = AUTH_POSTGRES_RUNTIME_TEST_LOCK.lock().await;
+    let Some(harness) =
+        PostgresRuntimeTestHarness::connect_or_skip_with_registered_plugins_for_test_method(
+            Some(TestMethodCommitFailureMode::None),
+            true,
+            None,
+            Some(proof_method(ProofFamily::MessageSignature)),
+            TestActiveMethodVerificationMode::BeforeStateLoad,
+        )
+        .await
+    else {
+        return;
+    };
+    let pool = &harness.pool;
+    let store_config = &harness.store_config;
+    let runtime = &harness.runtime;
+    let method_plugin = harness
+        .method_plugin
+        .as_ref()
+        .expect("message-signature reset method plugin");
+    let subject_id = id("authenticated-reset-subject");
+    let issued_auth = complete_full_authentication_through_runtime(
+        runtime,
+        pool,
+        store_config,
+        email_otp_plugin_for_harness(&harness),
+        "authenticated-reset-bootstrap",
+        20,
+        subject_id.clone(),
+        false,
+    )
+    .await;
+    let target_credential_id = id("authenticated-reset-password-credential");
+    let session_authority = id("authenticated-reset-session-authority");
+    let seed_store = super::super::postgres_store::PostgresAuthStore::new(
+        store_config.clone(),
+        test_keyset("tests.auth.postgres-runtime.credentials.v1"),
+    );
+    seed_store
+        .store_credential_lifecycle_metadata_for_test(
+            pool,
+            &[CredentialInstanceMetadata::new(
+                target_credential_id.clone(),
+                subject_id.clone(),
+                CredentialInstanceKind::MessageSignatureVerifier,
+                "password_signature",
+                CredentialLifecycleState::Active,
+            )
+            .expect("credential metadata")],
+            &[CredentialRecoveryAuthority::new(
+                target_credential_id.clone(),
+                CredentialLifecycleAction::Reset,
+                session_authority.clone(),
+                RecoveryAuthorityTiming::Immediate,
+            )],
+            &[LifecycleAuthorityEvidence::authenticated_session(
+                issued_auth.session_id.clone(),
+                [session_authority],
+            )
+            .expect("session lifecycle evidence")],
+            at(50),
+        )
+        .await
+        .expect("seed credential lifecycle metadata");
+    let headers = headers_from_cookie_pairs(&[issued_auth.session_cookie_pair.as_str()]);
+
+    let execution = runtime
+        .execute_authenticated_credential_reset_from_headers(
+            &headers,
+            ExecuteAuthenticatedCredentialResetInput {
+                now: at(80),
+                target_credential_instance_id: target_credential_id.clone(),
+                method_payload: CredentialResetMethodPayload::try_from_bytes(
+                    b"new-authenticated-password-verifier".as_slice(),
+                )
+                .expect("reset payload"),
+                independent_evidence_required:
+                    CredentialLifecycleIndependentEvidenceRequirement::NotRequired,
+                subject_auth_revocation:
+                    CredentialResetSubjectAuthRevocation::RevokeSubjectAuthState,
+            },
+        )
+        .await
+        .expect("execute authenticated credential reset");
+
+    assert_eq!(
+        execution.outcome(),
+        &Outcome::CredentialResetExecuted(CredentialResetExecutionOutcome {
+            subject_id: subject_id.clone(),
+            target_credential_instance_id: target_credential_id,
+            pending_action_id: None,
+        })
+    );
+    assert_eq!(
+        method_plugin.count_state_rows(pool).await,
+        1,
+        "method-owned verifier work must be committed through the registered plugin"
+    );
+    assert_eq!(
+        count_security_notification_effects_for_subject(pool, store_config, &subject_id).await,
+        1,
+        "credential reset execution must atomically schedule a security notice"
+    );
+
+    harness.drop_schema().await;
+}
+
+#[tokio::test]
+async fn postgres_runtime_mature_pending_credential_reset_builds_method_work_internally() {
+    let _postgres_runtime_test_guard = AUTH_POSTGRES_RUNTIME_TEST_LOCK.lock().await;
+    let Some(harness) =
+        PostgresRuntimeTestHarness::connect_or_skip_with_registered_plugins_for_test_method(
+            Some(TestMethodCommitFailureMode::None),
+            false,
+            None,
+            Some(proof_method(ProofFamily::MessageSignature)),
+            TestActiveMethodVerificationMode::BeforeStateLoad,
+        )
+        .await
+    else {
+        return;
+    };
+    let pool = &harness.pool;
+    let store_config = &harness.store_config;
+    let runtime = &harness.runtime;
+    let method_plugin = harness
+        .method_plugin
+        .as_ref()
+        .expect("message-signature reset method plugin");
+    let subject_id = id("pending-reset-subject");
+    let target_credential_id = id("pending-reset-password-credential");
+    let email_authority = id("pending-reset-email-authority");
+    let pending_action_id = id("pending-reset-action");
+    let seed_store = super::super::postgres_store::PostgresAuthStore::new(
+        store_config.clone(),
+        test_keyset("tests.auth.postgres-runtime.credentials.v1"),
+    );
+    seed_store
+        .store_credential_lifecycle_metadata_for_test(
+            pool,
+            &[CredentialInstanceMetadata::new(
+                target_credential_id.clone(),
+                subject_id.clone(),
+                CredentialInstanceKind::MessageSignatureVerifier,
+                "password_signature",
+                CredentialLifecycleState::Active,
+            )
+            .expect("credential metadata")],
+            &[CredentialRecoveryAuthority::new(
+                target_credential_id.clone(),
+                CredentialLifecycleAction::Reset,
+                email_authority.clone(),
+                RecoveryAuthorityTiming::Immediate,
+            )],
+            &[],
+            at(50),
+        )
+        .await
+        .expect("seed credential metadata");
+    seed_pending_credential_reset_for_runtime_test(
+        pool,
+        &seed_store,
+        target_credential_id.clone(),
+        email_authority,
+        pending_action_id.clone(),
+    )
+    .await;
+
+    let execution = runtime
+        .execute_mature_pending_credential_reset_from_headers(
+            &HeaderMap::new(),
+            ExecuteMaturePendingCredentialResetInput {
+                now: at(250),
+                pending_action_id: pending_action_id.clone(),
+                method_payload: CredentialResetMethodPayload::try_from_bytes(
+                    b"new-pending-password-verifier".as_slice(),
+                )
+                .expect("reset payload"),
+                subject_auth_revocation:
+                    CredentialResetSubjectAuthRevocation::RevokeSubjectAuthState,
+            },
+        )
+        .await
+        .expect("execute mature pending credential reset");
+
+    assert_eq!(
+        execution.outcome(),
+        &Outcome::CredentialResetExecuted(CredentialResetExecutionOutcome {
+            subject_id: subject_id.clone(),
+            target_credential_instance_id: target_credential_id,
+            pending_action_id: Some(pending_action_id.clone()),
+        })
+    );
+    assert_eq!(
+        method_plugin.count_state_rows(pool).await,
+        1,
+        "pending reset method work must be committed through the registered plugin"
+    );
+
+    let replay_error = runtime
+        .execute_mature_pending_credential_reset_from_headers(
+            &HeaderMap::new(),
+            ExecuteMaturePendingCredentialResetInput {
+                now: at(260),
+                pending_action_id,
+                method_payload: CredentialResetMethodPayload::try_from_bytes(
+                    b"new-pending-password-verifier".as_slice(),
+                )
+                .expect("reset payload"),
+                subject_auth_revocation:
+                    CredentialResetSubjectAuthRevocation::RevokeSubjectAuthState,
+            },
+        )
+        .await
+        .expect_err("closed pending credential reset must not replay");
+
+    assert!(matches!(
+        replay_error,
+        super::super::postgres_runtime::AuthPostgresWebRuntimeExecutionError::Core(
+            Error::PendingCredentialLifecycleActionNotExecutable
+        )
+    ));
+
+    harness.drop_schema().await;
+}
+
+#[tokio::test]
+async fn postgres_runtime_mature_pending_credential_replacement_builds_method_work_internally() {
+    let _postgres_runtime_test_guard = AUTH_POSTGRES_RUNTIME_TEST_LOCK.lock().await;
+    let Some(harness) =
+        PostgresRuntimeTestHarness::connect_or_skip_with_registered_plugins_for_test_method(
+            Some(TestMethodCommitFailureMode::None),
+            false,
+            None,
+            Some(proof_method(ProofFamily::MessageSignature)),
+            TestActiveMethodVerificationMode::BeforeStateLoad,
+        )
+        .await
+    else {
+        return;
+    };
+    let pool = &harness.pool;
+    let store_config = &harness.store_config;
+    let runtime = &harness.runtime;
+    let method_plugin = harness
+        .method_plugin
+        .as_ref()
+        .expect("message-signature lifecycle method plugin");
+    let subject_id = id("pending-replacement-subject");
+    let target_credential_id = id("pending-replacement-password-credential");
+    let pending_action_id = id("pending-replacement-action");
+    let seed_store = super::super::postgres_store::PostgresAuthStore::new(
+        store_config.clone(),
+        test_keyset("tests.auth.postgres-runtime.credentials.v1"),
+    );
+    seed_store
+        .store_credential_lifecycle_metadata_for_test(
+            pool,
+            &[CredentialInstanceMetadata::new(
+                target_credential_id.clone(),
+                subject_id.clone(),
+                CredentialInstanceKind::MessageSignatureVerifier,
+                "password_signature",
+                CredentialLifecycleState::Active,
+            )
+            .expect("credential metadata")],
+            &[],
+            &[],
+            at(50),
+        )
+        .await
+        .expect("seed credential metadata");
+    seed_store
+        .store_pending_credential_lifecycle_actions_for_test(
+            pool,
+            &[PendingCredentialLifecycleActionRecord::new_open(
+                pending_action_id.clone(),
+                subject_id.clone(),
+                target_credential_id.clone(),
+                CredentialLifecycleAction::Replace,
+                at(100),
+                at(200),
+                at(300),
+            )
+            .expect("pending replacement action")],
+        )
+        .await
+        .expect("seed pending replacement action");
+
+    let execution = runtime
+        .execute_mature_pending_credential_lifecycle_action_from_headers(
+            &HeaderMap::new(),
+            ExecuteMaturePendingCredentialLifecycleActionInput {
+                now: at(250),
+                pending_action_id: pending_action_id.clone(),
+                method_payload: Some(
+                    CredentialLifecycleMethodPayload::try_from_bytes(
+                        b"replacement-verifier".as_slice(),
+                    )
+                    .expect("lifecycle payload"),
+                ),
+                subject_auth_revocation:
+                    CredentialLifecycleSubjectAuthRevocation::RevokeSubjectAuthState,
+            },
+        )
+        .await
+        .expect("execute mature pending credential replacement");
+
+    assert_eq!(
+        execution.outcome(),
+        &Outcome::NonResetPendingCredentialLifecycleActionExecuted(
+            NonResetPendingCredentialLifecycleActionExecutionOutcome {
+                subject_id: subject_id.clone(),
+                target_credential_instance_id: target_credential_id.clone(),
+                action: CredentialLifecycleAction::Replace,
+                pending_action_id: pending_action_id.clone(),
+            }
+        )
+    );
+    assert_eq!(
+        method_plugin.count_state_rows(pool).await,
+        1,
+        "pending replacement method work must be committed through the registered plugin"
+    );
+    assert_eq!(
+        credential_lifecycle_state_for_runtime_test(pool, store_config, &target_credential_id)
+            .await,
+        CredentialLifecycleState::Superseded,
+        "replacement execution must supersede the old target credential"
+    );
+    assert_eq!(
+        count_open_pending_credential_lifecycle_actions_for_pending_action(
+            pool,
+            store_config,
+            &pending_action_id,
+            CredentialLifecycleAction::Replace,
+        )
+        .await,
+        0,
+        "replacement execution must close the pending action"
+    );
+
+    let replay_error = runtime
+        .execute_mature_pending_credential_lifecycle_action_from_headers(
+            &HeaderMap::new(),
+            ExecuteMaturePendingCredentialLifecycleActionInput {
+                now: at(260),
+                pending_action_id,
+                method_payload: Some(
+                    CredentialLifecycleMethodPayload::try_from_bytes(
+                        b"replacement-verifier".as_slice(),
+                    )
+                    .expect("lifecycle payload"),
+                ),
+                subject_auth_revocation:
+                    CredentialLifecycleSubjectAuthRevocation::RevokeSubjectAuthState,
+            },
+        )
+        .await
+        .expect_err("closed pending credential replacement must not replay");
+
+    assert!(matches!(
+        replay_error,
+        super::super::postgres_runtime::AuthPostgresWebRuntimeExecutionError::Core(
+            Error::PendingCredentialLifecycleActionNotExecutable
+        )
+    ));
+
+    harness.drop_schema().await;
+}
+
+#[tokio::test]
+async fn postgres_runtime_mature_pending_credential_removal_is_core_owned() {
+    let _postgres_runtime_test_guard = AUTH_POSTGRES_RUNTIME_TEST_LOCK.lock().await;
+    let Some(harness) = PostgresRuntimeTestHarness::connect_or_skip().await else {
+        return;
+    };
+    let pool = &harness.pool;
+    let store_config = &harness.store_config;
+    let runtime = &harness.runtime;
+    let subject_id = id("pending-removal-subject");
+    let target_credential_id = id("pending-removal-totp-credential");
+    let pending_action_id = id("pending-removal-action");
+    let seed_store = super::super::postgres_store::PostgresAuthStore::new(
+        store_config.clone(),
+        test_keyset("tests.auth.postgres-runtime.credentials.v1"),
+    );
+    seed_store
+        .store_credential_lifecycle_metadata_for_test(
+            pool,
+            &[CredentialInstanceMetadata::new(
+                target_credential_id.clone(),
+                subject_id.clone(),
+                CredentialInstanceKind::SharedSecretOtpVerifier,
+                "totp_app",
+                CredentialLifecycleState::Active,
+            )
+            .expect("credential metadata")],
+            &[],
+            &[],
+            at(50),
+        )
+        .await
+        .expect("seed credential metadata");
+    seed_store
+        .store_pending_credential_lifecycle_actions_for_test(
+            pool,
+            &[PendingCredentialLifecycleActionRecord::new_open(
+                pending_action_id.clone(),
+                subject_id.clone(),
+                target_credential_id.clone(),
+                CredentialLifecycleAction::Remove,
+                at(100),
+                at(200),
+                at(300),
+            )
+            .expect("pending removal action")],
+        )
+        .await
+        .expect("seed pending removal action");
+
+    let execution = runtime
+        .execute_mature_pending_credential_lifecycle_action_from_headers(
+            &HeaderMap::new(),
+            ExecuteMaturePendingCredentialLifecycleActionInput {
+                now: at(250),
+                pending_action_id: pending_action_id.clone(),
+                method_payload: None,
+                subject_auth_revocation:
+                    CredentialLifecycleSubjectAuthRevocation::PreserveExistingAuthState,
+            },
+        )
+        .await
+        .expect("execute mature pending credential removal");
+
+    assert_eq!(
+        execution.outcome(),
+        &Outcome::NonResetPendingCredentialLifecycleActionExecuted(
+            NonResetPendingCredentialLifecycleActionExecutionOutcome {
+                subject_id: subject_id.clone(),
+                target_credential_instance_id: target_credential_id.clone(),
+                action: CredentialLifecycleAction::Remove,
+                pending_action_id: pending_action_id.clone(),
+            }
+        )
+    );
+    assert_eq!(
+        credential_lifecycle_state_for_runtime_test(pool, store_config, &target_credential_id)
+            .await,
+        CredentialLifecycleState::Revoked,
+        "removal execution must revoke the target credential metadata"
+    );
+    assert_eq!(
+        count_open_pending_credential_lifecycle_actions_for_pending_action(
+            pool,
+            store_config,
+            &pending_action_id,
+            CredentialLifecycleAction::Remove,
+        )
+        .await,
+        0,
+        "removal execution must close the pending action"
+    );
+
+    harness.drop_schema().await;
+}
+
+#[tokio::test]
+async fn postgres_runtime_authenticated_pending_credential_replacement_cancellation_closes_open_action()
+ {
+    let _postgres_runtime_test_guard = AUTH_POSTGRES_RUNTIME_TEST_LOCK.lock().await;
+    let Some(harness) = PostgresRuntimeTestHarness::connect_or_skip_with_email_otp_method().await
+    else {
+        return;
+    };
+    let pool = &harness.pool;
+    let store_config = &harness.store_config;
+    let runtime = &harness.runtime;
+    let subject_id = id("pending-replacement-cancel-subject");
+    let issued_auth = complete_full_authentication_through_runtime(
+        runtime,
+        pool,
+        store_config,
+        email_otp_plugin_for_harness(&harness),
+        "pending-replacement-cancel-bootstrap",
+        20,
+        subject_id.clone(),
+        false,
+    )
+    .await;
+    let target_credential_id = id("pending-replacement-cancel-credential");
+    let pending_action_id = id("pending-replacement-cancel-action");
+    let seed_store = super::super::postgres_store::PostgresAuthStore::new(
+        store_config.clone(),
+        test_keyset("tests.auth.postgres-runtime.credentials.v1"),
+    );
+    seed_store
+        .store_credential_lifecycle_metadata_for_test(
+            pool,
+            &[CredentialInstanceMetadata::new(
+                target_credential_id.clone(),
+                subject_id.clone(),
+                CredentialInstanceKind::MessageSignatureVerifier,
+                "password_signature",
+                CredentialLifecycleState::Active,
+            )
+            .expect("credential metadata")],
+            &[],
+            &[],
+            at(50),
+        )
+        .await
+        .expect("seed credential metadata");
+    seed_store
+        .store_pending_credential_lifecycle_actions_for_test(
+            pool,
+            &[PendingCredentialLifecycleActionRecord::new_open(
+                pending_action_id.clone(),
+                subject_id.clone(),
+                target_credential_id.clone(),
+                CredentialLifecycleAction::Replace,
+                at(100),
+                at(200),
+                at(300),
+            )
+            .expect("pending replacement action")],
+        )
+        .await
+        .expect("seed pending replacement action");
+    let headers = headers_from_cookie_pairs(&[issued_auth.session_cookie_pair.as_str()]);
+
+    let execution = runtime
+        .execute_authenticated_pending_credential_lifecycle_action_cancellation_from_headers(
+            &headers,
+            CancelAuthenticatedPendingCredentialLifecycleActionInput {
+                now: at(80),
+                pending_action_id: pending_action_id.clone(),
+            },
+        )
+        .await
+        .expect("cancel pending credential replacement");
+
+    assert_eq!(
+        execution.outcome(),
+        &Outcome::NonResetPendingCredentialLifecycleActionCancelled(
+            NonResetPendingCredentialLifecycleActionCancellationOutcome {
+                subject_id,
+                target_credential_instance_id: target_credential_id,
+                action: CredentialLifecycleAction::Replace,
+                pending_action_id: pending_action_id.clone(),
+            }
+        )
+    );
+    assert_eq!(
+        count_open_pending_credential_lifecycle_actions_for_pending_action(
+            pool,
+            store_config,
+            &pending_action_id,
+            CredentialLifecycleAction::Replace,
+        )
+        .await,
+        0,
+        "cancellation must close the pending replacement action"
+    );
+
+    let replay_error = runtime
+        .execute_authenticated_pending_credential_lifecycle_action_cancellation_from_headers(
+            &headers,
+            CancelAuthenticatedPendingCredentialLifecycleActionInput {
+                now: at(90),
+                pending_action_id,
+            },
+        )
+        .await
+        .expect_err("closed pending credential replacement cancellation must not replay");
+
+    assert!(matches!(
+        replay_error,
+        super::super::postgres_runtime::AuthPostgresWebRuntimeExecutionError::Core(
+            Error::PendingCredentialLifecycleActionNotCancellable
+        )
+    ));
+
+    harness.drop_schema().await;
+}
+
+#[tokio::test]
 async fn postgres_runtime_rejects_out_of_band_completion_without_challenge_runtime() {
     let _postgres_runtime_test_guard = AUTH_POSTGRES_RUNTIME_TEST_LOCK.lock().await;
     let Some(harness) = PostgresRuntimeTestHarness::connect_or_skip().await else {
@@ -2921,9 +4722,11 @@ async fn postgres_runtime_derives_email_otp_subject_from_method_state() {
     let _postgres_runtime_test_guard = AUTH_POSTGRES_RUNTIME_TEST_LOCK.lock().await;
     let recipient_handle = "subject-resolving-email-otp-recipient";
     let subject_id: SubjectId = id("subject-resolved-by-email-otp-plugin");
+    let source_id: VerifiedProofSourceId = id("verified-email-identifier-binding");
     let subject_resolver = Arc::new(StaticEmailOtpSubjectResolver::new(
         recipient_handle,
         subject_id.clone(),
+        source_id.clone(),
     ));
     let Some(harness) =
         PostgresRuntimeTestHarness::connect_or_skip_with_email_otp_subject_resolver(
@@ -2999,6 +4802,13 @@ async fn postgres_runtime_derives_email_otp_subject_from_method_state() {
         fetch_active_proof_attempt_subject_id(pool, store_config, &attempt_id).await,
         Some(subject_id),
     );
+    assert_eq!(
+        fetch_satisfied_proof_source_for_attempt(pool, store_config, &attempt_id).await,
+        Some(VerifiedProofSource::new(
+            VerifiedProofSourceKind::OutOfBandIdentifier,
+            source_id,
+        )),
+    );
     assert_eq!(subject_resolver.call_count(), 1);
 
     harness.drop_schema().await;
@@ -3011,6 +4821,7 @@ async fn postgres_runtime_rejects_bad_email_otp_before_subject_resolution() {
     let subject_resolver = Arc::new(StaticEmailOtpSubjectResolver::new(
         recipient_handle,
         id("bad-email-otp-fast-fail-subject"),
+        id("bad-email-otp-fast-fail-source"),
     ));
     let Some(harness) =
         PostgresRuntimeTestHarness::connect_or_skip_with_email_otp_subject_resolver(
@@ -3490,6 +5301,189 @@ async fn postgres_runtime_executes_session_and_trusted_device_lifecycle_when_dat
         count_active_proof_attempts_for_attempt(pool, store_config, &revival_attempt_id).await,
         0,
         "trusted-device active-proof revival must close and delete the revival attempt"
+    );
+
+    harness.drop_schema().await;
+}
+
+#[tokio::test]
+async fn postgres_runtime_tripwires_replayed_previous_secrets_after_grace() {
+    let _postgres_runtime_test_guard = AUTH_POSTGRES_RUNTIME_TEST_LOCK.lock().await;
+    let Some(harness) = PostgresRuntimeTestHarness::connect_or_skip().await else {
+        return;
+    };
+    let pool = &harness.pool;
+    let store_config = &harness.store_config;
+    let runtime = &harness.runtime;
+
+    let session_tripwire_state = complete_full_authentication_through_runtime(
+        runtime,
+        pool,
+        store_config,
+        email_otp_plugin_for_harness(&harness),
+        "session-tripwire",
+        20,
+        id("session-tripwire-subject"),
+        true,
+    )
+    .await;
+    let session_tripwire_device_id = session_tripwire_state
+        .trusted_device_credential_id
+        .clone()
+        .expect("session-tripwire trusted device id");
+    let original_session_cookie_pair = session_tripwire_state.session_cookie_pair.as_str();
+    let original_trusted_device_cookie_pair = session_tripwire_state
+        .trusted_device_cookie_pair
+        .as_deref()
+        .expect("session-tripwire trusted-device cookie");
+
+    let refreshed = runtime
+        .execute_request_resolution_from_headers(
+            &headers_from_cookie_pairs(&[original_session_cookie_pair]),
+            ResolveRequestInput {
+                now: at(130),
+                request_kind: RequestKind::StateChanging,
+            },
+        )
+        .await
+        .expect("refresh session before session tripwire replay");
+    assert!(matches!(
+        refreshed.outcome(),
+        Outcome::Authenticated(Authenticated {
+            source: AuthenticationSource::RefreshedSession,
+            ..
+        })
+    ));
+    assert_eq!(
+        count_session_secret_macs_for_session(
+            pool,
+            store_config,
+            &session_tripwire_state.session_id
+        )
+        .await,
+        2,
+        "session refresh must leave one current and one previous secret MAC"
+    );
+
+    let replayed_old_session = runtime
+        .execute_request_resolution_from_headers(
+            &headers_from_cookie_pairs(&[
+                original_session_cookie_pair,
+                original_trusted_device_cookie_pair,
+            ]),
+            ResolveRequestInput {
+                now: at(136),
+                request_kind: RequestKind::StateChanging,
+            },
+        )
+        .await
+        .expect("replay old session cookie after grace through Postgres runtime");
+    assert_eq!(
+        replayed_old_session.outcome(),
+        &Outcome::NeedsFullAuthentication
+    );
+    assert!(
+        set_cookie_headers_contain_deletion(
+            replayed_old_session.set_cookie_headers(),
+            "__Host-__paranoid_auth_session="
+        ),
+        "session tripwire must delete the presented session cookie"
+    );
+    assert!(
+        set_cookie_headers_contain_deletion(
+            replayed_old_session.set_cookie_headers(),
+            "__Host-__paranoid_auth_trusted_device="
+        ),
+        "session tripwire must delete the associated trusted-device cookie"
+    );
+    assert_eq!(
+        fetch_session_revoked_at(pool, store_config, &session_tripwire_state.session_id).await,
+        Some(136)
+    );
+    assert_eq!(
+        fetch_trusted_device_revoked_at(pool, store_config, &session_tripwire_device_id).await,
+        Some(136)
+    );
+
+    let trusted_device_tripwire_state = complete_full_authentication_through_runtime(
+        runtime,
+        pool,
+        store_config,
+        email_otp_plugin_for_harness(&harness),
+        "trusted-device-tripwire",
+        180,
+        id("trusted-device-tripwire-subject"),
+        true,
+    )
+    .await;
+    let trusted_device_tripwire_device_id = trusted_device_tripwire_state
+        .trusted_device_credential_id
+        .clone()
+        .expect("trusted-device-tripwire trusted device id");
+    let original_device_cookie_pair = trusted_device_tripwire_state
+        .trusted_device_cookie_pair
+        .as_deref()
+        .expect("trusted-device-tripwire trusted-device cookie");
+
+    let revived_from_device = runtime
+        .execute_request_resolution_from_headers(
+            &headers_from_cookie_pairs(&[original_device_cookie_pair]),
+            ResolveRequestInput {
+                now: at(220),
+                request_kind: RequestKind::StateChanging,
+            },
+        )
+        .await
+        .expect("silently revive from trusted-device before device tripwire replay");
+    assert!(matches!(
+        revived_from_device.outcome(),
+        Outcome::Authenticated(Authenticated {
+            source: AuthenticationSource::SilentTrustedDeviceRevival,
+            ..
+        })
+    ));
+    assert_eq!(
+        count_trusted_device_secret_macs_for_device(
+            pool,
+            store_config,
+            &trusted_device_tripwire_device_id
+        )
+        .await,
+        2,
+        "trusted-device rotation must leave one current and one previous secret MAC"
+    );
+    let session_count_before_device_tripwire = count_all_sessions(pool, store_config).await;
+
+    let replayed_old_device = runtime
+        .execute_request_resolution_from_headers(
+            &headers_from_cookie_pairs(&[original_device_cookie_pair]),
+            ResolveRequestInput {
+                now: at(226),
+                request_kind: RequestKind::StateChanging,
+            },
+        )
+        .await
+        .expect("replay old trusted-device cookie after grace through Postgres runtime");
+    assert_eq!(
+        replayed_old_device.outcome(),
+        &Outcome::NeedsFullAuthentication
+    );
+    assert!(
+        set_cookie_headers_contain_deletion(
+            replayed_old_device.set_cookie_headers(),
+            "__Host-__paranoid_auth_trusted_device="
+        ),
+        "trusted-device tripwire must delete the presented trusted-device cookie"
+    );
+    assert_eq!(
+        fetch_trusted_device_revoked_at(pool, store_config, &trusted_device_tripwire_device_id)
+            .await,
+        Some(226)
+    );
+    assert_eq!(
+        count_all_sessions(pool, store_config).await,
+        session_count_before_device_tripwire,
+        "trusted-device tripwire must not create a replacement session"
     );
 
     harness.drop_schema().await;
@@ -5223,6 +7217,77 @@ async fn commit_planned_work_in_current_transaction_expect_precondition_error(
         .expect_err("stale runtime command commit must fail")
 }
 
+async fn seed_pending_credential_reset_for_runtime_test(
+    pool: &Pool,
+    store: &super::super::postgres_store::PostgresAuthStore,
+    target_credential_id: VerifiedProofSourceId,
+    email_authority: RecoveryAuthorityId,
+    pending_action_id: PendingCredentialLifecycleActionId,
+) {
+    let transition = reduce_command(
+        &config(),
+        Command::PlanCredentialReset(PlanCredentialReset {
+            now: at(100),
+            lifecycle_context: credential_lifecycle_context(
+                CredentialInstanceMetadata::new(
+                    target_credential_id.clone(),
+                    id("pending-reset-subject"),
+                    CredentialInstanceKind::MessageSignatureVerifier,
+                    "password_signature",
+                    CredentialLifecycleState::Active,
+                )
+                .expect("pending reset credential metadata"),
+                [CredentialRecoveryAuthority::new(
+                    target_credential_id,
+                    CredentialLifecycleAction::Reset,
+                    email_authority.clone(),
+                    RecoveryAuthorityTiming::Immediate,
+                )],
+                [out_of_band_identifier_lifecycle_evidence(
+                    "pending-reset-email-source",
+                    [email_authority],
+                )],
+            ),
+            active_proof_attempt_to_close: None,
+            independent_evidence_required:
+                CredentialLifecycleIndependentEvidenceRequirement::Required,
+            pending_action: Some(PendingCredentialLifecycleActionSchedule {
+                pending_action_id,
+                earliest_execute_at: at(200),
+                expires_at: at(300),
+            }),
+            immediate_subject_auth_revocation:
+                CredentialResetSubjectAuthRevocation::RevokeSubjectAuthState,
+        }),
+        &LoadedState::default(),
+    )
+    .expect("plan pending credential reset");
+    let (atomic_work, response_effects) = transition
+        .commit_plan
+        .try_into_validated_atomic_work_and_response_effects()
+        .expect("valid pending reset atomic work");
+    assert!(
+        response_effects.is_empty(),
+        "pending reset seed should not emit response-local effects"
+    );
+    let mut tx = pool
+        .begin_transaction()
+        .await
+        .expect("begin pending reset seed tx");
+    let request = AtomicCommitRequest::for_atomic_work(&atomic_work)
+        .expect("pending reset seed commit request");
+    let commit_result = store
+        .commit_atomic_work_in_current_transaction(&mut tx, request)
+        .await;
+    match commit_result {
+        Ok(_) => tx.commit().await.expect("commit pending reset seed"),
+        Err(error) => {
+            tx.rollback().await.expect("rollback pending reset seed");
+            panic!("commit pending reset seed failed: {error:?}");
+        }
+    }
+}
+
 fn assert_precondition_failed(
     error: &super::super::postgres_store::PostgresAuthStoreError,
     expected_reason: &'static str,
@@ -5611,11 +7676,12 @@ async fn count_satisfied_proofs_for_attempt(
         "SELECT count(*) FROM {} WHERE attempt_id = $1",
         table.quoted()
     );
-    pooler_safe_query_scalar::<i64>(sqlx::AssertSqlSafe(statement.as_str()))
-        .bind(attempt_id.as_bytes())
-        .fetch_one(pool.sqlx_pool())
-        .await
-        .expect("count satisfied proofs")
+    auth_runtime_test_fetch_one_in_transaction!(
+        pool,
+        pooler_safe_query_scalar::<i64>(sqlx::AssertSqlSafe(statement.as_str()))
+            .bind(attempt_id.as_bytes()),
+        "count satisfied proofs"
+    )
 }
 
 async fn fetch_satisfied_proof_source_for_attempt(
@@ -5630,13 +7696,14 @@ async fn fetch_satisfied_proof_source_for_attempt(
         "SELECT proof_source_kind, proof_source_id FROM {} WHERE attempt_id = $1",
         table.quoted()
     );
-    let row = pooler_safe_query_as::<(Option<i32>, Option<Vec<u8>>)>(sqlx::AssertSqlSafe(
-        statement.as_str(),
-    ))
-    .bind(attempt_id.as_bytes())
-    .fetch_optional(pool.sqlx_pool())
-    .await
-    .expect("fetch satisfied proof source")?;
+    let row = auth_runtime_test_fetch_optional_in_transaction!(
+        pool,
+        pooler_safe_query_as::<(Option<i32>, Option<Vec<u8>>)>(sqlx::AssertSqlSafe(
+            statement.as_str(),
+        ))
+        .bind(attempt_id.as_bytes()),
+        "fetch satisfied proof source"
+    )?;
     match row {
         (None, None) => None,
         (Some(kind), Some(source_id)) => Some(VerifiedProofSource::new(
@@ -5660,15 +7727,135 @@ async fn fetch_active_proof_attempt_subject_id(
         "SELECT subject_id FROM {} WHERE attempt_id = $1",
         table.quoted()
     );
-    pooler_safe_query_scalar::<Option<Vec<u8>>>(sqlx::AssertSqlSafe(statement.as_str()))
-        .bind(attempt_id.as_bytes())
-        .fetch_optional(pool.sqlx_pool())
-        .await
-        .expect("fetch active proof attempt subject")
-        .flatten()
-        .map(SubjectId::from_bytes)
-        .transpose()
-        .expect("parse subject id")
+    auth_runtime_test_fetch_optional_in_transaction!(
+        pool,
+        pooler_safe_query_scalar::<Option<Vec<u8>>>(sqlx::AssertSqlSafe(statement.as_str()))
+            .bind(attempt_id.as_bytes()),
+        "fetch active proof attempt subject"
+    )
+    .flatten()
+    .map(SubjectId::from_bytes)
+    .transpose()
+    .expect("parse subject id")
+}
+
+async fn count_open_pending_credential_reset_actions_for_target(
+    pool: &Pool,
+    store_config: &super::super::postgres_store::PostgresAuthStoreConfig,
+    target_credential_instance_id: &VerifiedProofSourceId,
+) -> i64 {
+    let table = store_config
+        .table_name(PostgresAuthCoreTable::PendingCredentialLifecycleAction)
+        .expect("pending credential lifecycle action table");
+    let statement = format!(
+        "SELECT count(*) FROM {} WHERE target_credential_instance_id = $1 AND lifecycle_action = $2 AND closed_at IS NULL",
+        table.quoted()
+    );
+    auth_runtime_test_fetch_one_in_transaction!(
+        pool,
+        pooler_safe_query_scalar::<i64>(sqlx::AssertSqlSafe(statement.as_str()))
+            .bind(target_credential_instance_id.as_bytes())
+            .bind(
+                super::super::postgres_store::i32_from_credential_lifecycle_action(
+                    CredentialLifecycleAction::Reset,
+                ),
+            ),
+        "count open pending credential reset actions for target"
+    )
+}
+
+async fn count_open_pending_credential_reset_actions_for_pending_action(
+    pool: &Pool,
+    store_config: &super::super::postgres_store::PostgresAuthStoreConfig,
+    pending_action_id: &PendingCredentialLifecycleActionId,
+) -> i64 {
+    let table = store_config
+        .table_name(PostgresAuthCoreTable::PendingCredentialLifecycleAction)
+        .expect("pending credential lifecycle action table");
+    let statement = format!(
+        "SELECT count(*) FROM {} WHERE pending_action_id = $1 AND lifecycle_action = $2 AND closed_at IS NULL",
+        table.quoted()
+    );
+    auth_runtime_test_fetch_one_in_transaction!(
+        pool,
+        pooler_safe_query_scalar::<i64>(sqlx::AssertSqlSafe(statement.as_str()))
+            .bind(pending_action_id.as_bytes())
+            .bind(
+                super::super::postgres_store::i32_from_credential_lifecycle_action(
+                    CredentialLifecycleAction::Reset,
+                ),
+            ),
+        "count open pending credential reset actions for pending action"
+    )
+}
+
+async fn pending_credential_reset_closed_at_for_pending_action(
+    pool: &Pool,
+    store_config: &super::super::postgres_store::PostgresAuthStoreConfig,
+    pending_action_id: &PendingCredentialLifecycleActionId,
+) -> Option<i64> {
+    let table = store_config
+        .table_name(PostgresAuthCoreTable::PendingCredentialLifecycleAction)
+        .expect("pending credential lifecycle action table");
+    let statement = format!(
+        "SELECT closed_at FROM {} WHERE pending_action_id = $1 AND lifecycle_action = $2",
+        table.quoted()
+    );
+    auth_runtime_test_fetch_one_in_transaction!(
+        pool,
+        pooler_safe_query_scalar::<Option<i64>>(sqlx::AssertSqlSafe(statement.as_str()))
+            .bind(pending_action_id.as_bytes())
+            .bind(
+                super::super::postgres_store::i32_from_credential_lifecycle_action(
+                    CredentialLifecycleAction::Reset,
+                ),
+            ),
+        "read pending credential reset closed_at"
+    )
+}
+
+async fn count_open_pending_credential_lifecycle_actions_for_pending_action(
+    pool: &Pool,
+    store_config: &super::super::postgres_store::PostgresAuthStoreConfig,
+    pending_action_id: &PendingCredentialLifecycleActionId,
+    action: CredentialLifecycleAction,
+) -> i64 {
+    let table = store_config
+        .table_name(PostgresAuthCoreTable::PendingCredentialLifecycleAction)
+        .expect("pending credential lifecycle action table");
+    let statement = format!(
+        "SELECT count(*) FROM {} WHERE pending_action_id = $1 AND lifecycle_action = $2 AND closed_at IS NULL",
+        table.quoted()
+    );
+    auth_runtime_test_fetch_one_in_transaction!(
+        pool,
+        pooler_safe_query_scalar::<i64>(sqlx::AssertSqlSafe(statement.as_str()))
+            .bind(pending_action_id.as_bytes())
+            .bind(super::super::postgres_store::i32_from_credential_lifecycle_action(action),),
+        "count open pending credential lifecycle actions for pending action"
+    )
+}
+
+async fn credential_lifecycle_state_for_runtime_test(
+    pool: &Pool,
+    store_config: &super::super::postgres_store::PostgresAuthStoreConfig,
+    credential_instance_id: &VerifiedProofSourceId,
+) -> CredentialLifecycleState {
+    let table = store_config
+        .table_name(PostgresAuthCoreTable::CredentialInstance)
+        .expect("credential instance table");
+    let statement = format!(
+        "SELECT lifecycle_state FROM {} WHERE credential_instance_id = $1",
+        table.quoted()
+    );
+    let raw_state = auth_runtime_test_fetch_one_in_transaction!(
+        pool,
+        pooler_safe_query_scalar::<i32>(sqlx::AssertSqlSafe(statement.as_str()))
+            .bind(credential_instance_id.as_bytes()),
+        "read credential lifecycle state"
+    );
+    super::super::postgres_store::credential_lifecycle_state_from_i32(raw_state)
+        .expect("stored credential lifecycle state")
 }
 
 async fn count_open_challenges(
@@ -5690,11 +7877,12 @@ async fn count_open_challenges_for_challenge(
         "SELECT count(*) FROM {} WHERE challenge_id = $1 AND closed_at IS NULL",
         table.quoted()
     );
-    pooler_safe_query_scalar::<i64>(sqlx::AssertSqlSafe(statement.as_str()))
-        .bind(challenge_id.as_bytes())
-        .fetch_one(pool.sqlx_pool())
-        .await
-        .expect("count open challenges")
+    auth_runtime_test_fetch_one_in_transaction!(
+        pool,
+        pooler_safe_query_scalar::<i64>(sqlx::AssertSqlSafe(statement.as_str()))
+            .bind(challenge_id.as_bytes()),
+        "count open challenges"
+    )
 }
 
 async fn count_challenges_for_challenge(
@@ -5709,11 +7897,12 @@ async fn count_challenges_for_challenge(
         "SELECT count(*) FROM {} WHERE challenge_id = $1",
         table.quoted()
     );
-    pooler_safe_query_scalar::<i64>(sqlx::AssertSqlSafe(statement.as_str()))
-        .bind(challenge_id.as_bytes())
-        .fetch_one(pool.sqlx_pool())
-        .await
-        .expect("count challenges")
+    auth_runtime_test_fetch_one_in_transaction!(
+        pool,
+        pooler_safe_query_scalar::<i64>(sqlx::AssertSqlSafe(statement.as_str()))
+            .bind(challenge_id.as_bytes()),
+        "count challenges"
+    )
 }
 
 async fn fetch_out_of_band_challenge_resend_count(
@@ -5728,11 +7917,12 @@ async fn fetch_out_of_band_challenge_resend_count(
         "SELECT resend_count FROM {} WHERE challenge_id = $1",
         table.quoted()
     );
-    let stored = pooler_safe_query_scalar::<i32>(sqlx::AssertSqlSafe(statement.as_str()))
-        .bind(challenge_id.as_bytes())
-        .fetch_one(pool.sqlx_pool())
-        .await
-        .expect("fetch challenge resend count");
+    let stored = auth_runtime_test_fetch_one_in_transaction!(
+        pool,
+        pooler_safe_query_scalar::<i32>(sqlx::AssertSqlSafe(statement.as_str()))
+            .bind(challenge_id.as_bytes()),
+        "fetch challenge resend count"
+    );
     u32::try_from(stored).expect("stored resend count must fit u32")
 }
 
@@ -5748,11 +7938,12 @@ async fn count_challenge_delivery_keys(
         "SELECT count(*) FROM {} WHERE challenge_id = $1",
         table.quoted()
     );
-    pooler_safe_query_scalar::<i64>(sqlx::AssertSqlSafe(statement.as_str()))
-        .bind(challenge_id.as_bytes())
-        .fetch_one(pool.sqlx_pool())
-        .await
-        .expect("count challenge delivery keys")
+    auth_runtime_test_fetch_one_in_transaction!(
+        pool,
+        pooler_safe_query_scalar::<i64>(sqlx::AssertSqlSafe(statement.as_str()))
+            .bind(challenge_id.as_bytes()),
+        "count challenge delivery keys"
+    )
 }
 
 async fn count_core_durable_effect_commands(
@@ -5763,10 +7954,11 @@ async fn count_core_durable_effect_commands(
         .table_name(PostgresAuthCoreTable::CoreDurableEffectCommand)
         .expect("core durable effect command table");
     let statement = format!("SELECT count(*) FROM {}", table.quoted());
-    pooler_safe_query_scalar::<i64>(sqlx::AssertSqlSafe(statement.as_str()))
-        .fetch_one(pool.sqlx_pool())
-        .await
-        .expect("count core durable effect commands")
+    auth_runtime_test_fetch_one_in_transaction!(
+        pool,
+        pooler_safe_query_scalar::<i64>(sqlx::AssertSqlSafe(statement.as_str())),
+        "count core durable effect commands"
+    )
 }
 
 async fn count_all_active_proof_attempts(
@@ -5777,10 +7969,11 @@ async fn count_all_active_proof_attempts(
         .table_name(PostgresAuthCoreTable::ActiveProofAttempt)
         .expect("active proof attempt table");
     let statement = format!("SELECT count(*) FROM {}", table.quoted());
-    pooler_safe_query_scalar::<i64>(sqlx::AssertSqlSafe(statement.as_str()))
-        .fetch_one(pool.sqlx_pool())
-        .await
-        .expect("count active proof attempts")
+    auth_runtime_test_fetch_one_in_transaction!(
+        pool,
+        pooler_safe_query_scalar::<i64>(sqlx::AssertSqlSafe(statement.as_str())),
+        "count active proof attempts"
+    )
 }
 
 async fn count_all_active_proof_challenges(
@@ -5791,10 +7984,11 @@ async fn count_all_active_proof_challenges(
         .table_name(PostgresAuthCoreTable::ActiveProofChallenge)
         .expect("active proof challenge table");
     let statement = format!("SELECT count(*) FROM {}", table.quoted());
-    pooler_safe_query_scalar::<i64>(sqlx::AssertSqlSafe(statement.as_str()))
-        .fetch_one(pool.sqlx_pool())
-        .await
-        .expect("count active proof challenges")
+    auth_runtime_test_fetch_one_in_transaction!(
+        pool,
+        pooler_safe_query_scalar::<i64>(sqlx::AssertSqlSafe(statement.as_str())),
+        "count active proof challenges"
+    )
 }
 
 async fn count_out_of_band_durable_effects_for_challenge(
@@ -5809,11 +8003,12 @@ async fn count_out_of_band_durable_effects_for_challenge(
         "SELECT count(*) FROM {} WHERE challenge_id = $1 AND delivery_idempotency_key IS NOT NULL",
         table.quoted()
     );
-    pooler_safe_query_scalar::<i64>(sqlx::AssertSqlSafe(statement.as_str()))
-        .bind(challenge_id.as_bytes())
-        .fetch_one(pool.sqlx_pool())
-        .await
-        .expect("count out-of-band durable effects")
+    auth_runtime_test_fetch_one_in_transaction!(
+        pool,
+        pooler_safe_query_scalar::<i64>(sqlx::AssertSqlSafe(statement.as_str()))
+            .bind(challenge_id.as_bytes()),
+        "count out-of-band durable effects"
+    )
 }
 
 async fn count_security_notification_effects_for_subject(
@@ -5833,11 +8028,12 @@ async fn count_security_notification_effects_for_subject(
         "#,
         table.quoted()
     );
-    pooler_safe_query_scalar::<i64>(sqlx::AssertSqlSafe(statement.as_str()))
-        .bind(subject_id.as_bytes())
-        .fetch_one(pool.sqlx_pool())
-        .await
-        .expect("count security notification effects")
+    auth_runtime_test_fetch_one_in_transaction!(
+        pool,
+        pooler_safe_query_scalar::<i64>(sqlx::AssertSqlSafe(statement.as_str()))
+            .bind(subject_id.as_bytes()),
+        "count security notification effects"
+    )
 }
 
 async fn count_all_sessions(
@@ -5848,10 +8044,11 @@ async fn count_all_sessions(
         .table_name(PostgresAuthCoreTable::Session)
         .expect("session table");
     let statement = format!("SELECT count(*) FROM {}", table.quoted());
-    pooler_safe_query_scalar::<i64>(sqlx::AssertSqlSafe(statement.as_str()))
-        .fetch_one(pool.sqlx_pool())
-        .await
-        .expect("count sessions")
+    auth_runtime_test_fetch_one_in_transaction!(
+        pool,
+        pooler_safe_query_scalar::<i64>(sqlx::AssertSqlSafe(statement.as_str())),
+        "count sessions"
+    )
 }
 
 async fn count_sessions_for_session(
@@ -5866,11 +8063,12 @@ async fn count_sessions_for_session(
         "SELECT count(*) FROM {} WHERE session_id = $1",
         table.quoted()
     );
-    pooler_safe_query_scalar::<i64>(sqlx::AssertSqlSafe(statement.as_str()))
-        .bind(session_id.as_bytes())
-        .fetch_one(pool.sqlx_pool())
-        .await
-        .expect("count sessions for session")
+    auth_runtime_test_fetch_one_in_transaction!(
+        pool,
+        pooler_safe_query_scalar::<i64>(sqlx::AssertSqlSafe(statement.as_str()))
+            .bind(session_id.as_bytes()),
+        "count sessions for session"
+    )
 }
 
 async fn count_session_secret_macs_for_session(
@@ -5885,11 +8083,12 @@ async fn count_session_secret_macs_for_session(
         "SELECT count(*) FROM {} WHERE session_id = $1",
         table.quoted()
     );
-    pooler_safe_query_scalar::<i64>(sqlx::AssertSqlSafe(statement.as_str()))
-        .bind(session_id.as_bytes())
-        .fetch_one(pool.sqlx_pool())
-        .await
-        .expect("count session secret MACs")
+    auth_runtime_test_fetch_one_in_transaction!(
+        pool,
+        pooler_safe_query_scalar::<i64>(sqlx::AssertSqlSafe(statement.as_str()))
+            .bind(session_id.as_bytes()),
+        "count session secret MACs"
+    )
 }
 
 async fn count_all_trusted_devices(
@@ -5900,10 +8099,11 @@ async fn count_all_trusted_devices(
         .table_name(PostgresAuthCoreTable::TrustedDeviceCredential)
         .expect("trusted device table");
     let statement = format!("SELECT count(*) FROM {}", table.quoted());
-    pooler_safe_query_scalar::<i64>(sqlx::AssertSqlSafe(statement.as_str()))
-        .fetch_one(pool.sqlx_pool())
-        .await
-        .expect("count trusted devices")
+    auth_runtime_test_fetch_one_in_transaction!(
+        pool,
+        pooler_safe_query_scalar::<i64>(sqlx::AssertSqlSafe(statement.as_str())),
+        "count trusted devices"
+    )
 }
 
 async fn count_trusted_device_secret_macs_for_device(
@@ -5918,11 +8118,12 @@ async fn count_trusted_device_secret_macs_for_device(
         "SELECT count(*) FROM {} WHERE device_credential_id = $1",
         table.quoted()
     );
-    pooler_safe_query_scalar::<i64>(sqlx::AssertSqlSafe(statement.as_str()))
-        .bind(device_credential_id.as_bytes())
-        .fetch_one(pool.sqlx_pool())
-        .await
-        .expect("count trusted device secret MACs")
+    auth_runtime_test_fetch_one_in_transaction!(
+        pool,
+        pooler_safe_query_scalar::<i64>(sqlx::AssertSqlSafe(statement.as_str()))
+            .bind(device_credential_id.as_bytes()),
+        "count trusted device secret MACs"
+    )
 }
 
 async fn fetch_trusted_device_id_by_display_label(
@@ -5937,11 +8138,12 @@ async fn fetch_trusted_device_id_by_display_label(
         "SELECT device_credential_id FROM {} WHERE display_label = $1",
         table.quoted()
     );
-    let bytes = pooler_safe_query_scalar::<Vec<u8>>(sqlx::AssertSqlSafe(statement.as_str()))
-        .bind(display_label)
-        .fetch_optional(pool.sqlx_pool())
-        .await
-        .expect("fetch trusted device id by display label")?;
+    let bytes = auth_runtime_test_fetch_optional_in_transaction!(
+        pool,
+        pooler_safe_query_scalar::<Vec<u8>>(sqlx::AssertSqlSafe(statement.as_str()))
+            .bind(display_label),
+        "fetch trusted device id by display label"
+    )?;
     Some(TrustedDeviceCredentialId::from_bytes(bytes).expect("trusted device id bytes"))
 }
 
@@ -5957,11 +8159,12 @@ async fn fetch_trusted_device_current_secret_version(
         "SELECT current_secret_version FROM {} WHERE device_credential_id = $1",
         table.quoted()
     );
-    pooler_safe_query_scalar::<i64>(sqlx::AssertSqlSafe(statement.as_str()))
-        .bind(device_credential_id.as_bytes())
-        .fetch_one(pool.sqlx_pool())
-        .await
-        .expect("fetch trusted device current secret version")
+    auth_runtime_test_fetch_one_in_transaction!(
+        pool,
+        pooler_safe_query_scalar::<i64>(sqlx::AssertSqlSafe(statement.as_str()))
+            .bind(device_credential_id.as_bytes()),
+        "fetch trusted device current secret version"
+    )
 }
 
 async fn fetch_session_revoked_at(
@@ -5976,12 +8179,13 @@ async fn fetch_session_revoked_at(
         "SELECT revoked_at FROM {} WHERE session_id = $1",
         table.quoted()
     );
-    pooler_safe_query_scalar::<Option<i64>>(sqlx::AssertSqlSafe(statement.as_str()))
-        .bind(session_id.as_bytes())
-        .fetch_one(pool.sqlx_pool())
-        .await
-        .expect("fetch session revoked_at")
-        .map(|value| u64::try_from(value).expect("stored revoked_at must fit u64"))
+    auth_runtime_test_fetch_one_in_transaction!(
+        pool,
+        pooler_safe_query_scalar::<Option<i64>>(sqlx::AssertSqlSafe(statement.as_str()))
+            .bind(session_id.as_bytes()),
+        "fetch session revoked_at"
+    )
+    .map(|value| u64::try_from(value).expect("stored revoked_at must fit u64"))
 }
 
 async fn fetch_trusted_device_revoked_at(
@@ -5996,12 +8200,13 @@ async fn fetch_trusted_device_revoked_at(
         "SELECT revoked_at FROM {} WHERE device_credential_id = $1",
         table.quoted()
     );
-    pooler_safe_query_scalar::<Option<i64>>(sqlx::AssertSqlSafe(statement.as_str()))
-        .bind(device_credential_id.as_bytes())
-        .fetch_one(pool.sqlx_pool())
-        .await
-        .expect("fetch trusted device revoked_at")
-        .map(|value| u64::try_from(value).expect("stored revoked_at must fit u64"))
+    auth_runtime_test_fetch_one_in_transaction!(
+        pool,
+        pooler_safe_query_scalar::<Option<i64>>(sqlx::AssertSqlSafe(statement.as_str()))
+            .bind(device_credential_id.as_bytes()),
+        "fetch trusted device revoked_at"
+    )
+    .map(|value| u64::try_from(value).expect("stored revoked_at must fit u64"))
 }
 
 async fn fetch_subject_revocation_cutoff(
@@ -6016,12 +8221,13 @@ async fn fetch_subject_revocation_cutoff(
         "SELECT revoke_records_created_at_or_before FROM {} WHERE subject_id = $1",
         table.quoted()
     );
-    pooler_safe_query_scalar::<Option<i64>>(sqlx::AssertSqlSafe(statement.as_str()))
-        .bind(subject_id.as_bytes())
-        .fetch_one(pool.sqlx_pool())
-        .await
-        .expect("fetch subject revocation cutoff")
-        .map(|value| u64::try_from(value).expect("stored cutoff must fit u64"))
+    auth_runtime_test_fetch_one_in_transaction!(
+        pool,
+        pooler_safe_query_scalar::<Option<i64>>(sqlx::AssertSqlSafe(statement.as_str()))
+            .bind(subject_id.as_bytes()),
+        "fetch subject revocation cutoff"
+    )
+    .map(|value| u64::try_from(value).expect("stored cutoff must fit u64"))
 }
 
 async fn count_active_proof_attempts_for_attempt(
@@ -6036,11 +8242,12 @@ async fn count_active_proof_attempts_for_attempt(
         "SELECT count(*) FROM {} WHERE attempt_id = $1",
         table.quoted()
     );
-    pooler_safe_query_scalar::<i64>(sqlx::AssertSqlSafe(statement.as_str()))
-        .bind(attempt_id.as_bytes())
-        .fetch_one(pool.sqlx_pool())
-        .await
-        .expect("count active proof attempts")
+    auth_runtime_test_fetch_one_in_transaction!(
+        pool,
+        pooler_safe_query_scalar::<i64>(sqlx::AssertSqlSafe(statement.as_str()))
+            .bind(attempt_id.as_bytes()),
+        "count active proof attempts"
+    )
 }
 
 async fn fetch_active_proof_attempt_weak_failures(
@@ -6055,11 +8262,12 @@ async fn fetch_active_proof_attempt_weak_failures(
         "SELECT weak_proof_failures FROM {} WHERE attempt_id = $1",
         table.quoted()
     );
-    pooler_safe_query_scalar::<i32>(sqlx::AssertSqlSafe(statement.as_str()))
-        .bind(attempt_id.as_bytes())
-        .fetch_optional(pool.sqlx_pool())
-        .await
-        .expect("fetch active proof attempt weak failures")
+    auth_runtime_test_fetch_optional_in_transaction!(
+        pool,
+        pooler_safe_query_scalar::<i32>(sqlx::AssertSqlSafe(statement.as_str()))
+            .bind(attempt_id.as_bytes()),
+        "fetch active proof attempt weak failures"
+    )
 }
 
 fn unique_runtime_test_schema_name() -> PgIdentifier {

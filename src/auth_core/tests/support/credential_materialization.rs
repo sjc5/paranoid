@@ -525,7 +525,7 @@ pub(super) fn classify_test_credential_secret(
         if previous_secret_accept_until.is_some_and(|accept_until| now < accept_until) {
             return StoredSecretMatch::PreviousWithinGrace;
         }
-        return StoredSecretMatch::PreviousExpired;
+        return StoredSecretMatch::PreviousAfterGrace;
     }
     StoredSecretMatch::Unknown
 }
@@ -549,7 +549,7 @@ pub(super) fn classify_session_cookie_secret(
         {
             return StoredSecretMatch::PreviousWithinGrace;
         }
-        return StoredSecretMatch::PreviousExpired;
+        return StoredSecretMatch::PreviousAfterGrace;
     }
     StoredSecretMatch::Unknown
 }
@@ -569,7 +569,7 @@ pub(super) fn classify_trusted_device_cookie_secret(
         {
             return StoredSecretMatch::PreviousWithinGrace;
         }
-        return StoredSecretMatch::PreviousExpired;
+        return StoredSecretMatch::PreviousAfterGrace;
     }
     StoredSecretMatch::Unknown
 }

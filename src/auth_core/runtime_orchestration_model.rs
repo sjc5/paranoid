@@ -341,6 +341,37 @@ impl AuthWebRuntime {
                 Error::ActiveProofFailureRequiresRuntimeMethodDispatch,
             ));
         }
+        if matches!(command, Command::PlanCredentialReset(_)) {
+            return Err(AuthWebRuntimeExecutionError::core(
+                Error::CredentialResetPlanningRequiresRuntimeLifecycleDecision,
+            ));
+        }
+        if matches!(command, Command::ExecuteCredentialReset(_)) {
+            return Err(AuthWebRuntimeExecutionError::core(
+                Error::CredentialResetExecutionRequiresRuntimeMethodDispatch,
+            ));
+        }
+        if matches!(command, Command::CancelPendingCredentialReset(_)) {
+            return Err(AuthWebRuntimeExecutionError::core(
+                Error::CredentialResetCancellationRequiresRuntimeLifecycleDecision,
+            ));
+        }
+        if matches!(
+            command,
+            Command::ExecuteNonResetPendingCredentialLifecycleAction(_)
+        ) {
+            return Err(AuthWebRuntimeExecutionError::core(
+                Error::CredentialLifecycleExecutionRequiresRuntimeMethodDispatch,
+            ));
+        }
+        if matches!(
+            command,
+            Command::CancelNonResetPendingCredentialLifecycleAction(_)
+        ) {
+            return Err(AuthWebRuntimeExecutionError::core(
+                Error::CredentialLifecycleCancellationRequiresRuntimeLifecycleDecision,
+            ));
+        }
         let decoded = self
             .web_transport
             .decode_presented_cookies_from_headers(headers)

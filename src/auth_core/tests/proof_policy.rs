@@ -318,6 +318,7 @@ fn proof_policy_rejects_malformed_custom_stack_configurations() {
             proof_policy.full_authentication = ProofStackPolicy {
                 accepted_stacks: vec![ProofStackRequirement {
                     required_proofs: Vec::new(),
+                    source_policy: ProofStackSourcePolicy::NoSourceConstraint,
                 }],
             };
             (
@@ -338,6 +339,7 @@ fn proof_policy_rejects_malformed_custom_stack_configurations() {
                         )
                         .expect("proof requirement"),
                     ],
+                    source_policy: ProofStackSourcePolicy::NoSourceConstraint,
                 }],
             };
             (
@@ -656,7 +658,7 @@ fn custom_full_authentication_policy_can_require_message_signature_and_totp() {
         }
     );
 
-    let transition = reduce_command(
+    let source_less_error = reduce_command(
         &config,
         Command::CompleteFullAuthentication(CompleteFullAuthentication {
             now: at(20),
@@ -672,6 +674,37 @@ fn custom_full_authentication_policy_can_require_message_signature_and_totp() {
             ],
         ),
     )
+    .expect_err("custom full-authentication policy should require source provenance");
+
+    assert_eq!(
+        source_less_error,
+        Error::ProofStackRequiresKnownDistinctProofSources {
+            proof_use: ProofUse::ContributeToFullAuthentication,
+        }
+    );
+
+    let transition = reduce_command(
+        &config,
+        Command::CompleteFullAuthentication(CompleteFullAuthentication {
+            now: at(20),
+            attempt_id: id("attempt"),
+            fresh_session_id: id("session"),
+            trust_device: None,
+        }),
+        &loaded_attempt_with_satisfied_proof_records(
+            ProofUse::ContributeToFullAuthentication,
+            vec![
+                satisfied_proof_with_source(
+                    proof(ProofFamily::MessageSignature),
+                    proof_source("message-signature-credential"),
+                ),
+                satisfied_proof_with_source(
+                    proof(ProofFamily::SharedSecretOtp),
+                    proof_source("totp-credential"),
+                ),
+            ],
+        ),
+    )
     .expect("message signature plus TOTP should satisfy custom full-authentication policy");
 
     assert!(matches!(
@@ -681,6 +714,45 @@ fn custom_full_authentication_policy_can_require_message_signature_and_totp() {
             ..
         })
     ));
+}
+
+#[test]
+fn multi_proof_policy_rejects_collapsed_sources() {
+    let mut config = config();
+    config.proof_policy.full_authentication = ProofStackPolicy {
+        accepted_stacks: vec![ProofStackRequirement::all_any_method_label_in_each_family(
+            [ProofFamily::MessageSignature, ProofFamily::SharedSecretOtp],
+        )],
+    };
+    let collapsed_source = proof_source("same-effective-credential");
+
+    let error = reduce_command(
+        &config,
+        Command::CompleteFullAuthentication(CompleteFullAuthentication {
+            now: at(20),
+            attempt_id: id("attempt"),
+            fresh_session_id: id("session"),
+            trust_device: None,
+        }),
+        &loaded_attempt_with_satisfied_proof_records(
+            ProofUse::ContributeToFullAuthentication,
+            vec![
+                satisfied_proof_with_source(
+                    proof(ProofFamily::MessageSignature),
+                    collapsed_source.clone(),
+                ),
+                satisfied_proof_with_source(proof(ProofFamily::SharedSecretOtp), collapsed_source),
+            ],
+        ),
+    )
+    .expect_err("proof stack must not count two proofs from the same source as independent");
+
+    assert_eq!(
+        error,
+        Error::ProofStackRequiresKnownDistinctProofSources {
+            proof_use: ProofUse::ContributeToFullAuthentication,
+        }
+    );
 }
 
 #[test]
@@ -713,7 +785,7 @@ fn custom_step_up_policy_can_require_message_signature_and_totp() {
         }
     );
 
-    let transition = reduce_command(
+    let source_less_error = reduce_command(
         &config,
         Command::CompleteStepUp(CompleteStepUp {
             now: at(50),
@@ -725,6 +797,36 @@ fn custom_step_up_policy_can_require_message_signature_and_totp() {
             vec![
                 proof(ProofFamily::MessageSignature),
                 proof(ProofFamily::SharedSecretOtp),
+            ],
+        ),
+    )
+    .expect_err("custom step-up policy should require source provenance");
+
+    assert_eq!(
+        source_less_error,
+        Error::ProofStackRequiresKnownDistinctProofSources {
+            proof_use: ProofUse::SatisfyStepUp,
+        }
+    );
+
+    let transition = reduce_command(
+        &config,
+        Command::CompleteStepUp(CompleteStepUp {
+            now: at(50),
+            attempt_id: id("attempt"),
+        }),
+        &loaded_session_and_attempt_with_satisfied_proof_records(
+            200,
+            ProofUse::SatisfyStepUp,
+            vec![
+                satisfied_proof_with_source(
+                    proof(ProofFamily::MessageSignature),
+                    proof_source("message-signature-credential"),
+                ),
+                satisfied_proof_with_source(
+                    proof(ProofFamily::SharedSecretOtp),
+                    proof_source("totp-credential"),
+                ),
             ],
         ),
     )
@@ -774,7 +876,7 @@ fn custom_trusted_device_active_revival_policy_can_require_message_signature_and
         }
     );
 
-    let transition = reduce_command(
+    let source_less_error = reduce_command(
         &config,
         Command::CompleteTrustedDeviceRevivalWithActiveProof(
             CompleteTrustedDeviceRevivalWithActiveProof {
@@ -790,6 +892,40 @@ fn custom_trusted_device_active_revival_policy_can_require_message_signature_and
             vec![
                 proof(ProofFamily::MessageSignature),
                 proof(ProofFamily::SharedSecretOtp),
+            ],
+        ),
+    )
+    .expect_err("custom trusted-device active revival policy should require source provenance");
+
+    assert_eq!(
+        source_less_error,
+        Error::ProofStackRequiresKnownDistinctProofSources {
+            proof_use: ProofUse::ReviveTrustedDeviceWithActiveProof,
+        }
+    );
+
+    let transition = reduce_command(
+        &config,
+        Command::CompleteTrustedDeviceRevivalWithActiveProof(
+            CompleteTrustedDeviceRevivalWithActiveProof {
+                now: at(600),
+                attempt_id: id("attempt"),
+                fresh_session_id: id("new-session"),
+            },
+        ),
+        &loaded_trusted_device_and_attempt_with_satisfied_proof_records(
+            500,
+            2_000,
+            ProofUse::ReviveTrustedDeviceWithActiveProof,
+            vec![
+                satisfied_proof_with_source(
+                    proof(ProofFamily::MessageSignature),
+                    proof_source("message-signature-credential"),
+                ),
+                satisfied_proof_with_source(
+                    proof(ProofFamily::SharedSecretOtp),
+                    proof_source("totp-credential"),
+                ),
             ],
         ),
     )

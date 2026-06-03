@@ -22,6 +22,8 @@ mod commit_plan;
 mod commit_transaction_model;
 mod config_model;
 mod core_error;
+mod credential_lifecycle;
+mod credential_model;
 mod email_otp_method;
 mod execution_model;
 mod identity;
@@ -87,6 +89,7 @@ pub(crate) use commit_plan::*;
 pub(crate) use commit_transaction_model::*;
 pub(crate) use config_model::*;
 pub(crate) use core_error::Error;
+pub(crate) use credential_model::*;
 pub(crate) use execution_model::*;
 pub(crate) use identity::*;
 pub(crate) use input_limits::{
@@ -113,7 +116,7 @@ pub(crate) use postgres_schema_model::*;
 pub(crate) use proof_model::*;
 pub(crate) use proof_policy::{
     ProofPolicy, ProofPolicyExactMethodLabels, ProofRequirement, ProofStackPolicy,
-    ProofStackRequirement,
+    ProofStackRequirement, ProofStackSourcePolicy,
 };
 pub(crate) use response_materialization_model::*;
 pub(crate) use runtime_adapter_model::*;
@@ -178,6 +181,21 @@ pub(crate) fn reduce_command(
         }
         Command::RevokeSubjectAuthState(command) => {
             session_revocation::revoke_subject_auth_state(command, loaded)
+        }
+        Command::PlanCredentialReset(command) => {
+            credential_lifecycle::plan_credential_reset(command)
+        }
+        Command::ExecuteCredentialReset(command) => {
+            credential_lifecycle::execute_credential_reset(command)
+        }
+        Command::CancelPendingCredentialReset(command) => {
+            credential_lifecycle::cancel_pending_credential_reset(command)
+        }
+        Command::ExecuteNonResetPendingCredentialLifecycleAction(command) => {
+            credential_lifecycle::execute_non_reset_pending_credential_lifecycle_action(command)
+        }
+        Command::CancelNonResetPendingCredentialLifecycleAction(command) => {
+            credential_lifecycle::cancel_non_reset_pending_credential_lifecycle_action(command)
         }
     }
 }

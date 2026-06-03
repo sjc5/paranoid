@@ -414,6 +414,185 @@ impl PostgresAuthStore {
         Ok(materialized)
     }
 
+    pub(crate) async fn load_credential_lifecycle_action_context_in_current_transaction(
+        &self,
+        tx: &mut Tx<'_>,
+        target_credential_instance_id: &VerifiedProofSourceId,
+        evidence_sources: &[LifecycleAuthoritySource],
+    ) -> Result<Option<CredentialLifecycleActionContext>, PostgresAuthStoreError> {
+        let table_names = self.config.table_names()?;
+        let Some(target_credential) =
+            load_credential_instance_metadata(tx, &table_names, target_credential_instance_id)
+                .await?
+        else {
+            return Ok(None);
+        };
+        let authorities =
+            load_credential_recovery_authorities(tx, &table_names, target_credential_instance_id)
+                .await?;
+        let recovery_authority_graph = CredentialRecoveryAuthorityGraph::new(authorities)?;
+        let mut evidence = Vec::new();
+        for source in evidence_sources {
+            if let Some(loaded_evidence) =
+                load_lifecycle_authority_evidence(tx, &table_names, source).await?
+            {
+                evidence.push(loaded_evidence);
+            }
+        }
+        Ok(Some(CredentialLifecycleActionContext::new(
+            target_credential,
+            recovery_authority_graph,
+            evidence,
+        )))
+    }
+
+    pub(crate) async fn load_and_evaluate_credential_lifecycle_action_in_current_transaction(
+        &self,
+        tx: &mut Tx<'_>,
+        target_credential_instance_id: &VerifiedProofSourceId,
+        evidence_sources: &[LifecycleAuthoritySource],
+        action: CredentialLifecycleAction,
+        independent_evidence_required: CredentialLifecycleIndependentEvidenceRequirement,
+    ) -> Result<Option<CredentialLifecycleActionDecision>, PostgresAuthStoreError> {
+        Ok(self
+            .load_credential_lifecycle_action_context_in_current_transaction(
+                tx,
+                target_credential_instance_id,
+                evidence_sources,
+            )
+            .await?
+            .map(|context| context.evaluate_action(action, independent_evidence_required)))
+    }
+
+    pub(crate) async fn load_pending_credential_lifecycle_action_with_target_in_current_transaction(
+        &self,
+        tx: &mut Tx<'_>,
+        pending_action_id: &PendingCredentialLifecycleActionId,
+    ) -> Result<
+        Option<(
+            CredentialInstanceMetadata,
+            PendingCredentialLifecycleActionRecord,
+        )>,
+        PostgresAuthStoreError,
+    > {
+        let table_names = self.config.table_names()?;
+        let Some(pending_action) =
+            load_pending_credential_lifecycle_action(tx, &table_names, pending_action_id).await?
+        else {
+            return Ok(None);
+        };
+        let Some(target_credential) = load_credential_instance_metadata(
+            tx,
+            &table_names,
+            &pending_action.target_credential_instance_id,
+        )
+        .await?
+        else {
+            return Ok(None);
+        };
+        Ok(Some((target_credential, pending_action)))
+    }
+
+    pub(crate) async fn load_pending_credential_reset_execution_authority_in_current_transaction(
+        &self,
+        tx: &mut Tx<'_>,
+        pending_action_id: &PendingCredentialLifecycleActionId,
+    ) -> Result<
+        Option<(
+            CredentialInstanceMetadata,
+            PendingCredentialLifecycleActionRecord,
+        )>,
+        PostgresAuthStoreError,
+    > {
+        self.load_pending_credential_lifecycle_action_with_target_in_current_transaction(
+            tx,
+            pending_action_id,
+        )
+        .await
+    }
+
+    pub(crate) async fn load_pending_credential_reset_for_cancellation_in_current_transaction(
+        &self,
+        tx: &mut Tx<'_>,
+        pending_action_id: &PendingCredentialLifecycleActionId,
+    ) -> Result<
+        Option<(
+            CredentialInstanceMetadata,
+            PendingCredentialLifecycleActionRecord,
+        )>,
+        PostgresAuthStoreError,
+    > {
+        self.load_pending_credential_reset_execution_authority_in_current_transaction(
+            tx,
+            pending_action_id,
+        )
+        .await
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn store_credential_lifecycle_metadata_for_test(
+        &self,
+        pool: &Pool,
+        metadata: &[CredentialInstanceMetadata],
+        authorities: &[CredentialRecoveryAuthority],
+        authority_sources: &[LifecycleAuthorityEvidence],
+        now: UnixSeconds,
+    ) -> Result<(), PostgresAuthStoreError> {
+        let mut tx = pool.begin_transaction().await?;
+        let table_names = self.config.table_names()?;
+        let result = async {
+            for metadata in metadata {
+                insert_credential_instance_metadata(&mut tx, &table_names, metadata, now).await?;
+            }
+            for authority in authorities {
+                insert_credential_recovery_authority(&mut tx, &table_names, authority, now).await?;
+            }
+            for evidence in authority_sources {
+                for authority_id in evidence.authority_ids() {
+                    insert_lifecycle_authority_source(
+                        &mut tx,
+                        &table_names,
+                        evidence.source(),
+                        authority_id,
+                        now,
+                    )
+                    .await?;
+                }
+            }
+            Ok(())
+        }
+        .await;
+        finish_auth_store_transaction(
+            "auth_core.store_credential_lifecycle_metadata_for_test",
+            tx,
+            result,
+        )
+        .await
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn store_pending_credential_lifecycle_actions_for_test(
+        &self,
+        pool: &Pool,
+        records: &[PendingCredentialLifecycleActionRecord],
+    ) -> Result<(), PostgresAuthStoreError> {
+        let mut tx = pool.begin_transaction().await?;
+        let table_names = self.config.table_names()?;
+        let result = async {
+            for record in records {
+                insert_pending_credential_lifecycle_action(&mut tx, &table_names, record).await?;
+            }
+            Ok(())
+        }
+        .await;
+        finish_auth_store_transaction(
+            "auth_core.store_pending_credential_lifecycle_actions_for_test",
+            tx,
+            result,
+        )
+        .await
+    }
+
     fn method_commit_executor_for(
         &self,
         work: &AtomicCommitWork,
@@ -1245,6 +1424,375 @@ async fn load_subject_revocation(
     Ok(())
 }
 
+async fn load_credential_instance_metadata(
+    tx: &mut Tx<'_>,
+    table_names: &AuthCoreTableNames,
+    credential_instance_id: &VerifiedProofSourceId,
+) -> Result<Option<CredentialInstanceMetadata>, PostgresAuthStoreError> {
+    let statement = format!(
+        r#"
+        SELECT subject_id, credential_kind, method_label, lifecycle_state
+        FROM {}
+        WHERE credential_instance_id = $1
+        "#,
+        table_names
+            .get(PostgresAuthCoreTable::CredentialInstance)
+            .quoted()
+    );
+    tx.record_database_operation(
+        DatabaseOperationKind::FetchOptional,
+        "auth_core.load.credential_instance_metadata",
+        Some(statement.as_str()),
+    );
+    let row = pooler_safe_query_as::<(Vec<u8>, i32, String, i32)>(sqlx::AssertSqlSafe(
+        statement.as_str(),
+    ))
+    .bind(credential_instance_id.as_bytes())
+    .fetch_optional(tx.sqlx_transaction().as_mut())
+    .await
+    .map_err(DbError::query)?;
+    row.map(
+        |(subject_id, credential_kind, method_label, lifecycle_state)| {
+            CredentialInstanceMetadata::new(
+                credential_instance_id.clone(),
+                SubjectId::from_bytes(subject_id)?,
+                credential_instance_kind_from_i32(credential_kind)?,
+                method_label,
+                credential_lifecycle_state_from_i32(lifecycle_state)?,
+            )
+            .map_err(PostgresAuthStoreError::Core)
+        },
+    )
+    .transpose()
+}
+
+async fn load_credential_recovery_authorities(
+    tx: &mut Tx<'_>,
+    table_names: &AuthCoreTableNames,
+    target_credential_instance_id: &VerifiedProofSourceId,
+) -> Result<Vec<CredentialRecoveryAuthority>, PostgresAuthStoreError> {
+    let statement = format!(
+        r#"
+        SELECT lifecycle_action, authority_id, authority_timing
+        FROM {}
+        WHERE target_credential_instance_id = $1
+        ORDER BY lifecycle_action ASC, authority_id ASC, authority_timing ASC
+        "#,
+        table_names
+            .get(PostgresAuthCoreTable::CredentialRecoveryAuthority)
+            .quoted()
+    );
+    tx.record_database_operation(
+        DatabaseOperationKind::FetchAll,
+        "auth_core.load.credential_recovery_authorities",
+        Some(statement.as_str()),
+    );
+    let rows = pooler_safe_query_as::<(i32, Vec<u8>, i32)>(sqlx::AssertSqlSafe(statement.as_str()))
+        .bind(target_credential_instance_id.as_bytes())
+        .fetch_all(tx.sqlx_transaction().as_mut())
+        .await
+        .map_err(DbError::query)?;
+    rows.into_iter()
+        .map(|(action, authority_id, timing)| {
+            Ok(CredentialRecoveryAuthority::new(
+                target_credential_instance_id.clone(),
+                credential_lifecycle_action_from_i32(action)?,
+                RecoveryAuthorityId::from_bytes(authority_id)?,
+                recovery_authority_timing_from_i32(timing)?,
+            ))
+        })
+        .collect()
+}
+
+async fn load_lifecycle_authority_evidence(
+    tx: &mut Tx<'_>,
+    table_names: &AuthCoreTableNames,
+    source: &LifecycleAuthoritySource,
+) -> Result<Option<LifecycleAuthorityEvidence>, PostgresAuthStoreError> {
+    let (source_kind, source_id) = lifecycle_authority_source_key(source)?;
+    let statement = format!(
+        r#"
+        SELECT authority_id
+        FROM {}
+        WHERE source_kind = $1 AND source_id = $2
+        ORDER BY authority_id ASC
+        "#,
+        table_names
+            .get(PostgresAuthCoreTable::LifecycleAuthoritySource)
+            .quoted()
+    );
+    tx.record_database_operation(
+        DatabaseOperationKind::FetchAll,
+        "auth_core.load.lifecycle_authority_evidence",
+        Some(statement.as_str()),
+    );
+    let authority_ids =
+        pooler_safe_query_scalar::<Vec<u8>>(sqlx::AssertSqlSafe(statement.as_str()))
+            .bind(i32_from_lifecycle_authority_source_kind(source_kind))
+            .bind(source_id.as_bytes())
+            .fetch_all(tx.sqlx_transaction().as_mut())
+            .await
+            .map_err(DbError::query)?
+            .into_iter()
+            .map(RecoveryAuthorityId::from_bytes)
+            .collect::<Result<Vec<_>, _>>()?;
+    if authority_ids.is_empty() {
+        return Ok(None);
+    }
+    LifecycleAuthorityEvidence::new(source.clone(), authority_ids)
+        .map(Some)
+        .map_err(PostgresAuthStoreError::Core)
+}
+
+#[cfg(test)]
+async fn insert_credential_instance_metadata(
+    tx: &mut Tx<'_>,
+    table_names: &AuthCoreTableNames,
+    metadata: &CredentialInstanceMetadata,
+    now: UnixSeconds,
+) -> Result<(), PostgresAuthStoreError> {
+    let statement = format!(
+        r#"
+        INSERT INTO {} (
+            credential_instance_id,
+            subject_id,
+            credential_kind,
+            method_label,
+            lifecycle_state,
+            created_at,
+            updated_at
+        )
+        VALUES ($1,$2,$3,$4,$5,$6,$6)
+        "#,
+        table_names
+            .get(PostgresAuthCoreTable::CredentialInstance)
+            .quoted()
+    );
+    tx.record_database_operation(
+        DatabaseOperationKind::Execute,
+        "auth_core.test.insert_credential_instance_metadata",
+        Some(statement.as_str()),
+    );
+    pooler_safe_query(sqlx::AssertSqlSafe(statement.as_str()))
+        .bind(metadata.credential_instance_id().as_bytes())
+        .bind(metadata.subject_id().as_bytes())
+        .bind(i32_from_credential_instance_kind(metadata.kind()))
+        .bind(metadata.method_label())
+        .bind(i32_from_credential_lifecycle_state(
+            metadata.lifecycle_state(),
+        ))
+        .bind(i64_from_unix_seconds(now)?)
+        .execute(tx.sqlx_transaction().as_mut())
+        .await
+        .map_err(DbError::query)?;
+    Ok(())
+}
+
+#[cfg(test)]
+async fn insert_credential_recovery_authority(
+    tx: &mut Tx<'_>,
+    table_names: &AuthCoreTableNames,
+    authority: &CredentialRecoveryAuthority,
+    now: UnixSeconds,
+) -> Result<(), PostgresAuthStoreError> {
+    let statement = format!(
+        r#"
+        INSERT INTO {} (
+            target_credential_instance_id,
+            lifecycle_action,
+            authority_id,
+            authority_timing,
+            created_at
+        )
+        VALUES ($1,$2,$3,$4,$5)
+        "#,
+        table_names
+            .get(PostgresAuthCoreTable::CredentialRecoveryAuthority)
+            .quoted()
+    );
+    tx.record_database_operation(
+        DatabaseOperationKind::Execute,
+        "auth_core.test.insert_credential_recovery_authority",
+        Some(statement.as_str()),
+    );
+    pooler_safe_query(sqlx::AssertSqlSafe(statement.as_str()))
+        .bind(authority.target_credential_instance_id().as_bytes())
+        .bind(i32_from_credential_lifecycle_action(authority.action()))
+        .bind(authority.authority_id().as_bytes())
+        .bind(i32_from_recovery_authority_timing(authority.timing()))
+        .bind(i64_from_unix_seconds(now)?)
+        .execute(tx.sqlx_transaction().as_mut())
+        .await
+        .map_err(DbError::query)?;
+    Ok(())
+}
+
+#[cfg(test)]
+async fn insert_lifecycle_authority_source(
+    tx: &mut Tx<'_>,
+    table_names: &AuthCoreTableNames,
+    source: &LifecycleAuthoritySource,
+    authority_id: &RecoveryAuthorityId,
+    now: UnixSeconds,
+) -> Result<(), PostgresAuthStoreError> {
+    let (source_kind, source_id) = lifecycle_authority_source_key(source)?;
+    let statement = format!(
+        r#"
+        INSERT INTO {} (
+            source_kind,
+            source_id,
+            authority_id,
+            created_at
+        )
+        VALUES ($1,$2,$3,$4)
+        "#,
+        table_names
+            .get(PostgresAuthCoreTable::LifecycleAuthoritySource)
+            .quoted()
+    );
+    tx.record_database_operation(
+        DatabaseOperationKind::Execute,
+        "auth_core.test.insert_lifecycle_authority_source",
+        Some(statement.as_str()),
+    );
+    pooler_safe_query(sqlx::AssertSqlSafe(statement.as_str()))
+        .bind(i32_from_lifecycle_authority_source_kind(source_kind))
+        .bind(source_id.as_bytes())
+        .bind(authority_id.as_bytes())
+        .bind(i64_from_unix_seconds(now)?)
+        .execute(tx.sqlx_transaction().as_mut())
+        .await
+        .map_err(DbError::query)?;
+    Ok(())
+}
+
+async fn insert_pending_credential_lifecycle_action(
+    tx: &mut Tx<'_>,
+    table_names: &AuthCoreTableNames,
+    record: &PendingCredentialLifecycleActionRecord,
+) -> Result<(), PostgresAuthStoreError> {
+    let statement = format!(
+        r#"
+        INSERT INTO {} (
+            pending_action_id,
+            subject_id,
+            target_credential_instance_id,
+            lifecycle_action,
+            requested_at,
+            earliest_execute_at,
+            expires_at,
+            closed_at
+        )
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+        "#,
+        table_names
+            .get(PostgresAuthCoreTable::PendingCredentialLifecycleAction)
+            .quoted()
+    );
+    tx.record_database_operation(
+        DatabaseOperationKind::Execute,
+        "auth_core.mutation.create_pending_credential_lifecycle_action",
+        Some(statement.as_str()),
+    );
+    pooler_safe_query(sqlx::AssertSqlSafe(statement.as_str()))
+        .bind(record.pending_action_id.as_bytes())
+        .bind(record.subject_id.as_bytes())
+        .bind(record.target_credential_instance_id.as_bytes())
+        .bind(i32_from_credential_lifecycle_action(record.action))
+        .bind(i64_from_unix_seconds(record.requested_at)?)
+        .bind(i64_from_unix_seconds(record.earliest_execute_at)?)
+        .bind(i64_from_unix_seconds(record.expires_at)?)
+        .bind(optional_i64_from_unix_seconds(record.closed_at)?)
+        .execute(tx.sqlx_transaction().as_mut())
+        .await
+        .map_err(DbError::query)?;
+    Ok(())
+}
+
+async fn load_pending_credential_lifecycle_action(
+    tx: &mut Tx<'_>,
+    table_names: &AuthCoreTableNames,
+    pending_action_id: &PendingCredentialLifecycleActionId,
+) -> Result<Option<PendingCredentialLifecycleActionRecord>, PostgresAuthStoreError> {
+    let statement = format!(
+        r#"
+        SELECT subject_id, target_credential_instance_id, lifecycle_action,
+               requested_at, earliest_execute_at, expires_at, closed_at
+        FROM {}
+        WHERE pending_action_id = $1
+        "#,
+        table_names
+            .get(PostgresAuthCoreTable::PendingCredentialLifecycleAction)
+            .quoted()
+    );
+    tx.record_database_operation(
+        DatabaseOperationKind::FetchOptional,
+        "auth_core.load.pending_credential_lifecycle_action",
+        Some(statement.as_str()),
+    );
+    let row = pooler_safe_query_as::<(Vec<u8>, Vec<u8>, i32, i64, i64, i64, Option<i64>)>(
+        sqlx::AssertSqlSafe(statement.as_str()),
+    )
+    .bind(pending_action_id.as_bytes())
+    .fetch_optional(tx.sqlx_transaction().as_mut())
+    .await
+    .map_err(DbError::query)?;
+    row.map(
+        |(
+            subject_id,
+            target_credential_instance_id,
+            action,
+            requested_at,
+            earliest_execute_at,
+            expires_at,
+            closed_at,
+        )| {
+            Ok(PendingCredentialLifecycleActionRecord {
+                pending_action_id: pending_action_id.clone(),
+                subject_id: SubjectId::from_bytes(subject_id)?,
+                target_credential_instance_id: VerifiedProofSourceId::from_bytes(
+                    target_credential_instance_id,
+                )?,
+                action: credential_lifecycle_action_from_i32(action)?,
+                requested_at: unix_seconds_from_i64(requested_at)?,
+                earliest_execute_at: unix_seconds_from_i64(earliest_execute_at)?,
+                expires_at: unix_seconds_from_i64(expires_at)?,
+                closed_at: closed_at.map(unix_seconds_from_i64).transpose()?,
+            })
+        },
+    )
+    .transpose()
+}
+
+fn lifecycle_authority_source_key(
+    source: &LifecycleAuthoritySource,
+) -> Result<(LifecycleAuthoritySourceKind, VerifiedProofSourceId), PostgresAuthStoreError> {
+    match source {
+        LifecycleAuthoritySource::VerifiedProofSource(source) => {
+            let kind = match source.kind() {
+                VerifiedProofSourceKind::CredentialInstance => {
+                    LifecycleAuthoritySourceKind::CredentialInstance
+                }
+                VerifiedProofSourceKind::OutOfBandIdentifier => {
+                    LifecycleAuthoritySourceKind::OutOfBandIdentifier
+                }
+                VerifiedProofSourceKind::ExternalAuthority => {
+                    LifecycleAuthoritySourceKind::ExternalAuthority
+                }
+            };
+            Ok((kind, source.source_id().clone()))
+        }
+        LifecycleAuthoritySource::AuthenticatedSession(session_id) => Ok((
+            LifecycleAuthoritySourceKind::AuthenticatedSession,
+            VerifiedProofSourceId::from_bytes(session_id.as_bytes().to_vec())?,
+        )),
+        LifecycleAuthoritySource::AdminSupportIntervention(intervention_id) => Ok((
+            LifecycleAuthoritySourceKind::AdminSupportIntervention,
+            intervention_id.clone(),
+        )),
+    }
+}
+
 async fn load_active_proof_attempt(
     tx: &mut Tx<'_>,
     table_names: &AuthCoreTableNames,
@@ -1859,6 +2407,191 @@ async fn enforce_precondition(
                 .await
                 .map_err(DbError::query)?;
         }
+        Precondition::CredentialInstanceStillActive {
+            credential_instance_id,
+            subject_id,
+        } => {
+            let statement = format!(
+                r#"
+                SELECT 1
+                FROM {}
+                WHERE credential_instance_id = $1
+                  AND subject_id = $2
+                  AND lifecycle_state = $3
+                FOR UPDATE
+                "#,
+                table_names
+                    .get(PostgresAuthCoreTable::CredentialInstance)
+                    .quoted()
+            );
+            let found = fetch_exists_for_update(
+                tx,
+                "auth_core.precondition.credential_instance_still_active",
+                &statement,
+                |query| {
+                    Ok(query
+                        .bind(credential_instance_id.as_bytes())
+                        .bind(subject_id.as_bytes())
+                        .bind(i32_from_credential_lifecycle_state(
+                            CredentialLifecycleState::Active,
+                        )))
+                },
+            )
+            .await?;
+            if !found {
+                return Err(PostgresAuthStoreError::PreconditionFailed(
+                    "credential instance is not active for subject",
+                ));
+            }
+        }
+        Precondition::NoOpenPendingCredentialLifecycleActionForTarget {
+            target_credential_instance_id,
+            action,
+            now,
+        } => {
+            let close_statement = format!(
+                r#"
+                UPDATE {}
+                SET closed_at = $3
+                WHERE target_credential_instance_id = $1
+                  AND lifecycle_action = $2
+                  AND closed_at IS NULL
+                  AND expires_at <= $3
+                "#,
+                table_names
+                    .get(PostgresAuthCoreTable::PendingCredentialLifecycleAction)
+                    .quoted()
+            );
+            tx.record_database_operation(
+                DatabaseOperationKind::Execute,
+                "auth_core.precondition.close_expired_pending_credential_lifecycle_actions",
+                Some(close_statement.as_str()),
+            );
+            pooler_safe_query(sqlx::AssertSqlSafe(close_statement.as_str()))
+                .bind(target_credential_instance_id.as_bytes())
+                .bind(i32_from_credential_lifecycle_action(*action))
+                .bind(i64_from_unix_seconds(*now)?)
+                .execute(tx.sqlx_transaction().as_mut())
+                .await
+                .map_err(DbError::query)?;
+
+            let open_statement = format!(
+                r#"
+                SELECT 1
+                FROM {}
+                WHERE target_credential_instance_id = $1
+                  AND lifecycle_action = $2
+                  AND closed_at IS NULL
+                FOR UPDATE
+                "#,
+                table_names
+                    .get(PostgresAuthCoreTable::PendingCredentialLifecycleAction)
+                    .quoted()
+            );
+            let found = fetch_exists_for_update(
+                tx,
+                "auth_core.precondition.no_open_pending_credential_lifecycle_action",
+                &open_statement,
+                |query| {
+                    Ok(query
+                        .bind(target_credential_instance_id.as_bytes())
+                        .bind(i32_from_credential_lifecycle_action(*action)))
+                },
+            )
+            .await?;
+            if found {
+                return Err(PostgresAuthStoreError::PreconditionFailed(
+                    "pending credential lifecycle action already exists",
+                ));
+            }
+        }
+        Precondition::PendingCredentialLifecycleActionStillExecutable {
+            pending_action_id,
+            subject_id,
+            target_credential_instance_id,
+            action,
+            now,
+        } => {
+            let statement = format!(
+                r#"
+                SELECT 1
+                FROM {}
+                WHERE pending_action_id = $1
+                  AND subject_id = $2
+                  AND target_credential_instance_id = $3
+                  AND lifecycle_action = $4
+                  AND closed_at IS NULL
+                  AND earliest_execute_at <= $5
+                  AND $5 < expires_at
+                FOR UPDATE
+                "#,
+                table_names
+                    .get(PostgresAuthCoreTable::PendingCredentialLifecycleAction)
+                    .quoted()
+            );
+            let found = fetch_exists_for_update(
+                tx,
+                "auth_core.precondition.pending_credential_lifecycle_action_still_executable",
+                &statement,
+                |query| {
+                    Ok(query
+                        .bind(pending_action_id.as_bytes())
+                        .bind(subject_id.as_bytes())
+                        .bind(target_credential_instance_id.as_bytes())
+                        .bind(i32_from_credential_lifecycle_action(*action))
+                        .bind(i64_from_unix_seconds(*now)?))
+                },
+            )
+            .await?;
+            if !found {
+                return Err(PostgresAuthStoreError::PreconditionFailed(
+                    "pending credential lifecycle action is not executable",
+                ));
+            }
+        }
+        Precondition::PendingCredentialLifecycleActionStillCancellableForTarget {
+            pending_action_id,
+            subject_id,
+            target_credential_instance_id,
+            action,
+            now,
+        } => {
+            let statement = format!(
+                r#"
+                SELECT 1
+                FROM {}
+                WHERE pending_action_id = $1
+                  AND subject_id = $2
+                  AND target_credential_instance_id = $3
+                  AND lifecycle_action = $4
+                  AND closed_at IS NULL
+                  AND $5 < expires_at
+                FOR UPDATE
+                "#,
+                table_names
+                    .get(PostgresAuthCoreTable::PendingCredentialLifecycleAction)
+                    .quoted()
+            );
+            let found = fetch_exists_for_update(
+                tx,
+                "auth_core.precondition.pending_credential_lifecycle_action_still_cancellable_for_target",
+                &statement,
+                |query| {
+                    Ok(query
+                        .bind(pending_action_id.as_bytes())
+                        .bind(subject_id.as_bytes())
+                        .bind(target_credential_instance_id.as_bytes())
+                        .bind(i32_from_credential_lifecycle_action(*action))
+                        .bind(i64_from_unix_seconds(*now)?))
+                },
+            )
+            .await?;
+            if !found {
+                return Err(PostgresAuthStoreError::PreconditionFailed(
+                    "pending credential lifecycle action is not cancellable for target",
+                ));
+            }
+        }
     }
     Ok(())
 }
@@ -2216,6 +2949,101 @@ async fn apply_mutation(
                 table_names,
                 subject_id,
                 *revoke_records_created_at_or_before,
+            )
+            .await
+        }
+        Mutation::RecordCredentialLifecycleActionAuthorized {
+            target_credential_instance_id,
+            authorized_at,
+            ..
+        } => {
+            let statement = format!(
+                r#"UPDATE {} SET updated_at = $2 WHERE credential_instance_id = $1"#,
+                table_names
+                    .get(PostgresAuthCoreTable::CredentialInstance)
+                    .quoted()
+            );
+            execute_one_row_update(
+                tx,
+                "auth_core.mutation.record_credential_lifecycle_action_authorized",
+                &statement,
+                |query| {
+                    Ok(query
+                        .bind(target_credential_instance_id.as_bytes())
+                        .bind(i64_from_unix_seconds(*authorized_at)?))
+                },
+            )
+            .await
+        }
+        Mutation::CreatePendingCredentialLifecycleAction(record) => {
+            insert_pending_credential_lifecycle_action(tx, table_names, record).await
+        }
+        Mutation::RecordCredentialLifecycleActionExecuted {
+            target_credential_instance_id,
+            executed_at,
+            ..
+        } => {
+            let statement = format!(
+                r#"UPDATE {} SET updated_at = $2 WHERE credential_instance_id = $1"#,
+                table_names
+                    .get(PostgresAuthCoreTable::CredentialInstance)
+                    .quoted()
+            );
+            execute_one_row_update(
+                tx,
+                "auth_core.mutation.record_credential_lifecycle_action_executed",
+                &statement,
+                |query| {
+                    Ok(query
+                        .bind(target_credential_instance_id.as_bytes())
+                        .bind(i64_from_unix_seconds(*executed_at)?))
+                },
+            )
+            .await
+        }
+        Mutation::SetCredentialLifecycleState {
+            credential_instance_id,
+            lifecycle_state,
+            updated_at,
+        } => {
+            let statement = format!(
+                r#"UPDATE {} SET lifecycle_state = $2, updated_at = $3 WHERE credential_instance_id = $1"#,
+                table_names
+                    .get(PostgresAuthCoreTable::CredentialInstance)
+                    .quoted()
+            );
+            execute_one_row_update(
+                tx,
+                "auth_core.mutation.set_credential_lifecycle_state",
+                &statement,
+                |query| {
+                    Ok(query
+                        .bind(credential_instance_id.as_bytes())
+                        .bind(i32_from_credential_lifecycle_state(*lifecycle_state))
+                        .bind(i64_from_unix_seconds(*updated_at)?))
+                },
+            )
+            .await
+        }
+        Mutation::ClosePendingCredentialLifecycleAction {
+            pending_action_id,
+            closed_at,
+        } => {
+            let statement = format!(
+                r#"UPDATE {} SET closed_at = $2 WHERE pending_action_id = $1"#,
+                table_names
+                    .get(PostgresAuthCoreTable::PendingCredentialLifecycleAction)
+                    .quoted()
+            );
+            execute_one_row_update(
+                tx,
+                "auth_core.mutation.close_pending_credential_lifecycle_action",
+                &statement,
+                |query| {
+                    Ok(query
+                        .bind(pending_action_id.as_bytes())
+                        .bind(i64_from_unix_seconds(*closed_at)?))
+                },
             )
             .await
         }
@@ -2702,10 +3530,10 @@ async fn append_core_durable_effects(
                 let statement = format!(
                     r#"
                     INSERT INTO {} (
-                        kind, challenge_id, proof_method_label, recipient_handle,
+                        kind, security_notification_kind, challenge_id, proof_method_label, recipient_handle,
                         delivery_idempotency_key, expires_at, created_at
                     )
-                    VALUES ($1,$2,$3,$4,$5,$6,$6)
+                    VALUES ($1,$2,$3,$4,$5,$6,$7,$7)
                     "#,
                     table_names
                         .get(PostgresAuthCoreTable::CoreDurableEffectCommand)
@@ -2718,6 +3546,7 @@ async fn append_core_durable_effects(
                 );
                 pooler_safe_query(sqlx::AssertSqlSafe(statement.as_str()))
                     .bind(DURABLE_EFFECT_KIND_SEND_OUT_OF_BAND_MESSAGE)
+                    .bind(Option::<i32>::None)
                     .bind(command.challenge_id.as_bytes())
                     .bind(command.proof_method_label.as_str())
                     .bind(command.recipient_handle.as_str())
@@ -2730,8 +3559,8 @@ async fn append_core_durable_effects(
             DurableEffectCommand::NotifySecurityEvent(command) => {
                 let statement = format!(
                     r#"
-                    INSERT INTO {} (kind, subject_id, created_at)
-                    VALUES ($1,$2,0)
+                    INSERT INTO {} (kind, security_notification_kind, subject_id, created_at)
+                    VALUES ($1,$2,$3,0)
                     "#,
                     table_names
                         .get(PostgresAuthCoreTable::CoreDurableEffectCommand)
@@ -2744,6 +3573,7 @@ async fn append_core_durable_effects(
                 );
                 pooler_safe_query(sqlx::AssertSqlSafe(statement.as_str()))
                     .bind(DURABLE_EFFECT_KIND_NOTIFY_SECURITY_EVENT)
+                    .bind(i32_from_security_notification_kind(command.kind))
                     .bind(command.subject_id.as_bytes())
                     .execute(tx.sqlx_transaction().as_mut())
                     .await
@@ -2983,7 +3813,7 @@ fn classify_presented_secret(
             {
                 return Ok(StoredSecretMatch::PreviousWithinGrace);
             }
-            return Ok(StoredSecretMatch::PreviousExpired);
+            return Ok(StoredSecretMatch::PreviousAfterGrace);
         }
     }
     Ok(StoredSecretMatch::Unknown)
@@ -3042,8 +3872,12 @@ fn auth_table_number(table: PostgresAuthCoreTable) -> u8 {
         PostgresAuthCoreTable::ActiveProofChallenge => 8,
         PostgresAuthCoreTable::ActiveProofChallengeDeliveryKey => 9,
         PostgresAuthCoreTable::SubjectAuthState => 10,
-        PostgresAuthCoreTable::AuditEvent => 11,
-        PostgresAuthCoreTable::CoreDurableEffectCommand => 12,
+        PostgresAuthCoreTable::CredentialInstance => 11,
+        PostgresAuthCoreTable::CredentialRecoveryAuthority => 12,
+        PostgresAuthCoreTable::LifecycleAuthoritySource => 13,
+        PostgresAuthCoreTable::PendingCredentialLifecycleAction => 14,
+        PostgresAuthCoreTable::AuditEvent => 15,
+        PostgresAuthCoreTable::CoreDurableEffectCommand => 16,
     }
 }
 
@@ -3122,6 +3956,139 @@ pub(super) fn i32_from_verified_proof_source_kind(value: VerifiedProofSourceKind
     }
 }
 
+pub(super) fn credential_instance_kind_from_i32(
+    value: i32,
+) -> Result<CredentialInstanceKind, PostgresAuthStoreError> {
+    match value {
+        1 => Ok(CredentialInstanceKind::MessageSignatureVerifier),
+        2 => Ok(CredentialInstanceKind::SharedSecretOtpVerifier),
+        3 => Ok(CredentialInstanceKind::OriginBoundPublicKeyCredential),
+        4 => Ok(CredentialInstanceKind::RecoveryCodeCredential),
+        5 => Ok(CredentialInstanceKind::TrustedDeviceCredential),
+        _ => Err(PostgresAuthStoreError::InvalidStoredData(
+            "invalid credential instance kind",
+        )),
+    }
+}
+
+pub(super) fn i32_from_credential_instance_kind(value: CredentialInstanceKind) -> i32 {
+    match value {
+        CredentialInstanceKind::MessageSignatureVerifier => 1,
+        CredentialInstanceKind::SharedSecretOtpVerifier => 2,
+        CredentialInstanceKind::OriginBoundPublicKeyCredential => 3,
+        CredentialInstanceKind::RecoveryCodeCredential => 4,
+        CredentialInstanceKind::TrustedDeviceCredential => 5,
+    }
+}
+
+pub(super) fn credential_lifecycle_state_from_i32(
+    value: i32,
+) -> Result<CredentialLifecycleState, PostgresAuthStoreError> {
+    match value {
+        1 => Ok(CredentialLifecycleState::Active),
+        2 => Ok(CredentialLifecycleState::PendingActivation),
+        3 => Ok(CredentialLifecycleState::PendingReplacement),
+        4 => Ok(CredentialLifecycleState::PendingRemoval),
+        5 => Ok(CredentialLifecycleState::ScheduledDeletion),
+        6 => Ok(CredentialLifecycleState::Consumed),
+        7 => Ok(CredentialLifecycleState::Revoked),
+        8 => Ok(CredentialLifecycleState::Expired),
+        9 => Ok(CredentialLifecycleState::Superseded),
+        10 => Ok(CredentialLifecycleState::AdminSuspended),
+        _ => Err(PostgresAuthStoreError::InvalidStoredData(
+            "invalid credential lifecycle state",
+        )),
+    }
+}
+
+pub(super) fn i32_from_credential_lifecycle_state(value: CredentialLifecycleState) -> i32 {
+    match value {
+        CredentialLifecycleState::Active => 1,
+        CredentialLifecycleState::PendingActivation => 2,
+        CredentialLifecycleState::PendingReplacement => 3,
+        CredentialLifecycleState::PendingRemoval => 4,
+        CredentialLifecycleState::ScheduledDeletion => 5,
+        CredentialLifecycleState::Consumed => 6,
+        CredentialLifecycleState::Revoked => 7,
+        CredentialLifecycleState::Expired => 8,
+        CredentialLifecycleState::Superseded => 9,
+        CredentialLifecycleState::AdminSuspended => 10,
+    }
+}
+
+pub(super) fn credential_lifecycle_action_from_i32(
+    value: i32,
+) -> Result<CredentialLifecycleAction, PostgresAuthStoreError> {
+    match value {
+        1 => Ok(CredentialLifecycleAction::Create),
+        2 => Ok(CredentialLifecycleAction::Reset),
+        3 => Ok(CredentialLifecycleAction::Replace),
+        4 => Ok(CredentialLifecycleAction::Remove),
+        5 => Ok(CredentialLifecycleAction::Disable),
+        6 => Ok(CredentialLifecycleAction::Regenerate),
+        7 => Ok(CredentialLifecycleAction::RecoverSubjectAccess),
+        _ => Err(PostgresAuthStoreError::InvalidStoredData(
+            "invalid credential lifecycle action",
+        )),
+    }
+}
+
+pub(super) fn i32_from_credential_lifecycle_action(value: CredentialLifecycleAction) -> i32 {
+    match value {
+        CredentialLifecycleAction::Create => 1,
+        CredentialLifecycleAction::Reset => 2,
+        CredentialLifecycleAction::Replace => 3,
+        CredentialLifecycleAction::Remove => 4,
+        CredentialLifecycleAction::Disable => 5,
+        CredentialLifecycleAction::Regenerate => 6,
+        CredentialLifecycleAction::RecoverSubjectAccess => 7,
+    }
+}
+
+pub(super) fn recovery_authority_timing_from_i32(
+    value: i32,
+) -> Result<RecoveryAuthorityTiming, PostgresAuthStoreError> {
+    match value {
+        1 => Ok(RecoveryAuthorityTiming::Immediate),
+        2 => Ok(RecoveryAuthorityTiming::Delayed),
+        _ => Err(PostgresAuthStoreError::InvalidStoredData(
+            "invalid recovery authority timing",
+        )),
+    }
+}
+
+pub(super) fn i32_from_recovery_authority_timing(value: RecoveryAuthorityTiming) -> i32 {
+    match value {
+        RecoveryAuthorityTiming::Immediate => 1,
+        RecoveryAuthorityTiming::Delayed => 2,
+    }
+}
+
+pub(super) fn lifecycle_authority_source_kind_from_i32(
+    value: i32,
+) -> Result<LifecycleAuthoritySourceKind, PostgresAuthStoreError> {
+    match value {
+        1 => Ok(LifecycleAuthoritySourceKind::CredentialInstance),
+        2 => Ok(LifecycleAuthoritySourceKind::OutOfBandIdentifier),
+        3 => Ok(LifecycleAuthoritySourceKind::ExternalAuthority),
+        4 => Ok(LifecycleAuthoritySourceKind::AuthenticatedSession),
+        5 => Ok(LifecycleAuthoritySourceKind::AdminSupportIntervention),
+        _ => Err(PostgresAuthStoreError::InvalidStoredData(
+            "invalid lifecycle authority source kind",
+        )),
+    }
+}
+
+pub(super) fn i32_from_lifecycle_authority_source_kind(value: LifecycleAuthoritySourceKind) -> i32 {
+    match value {
+        LifecycleAuthoritySourceKind::CredentialInstance => 1,
+        LifecycleAuthoritySourceKind::OutOfBandIdentifier => 2,
+        LifecycleAuthoritySourceKind::ExternalAuthority => 3,
+        LifecycleAuthoritySourceKind::AuthenticatedSession => 4,
+        LifecycleAuthoritySourceKind::AdminSupportIntervention => 5,
+    }
+}
+
 fn online_guessing_risk_from_bool(value: bool) -> OnlineGuessingRisk {
     if value {
         OnlineGuessingRisk::OnlineGuessable
@@ -3182,6 +4149,32 @@ fn i32_from_audit_event_kind(value: AuditEventKind) -> i32 {
         AuditEventKind::ActiveProofAttemptClosed => 17,
         AuditEventKind::ActiveProofAttemptDeletedAfterWeakProofFailures => 18,
         AuditEventKind::ActiveProofMethodChallengeIssued => 19,
+        AuditEventKind::CredentialResetAuthorized => 20,
+        AuditEventKind::CredentialResetPendingActionScheduled => 21,
+        AuditEventKind::CredentialResetExecuted => 22,
+        AuditEventKind::CredentialResetPendingActionCancelled => 23,
+        AuditEventKind::CredentialReplacementExecuted => 24,
+        AuditEventKind::CredentialReplacementPendingActionCancelled => 25,
+        AuditEventKind::CredentialRemovalExecuted => 26,
+        AuditEventKind::CredentialRemovalPendingActionCancelled => 27,
+        AuditEventKind::CredentialRegenerationExecuted => 28,
+        AuditEventKind::CredentialRegenerationPendingActionCancelled => 29,
+    }
+}
+
+pub(super) fn i32_from_security_notification_kind(value: SecurityNotificationKind) -> i32 {
+    match value {
+        SecurityNotificationKind::TrustedDeviceCreated => 1,
+        SecurityNotificationKind::CredentialResetAuthorized => 2,
+        SecurityNotificationKind::CredentialResetPendingActionScheduled => 3,
+        SecurityNotificationKind::CredentialResetExecuted => 4,
+        SecurityNotificationKind::CredentialResetPendingActionCancelled => 5,
+        SecurityNotificationKind::CredentialReplacementExecuted => 6,
+        SecurityNotificationKind::CredentialReplacementPendingActionCancelled => 7,
+        SecurityNotificationKind::CredentialRemovalExecuted => 8,
+        SecurityNotificationKind::CredentialRemovalPendingActionCancelled => 9,
+        SecurityNotificationKind::CredentialRegenerationExecuted => 10,
+        SecurityNotificationKind::CredentialRegenerationPendingActionCancelled => 11,
     }
 }
 

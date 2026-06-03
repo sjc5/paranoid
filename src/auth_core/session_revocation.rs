@@ -46,11 +46,7 @@ pub(super) fn logout_current_session(
                 record.device_credential_id.clone(),
             ));
         } else {
-            plan.merge(session_credential_mismatch_plan(
-                command.now,
-                Some(record.subject_id.clone()),
-                Some(record.session_id.clone()),
-            ));
+            plan.merge(session_tripwire_plan(command.now, record));
         }
     }
 

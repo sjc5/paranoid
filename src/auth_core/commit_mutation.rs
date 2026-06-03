@@ -81,6 +81,48 @@ pub enum Precondition {
         /// Transition time used to ignore already-expired challenges.
         now: UnixSeconds,
     },
+    /// Target credential metadata must still be active and owned by the loaded subject.
+    CredentialInstanceStillActive {
+        /// Credential instance to guard.
+        credential_instance_id: VerifiedProofSourceId,
+        /// Subject that must own the credential.
+        subject_id: SubjectId,
+    },
+    /// No open pending action may already exist for this target/action pair.
+    NoOpenPendingCredentialLifecycleActionForTarget {
+        /// Target credential instance.
+        target_credential_instance_id: VerifiedProofSourceId,
+        /// Lifecycle action.
+        action: CredentialLifecycleAction,
+        /// Transition time used to close expired pending actions.
+        now: UnixSeconds,
+    },
+    /// Pending credential lifecycle action must still be open, mature, unexpired, and target-matched.
+    PendingCredentialLifecycleActionStillExecutable {
+        /// Pending action to guard.
+        pending_action_id: PendingCredentialLifecycleActionId,
+        /// Subject that must own the pending action.
+        subject_id: SubjectId,
+        /// Target credential instance.
+        target_credential_instance_id: VerifiedProofSourceId,
+        /// Lifecycle action.
+        action: CredentialLifecycleAction,
+        /// Transition time used to decide executability.
+        now: UnixSeconds,
+    },
+    /// Pending credential lifecycle action must still be open, unexpired, and target-matched.
+    PendingCredentialLifecycleActionStillCancellableForTarget {
+        /// Pending action to guard.
+        pending_action_id: PendingCredentialLifecycleActionId,
+        /// Subject that must own the pending action.
+        subject_id: SubjectId,
+        /// Target credential instance.
+        target_credential_instance_id: VerifiedProofSourceId,
+        /// Lifecycle action.
+        action: CredentialLifecycleAction,
+        /// Transition time used to decide cancellability.
+        now: UnixSeconds,
+    },
 }
 
 /// State mutation planned by the reducer.
@@ -208,6 +250,42 @@ pub enum Mutation {
         revoke_records_created_at_or_before: UnixSeconds,
         /// Revocation reason.
         reason: RevocationReason,
+    },
+    /// Record a core-visible credential lifecycle action that was authorized immediately.
+    RecordCredentialLifecycleActionAuthorized {
+        /// Target credential instance.
+        target_credential_instance_id: VerifiedProofSourceId,
+        /// Lifecycle action.
+        action: CredentialLifecycleAction,
+        /// Time the action was authorized.
+        authorized_at: UnixSeconds,
+    },
+    /// Create a delayed credential lifecycle action.
+    CreatePendingCredentialLifecycleAction(PendingCredentialLifecycleActionRecord),
+    /// Record a core-visible credential lifecycle action that has executed.
+    RecordCredentialLifecycleActionExecuted {
+        /// Target credential instance.
+        target_credential_instance_id: VerifiedProofSourceId,
+        /// Lifecycle action.
+        action: CredentialLifecycleAction,
+        /// Time the action executed.
+        executed_at: UnixSeconds,
+    },
+    /// Set a credential's core-visible lifecycle state.
+    SetCredentialLifecycleState {
+        /// Credential instance to update.
+        credential_instance_id: VerifiedProofSourceId,
+        /// New lifecycle state.
+        lifecycle_state: CredentialLifecycleState,
+        /// Update timestamp.
+        updated_at: UnixSeconds,
+    },
+    /// Close a delayed credential lifecycle action after execution or cancellation.
+    ClosePendingCredentialLifecycleAction {
+        /// Pending action to close.
+        pending_action_id: PendingCredentialLifecycleActionId,
+        /// Closure timestamp.
+        closed_at: UnixSeconds,
     },
 }
 

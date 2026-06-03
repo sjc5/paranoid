@@ -18,6 +18,9 @@ pub(super) struct InMemoryCommitStore {
     pub(super) active_proof_attempts: BTreeMap<ActiveProofAttemptId, ActiveProofAttemptRecord>,
     pub(super) active_proof_challenges:
         BTreeMap<ActiveProofChallengeId, ActiveProofChallengeRecord>,
+    pub(super) credential_instances: BTreeMap<VerifiedProofSourceId, CredentialInstanceMetadata>,
+    pub(super) pending_credential_lifecycle_actions:
+        BTreeMap<PendingCredentialLifecycleActionId, PendingCredentialLifecycleActionRecord>,
     pub(super) subject_revocations: BTreeMap<SubjectId, SubjectRevocationState>,
     pub(super) audit_events: Vec<AuditEvent>,
     pub(super) method_commit_work: Vec<MethodCommitWork>,
@@ -380,6 +383,91 @@ impl InMemoryCommitStore {
                     ));
                 }
             }
+            Precondition::CredentialInstanceStillActive {
+                credential_instance_id,
+                subject_id,
+            } => {
+                let credential = self
+                    .credential_instances
+                    .get(credential_instance_id)
+                    .ok_or(InMemoryCommitError::PreconditionFailed(
+                        "credential instance still active",
+                    ))?;
+                if credential.subject_id() != subject_id || !credential.can_produce_new_proofs() {
+                    return Err(InMemoryCommitError::PreconditionFailed(
+                        "credential instance still active",
+                    ));
+                }
+            }
+            Precondition::NoOpenPendingCredentialLifecycleActionForTarget {
+                target_credential_instance_id,
+                action,
+                now,
+            } => {
+                if self
+                    .pending_credential_lifecycle_actions
+                    .values()
+                    .any(|pending_action| {
+                        pending_action.target_credential_instance_id
+                            == *target_credential_instance_id
+                            && pending_action.action == *action
+                            && pending_action.closed_at.is_none()
+                            && *now < pending_action.expires_at
+                    })
+                {
+                    return Err(InMemoryCommitError::PreconditionFailed(
+                        "no open pending credential lifecycle action for target",
+                    ));
+                }
+            }
+            Precondition::PendingCredentialLifecycleActionStillExecutable {
+                pending_action_id,
+                subject_id,
+                target_credential_instance_id,
+                action,
+                now,
+            } => {
+                let pending_action = self
+                    .pending_credential_lifecycle_actions
+                    .get(pending_action_id)
+                    .ok_or(InMemoryCommitError::PreconditionFailed(
+                        "pending credential lifecycle action still executable",
+                    ))?;
+                if pending_action.subject_id != *subject_id
+                    || pending_action.target_credential_instance_id
+                        != *target_credential_instance_id
+                    || pending_action.action != *action
+                    || !pending_action.is_executable_at(*now)
+                {
+                    return Err(InMemoryCommitError::PreconditionFailed(
+                        "pending credential lifecycle action still executable",
+                    ));
+                }
+            }
+            Precondition::PendingCredentialLifecycleActionStillCancellableForTarget {
+                pending_action_id,
+                subject_id,
+                target_credential_instance_id,
+                action,
+                now,
+            } => {
+                let pending_action = self
+                    .pending_credential_lifecycle_actions
+                    .get(pending_action_id)
+                    .ok_or(InMemoryCommitError::PreconditionFailed(
+                        "pending credential lifecycle action still cancellable for target",
+                    ))?;
+                if pending_action.subject_id != *subject_id
+                    || pending_action.target_credential_instance_id
+                        != *target_credential_instance_id
+                    || pending_action.action != *action
+                    || !pending_action.is_cancellable_at(*now)
+                {
+                    return Err(InMemoryCommitError::PreconditionFailed(
+                        "pending credential lifecycle action still cancellable for target",
+                    ));
+                }
+            }
         }
         Ok(())
     }
@@ -578,6 +666,64 @@ impl InMemoryCommitStore {
                 if entry.revoke_records_created_at_or_before < revoke_records_created_at_or_before {
                     entry.revoke_records_created_at_or_before = revoke_records_created_at_or_before;
                 }
+            }
+            Mutation::RecordCredentialLifecycleActionAuthorized {
+                target_credential_instance_id,
+                action: _,
+                authorized_at: _,
+            } => {
+                self.credential_instances
+                    .get_mut(&target_credential_instance_id)
+                    .ok_or(InMemoryCommitError::MutationTargetMissing(
+                        "credential instance",
+                    ))?;
+            }
+            Mutation::CreatePendingCredentialLifecycleAction(pending_action) => {
+                if self
+                    .pending_credential_lifecycle_actions
+                    .insert(pending_action.pending_action_id.clone(), pending_action)
+                    .is_some()
+                {
+                    return Err(InMemoryCommitError::DuplicateRecord(
+                        "pending credential lifecycle action",
+                    ));
+                }
+            }
+            Mutation::RecordCredentialLifecycleActionExecuted {
+                target_credential_instance_id,
+                action: _,
+                executed_at: _,
+            } => {
+                self.credential_instances
+                    .get_mut(&target_credential_instance_id)
+                    .ok_or(InMemoryCommitError::MutationTargetMissing(
+                        "credential instance",
+                    ))?;
+            }
+            Mutation::SetCredentialLifecycleState {
+                credential_instance_id,
+                lifecycle_state,
+                updated_at: _,
+            } => {
+                let credential = self
+                    .credential_instances
+                    .get_mut(&credential_instance_id)
+                    .ok_or(InMemoryCommitError::MutationTargetMissing(
+                        "credential instance",
+                    ))?;
+                *credential = credential.with_lifecycle_state(lifecycle_state);
+            }
+            Mutation::ClosePendingCredentialLifecycleAction {
+                pending_action_id,
+                closed_at,
+            } => {
+                let pending_action = self
+                    .pending_credential_lifecycle_actions
+                    .get_mut(&pending_action_id)
+                    .ok_or(InMemoryCommitError::MutationTargetMissing(
+                        "pending credential lifecycle action",
+                    ))?;
+                pending_action.closed_at = Some(closed_at);
             }
         }
         Ok(())

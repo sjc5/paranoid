@@ -91,8 +91,8 @@ fn in_memory_commit_adapter_accepts_stale_session_cookie_inside_race_grace_only(
             .get(&id("session"))
             .expect("session")
             .revoked_at,
-        None,
-        "stale cookies after grace are suspicious client credentials, not automatic session revocation"
+        Some(at(90)),
+        "stale cookies after grace must tripwire-revoke the live session"
     );
 }
 

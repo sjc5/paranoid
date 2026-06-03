@@ -4,8 +4,9 @@ use std::pin::Pin;
 
 use serde::{Deserialize, Serialize};
 use sqlx::Row;
+use zeroize::Zeroize;
 
-use crate::crypto::{Keyset, MacOverSecret, SecretBytes};
+use crate::crypto::{Base58, Encrypted, Keyset, MacOverSecret, SecretBytes, decrypt, encrypt};
 #[cfg(test)]
 use crate::db::Pool;
 use crate::db::{
@@ -24,6 +25,7 @@ const RECOVERY_CODE_METHOD_LABEL: &str = "recovery_code";
 const RECOVERY_CODE_STILL_UNUSED_OPERATION: &str = "recovery_code_still_unused";
 const RECOVERY_CODE_CONSUME_OPERATION: &str = "recovery_code_consume";
 const RECOVERY_CODE_SECRET_CONTEXT: &[u8] = b"paranoid/auth/v1/recovery-code-secret";
+const RECOVERY_CODE_TOKEN_CONTEXT: &[u8] = b"paranoid/auth/v1/recovery-code-token";
 const DEFAULT_RECOVERY_CODE_TABLE_PREFIX: &str = "__paranoid_auth_recovery_code_";
 
 pub(crate) struct PostgresRecoveryCodeMethodPlugin {
@@ -59,10 +61,12 @@ impl PostgresRecoveryCodeMethodPlugin {
                 Error::LoadedStateContradiction("recovery code response used a different method"),
             ));
         }
-        let submitted_secret: SecretBytes =
-            SecretBytes::try_from(response.secret_response.expose_secret())
-                .map_err(PostgresRecoveryCodeMethodError::Crypto)?;
-        let secret_mac = submitted_secret
+        let token = self.decode_recovery_code_token(response)?;
+        if token.subject_id != *subject_id {
+            return Ok(KnownSubjectActiveProofMethodVerification::Rejected);
+        }
+        let secret_mac = token
+            .random_token
             .to_mac(
                 &self.secret_keyset,
                 &recovery_code_secret_context(subject_id, &self.method),
@@ -87,8 +91,62 @@ impl PostgresRecoveryCodeMethodPlugin {
             &secret_mac,
         )?];
         Ok(KnownSubjectActiveProofMethodVerification::Accepted(
-            VerifiedActiveProofMethodResponse::new(verified_proof, method_commit_work),
+            VerifiedActiveProofMethodResponse::new(verified_proof, method_commit_work)
+                .map_err(PostgresRecoveryCodeMethodError::Core)?,
         ))
+    }
+
+    fn verify_known_subject_response_before_state_load(
+        &self,
+        continuation: &ActiveProofContinuationCookieDraft,
+        response: &CompleteKnownSubjectActiveProofMethodResponse,
+    ) -> Result<(), PostgresRecoveryCodeMethodError> {
+        if response.method != self.method {
+            return Err(PostgresRecoveryCodeMethodError::Core(
+                Error::LoadedStateContradiction("recovery code response used a different method"),
+            ));
+        }
+        let token = self.decode_recovery_code_token(response)?;
+        if continuation
+            .subject_id
+            .as_ref()
+            .is_some_and(|subject_id| subject_id != &token.subject_id)
+        {
+            return Err(PostgresRecoveryCodeMethodError::Core(
+                Error::StatelessFastFailVerificationFailed,
+            ));
+        }
+        Ok(())
+    }
+
+    fn decode_recovery_code_token(
+        &self,
+        response: &CompleteKnownSubjectActiveProofMethodResponse,
+    ) -> Result<DecodedRecoveryCodeToken, PostgresRecoveryCodeMethodError> {
+        let encoded =
+            std::str::from_utf8(response.secret_response.expose_secret()).map_err(|_| {
+                PostgresRecoveryCodeMethodError::Core(Error::InvalidIdentifierString {
+                    input_name: "recovery code",
+                })
+            })?;
+        let encrypted = Base58::<Encrypted<SealedRecoveryCodeTokenPayload>>::parse_str(encoded)
+            .map_err(PostgresRecoveryCodeMethodError::Crypto)?
+            .decode()
+            .map_err(PostgresRecoveryCodeMethodError::Crypto)?;
+        let mut payload = decrypt(
+            &self.secret_keyset,
+            &encrypted,
+            &recovery_code_token_context(&self.method),
+        )
+        .map_err(PostgresRecoveryCodeMethodError::Crypto)?;
+        let subject_id = SubjectId::from_bytes(std::mem::take(&mut payload.subject_id))
+            .map_err(PostgresRecoveryCodeMethodError::Core)?;
+        let random_token = SecretBytes::try_from(std::mem::take(&mut payload.random_token))
+            .map_err(PostgresRecoveryCodeMethodError::Crypto)?;
+        Ok(DecodedRecoveryCodeToken {
+            subject_id,
+            random_token,
+        })
     }
 
     async fn fetch_locked_unused_recovery_code_id(
@@ -351,16 +409,61 @@ impl PostgresRecoveryCodeMethodPlugin {
             "#,
             self.table_names()?.recovery_code_table.quoted(),
         );
-        pooler_safe_query(sqlx::AssertSqlSafe(statement.as_str()))
+        let mut tx = pool
+            .begin_transaction()
+            .await
+            .map_err(PostgresRecoveryCodeMethodError::Database)?;
+        let result = pooler_safe_query(sqlx::AssertSqlSafe(statement.as_str()))
             .bind(recovery_code_id)
             .bind(subject_id.as_bytes())
             .bind(secret_mac.as_bytes())
             .bind(i64_from_unix_seconds_u64_for_method(now)?)
-            .execute(pool.sqlx_pool())
+            .execute(tx.sqlx_transaction().as_mut())
             .await
             .map_err(DbError::query)
-            .map_err(PostgresRecoveryCodeMethodError::Database)?;
-        Ok(())
+            .map_err(PostgresRecoveryCodeMethodError::Database)
+            .map(|_| ());
+        match result {
+            Ok(()) => tx
+                .commit()
+                .await
+                .map_err(PostgresRecoveryCodeMethodError::Database),
+            Err(error) => {
+                let _ = tx.rollback().await;
+                Err(error)
+            }
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn sealed_recovery_code_response_for_test(
+        &self,
+        subject_id: &SubjectId,
+        recovery_code_secret: &[u8],
+    ) -> Result<KnownSubjectActiveProofSecretResponse, PostgresRecoveryCodeMethodError> {
+        let encoded = self.seal_recovery_code_token(subject_id, recovery_code_secret)?;
+        KnownSubjectActiveProofSecretResponse::try_from_bytes(encoded.into_bytes())
+            .map_err(PostgresRecoveryCodeMethodError::Core)
+    }
+
+    fn seal_recovery_code_token(
+        &self,
+        subject_id: &SubjectId,
+        random_token: &[u8],
+    ) -> Result<String, PostgresRecoveryCodeMethodError> {
+        let token = SealedRecoveryCodeTokenPayload {
+            subject_id: subject_id.as_bytes().to_vec(),
+            random_token: random_token.to_vec(),
+        };
+        encrypt(
+            &self.secret_keyset,
+            &token,
+            &recovery_code_token_context(&self.method),
+        )
+        .map_err(PostgresRecoveryCodeMethodError::Crypto)?
+        .to_base58()
+        .map_err(PostgresRecoveryCodeMethodError::Crypto)
+        .map(Base58::into_exposed_string)
     }
 
     #[cfg(test)]
@@ -373,12 +476,25 @@ impl PostgresRecoveryCodeMethodPlugin {
             "SELECT count(*) FROM {} WHERE subject_id = $1",
             self.table_names()?.recovery_code_table.quoted()
         );
-        pooler_safe_query_scalar::<i64>(sqlx::AssertSqlSafe(statement.as_str()))
+        let mut tx = pool
+            .begin_transaction()
+            .await
+            .map_err(PostgresRecoveryCodeMethodError::Database)?;
+        let result = pooler_safe_query_scalar::<i64>(sqlx::AssertSqlSafe(statement.as_str()))
             .bind(subject_id.as_bytes())
-            .fetch_one(pool.sqlx_pool())
+            .fetch_one(tx.sqlx_transaction().as_mut())
             .await
             .map_err(DbError::query)
-            .map_err(PostgresRecoveryCodeMethodError::Database)
+            .map_err(PostgresRecoveryCodeMethodError::Database);
+        let rollback_result = tx
+            .rollback()
+            .await
+            .map_err(PostgresRecoveryCodeMethodError::Database);
+        match (result, rollback_result) {
+            (Ok(value), Ok(())) => Ok(value),
+            (Err(error), _) => Err(error),
+            (Ok(_), Err(error)) => Err(error),
+        }
     }
 
     #[cfg(test)]
@@ -391,18 +507,46 @@ impl PostgresRecoveryCodeMethodPlugin {
             "SELECT count(*) FROM {} WHERE subject_id = $1 AND consumed_at IS NULL",
             self.table_names()?.recovery_code_table.quoted()
         );
-        pooler_safe_query_scalar::<i64>(sqlx::AssertSqlSafe(statement.as_str()))
+        let mut tx = pool
+            .begin_transaction()
+            .await
+            .map_err(PostgresRecoveryCodeMethodError::Database)?;
+        let result = pooler_safe_query_scalar::<i64>(sqlx::AssertSqlSafe(statement.as_str()))
             .bind(subject_id.as_bytes())
-            .fetch_one(pool.sqlx_pool())
+            .fetch_one(tx.sqlx_transaction().as_mut())
             .await
             .map_err(DbError::query)
-            .map_err(PostgresRecoveryCodeMethodError::Database)
+            .map_err(PostgresRecoveryCodeMethodError::Database);
+        let rollback_result = tx
+            .rollback()
+            .await
+            .map_err(PostgresRecoveryCodeMethodError::Database);
+        match (result, rollback_result) {
+            (Ok(value), Ok(())) => Ok(value),
+            (Err(error), _) => Err(error),
+            (Ok(_), Err(error)) => Err(error),
+        }
     }
 }
 
 impl PostgresAuthMethodPlugin for PostgresRecoveryCodeMethodPlugin {
     fn method(&self) -> &ProofMethodDeclaration {
         &self.method
+    }
+
+    fn verify_known_subject_active_proof_method_response_before_state_load(
+        &self,
+        continuation: &ActiveProofContinuationCookieDraft,
+        response: &CompleteKnownSubjectActiveProofMethodResponse,
+    ) -> Result<(), PostgresAuthMethodBuildError> {
+        self.verify_known_subject_response_before_state_load(continuation, response)
+            .map_err(|error| {
+                PostgresAuthMethodBuildError::plugin_rejected(
+                    &self.method,
+                    "known_subject_active_proof_completion_pre_state",
+                    error,
+                )
+            })
     }
 
     fn verify_known_subject_active_proof_method_response<'a, 'tx>(
@@ -595,6 +739,23 @@ struct RecoveryCodeConsumePayload {
     consumed_at: u64,
 }
 
+#[derive(Clone, Deserialize, Serialize)]
+struct SealedRecoveryCodeTokenPayload {
+    subject_id: Vec<u8>,
+    random_token: Vec<u8>,
+}
+
+impl Drop for SealedRecoveryCodeTokenPayload {
+    fn drop(&mut self) {
+        self.random_token.zeroize();
+    }
+}
+
+struct DecodedRecoveryCodeToken {
+    subject_id: SubjectId,
+    random_token: SecretBytes,
+}
+
 fn encode_recovery_code_payload<T: Serialize>(
     payload: &T,
 ) -> Result<Vec<u8>, PostgresRecoveryCodeMethodError> {
@@ -623,6 +784,14 @@ fn recovery_code_secret_context(
     );
     context.extend_from_slice(RECOVERY_CODE_SECRET_CONTEXT);
     push_len_prefixed_bytes(&mut context, subject_id.as_bytes());
+    push_len_prefixed_bytes(&mut context, method.method_label().as_bytes());
+    context
+}
+
+fn recovery_code_token_context(method: &ProofMethodDeclaration) -> Vec<u8> {
+    let mut context =
+        Vec::with_capacity(RECOVERY_CODE_TOKEN_CONTEXT.len() + 8 + method.method_label().len());
+    context.extend_from_slice(RECOVERY_CODE_TOKEN_CONTEXT);
     push_len_prefixed_bytes(&mut context, method.method_label().as_bytes());
     context
 }

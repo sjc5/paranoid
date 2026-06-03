@@ -42,6 +42,45 @@ fn authoritative_session_in_refresh_window_rotates_session_and_csrf() {
 }
 
 #[test]
+fn authoritative_session_before_refresh_window_does_not_rotate_or_cycle_csrf() {
+    let transition = reduce_command(
+        &config(),
+        Command::ResolveRequest(ResolveRequest {
+            now: at(60),
+            request_kind: RequestKind::StateChanging,
+            fresh_session_id: None,
+        }),
+        &loaded_session(100),
+    )
+    .expect("transition");
+
+    assert!(matches!(
+        transition.outcome,
+        Outcome::Authenticated(Authenticated {
+            source: AuthenticationSource::AuthoritativeSession,
+            ..
+        })
+    ));
+    assert!(matches!(
+        transition.commit_plan.preconditions.as_slice(),
+        [Precondition::SessionStillMatches {
+            session_id,
+            current_secret_version,
+            ..
+        }] if *session_id == id("session") && *current_secret_version == version(3)
+    ));
+    assert!(transition.commit_plan.mutations.is_empty());
+    assert!(transition.commit_plan.fresh_credential_secrets.is_empty());
+    assert!(
+        transition
+            .commit_plan
+            .response_effects
+            .iter()
+            .all(|effect| !matches!(effect, ResponseEffect::CycleCsrfToken { .. }))
+    );
+}
+
+#[test]
 fn previous_session_secret_within_grace_authenticates_without_reissuing_current_cookie() {
     let mut loaded = loaded_session(200);
     loaded
@@ -167,7 +206,7 @@ fn session_previous_secret_reported_within_grace_after_deadline_is_rejected() {
 }
 
 #[test]
-fn expired_previous_session_secret_audits_and_deletes_cookie_without_revoking_session() {
+fn previous_after_grace_session_secret_triggers_session_tripwire() {
     let mut loaded = loaded_session(200);
     loaded
         .session_cookie
@@ -175,7 +214,7 @@ fn expired_previous_session_secret_audits_and_deletes_cookie_without_revoking_se
         .expect("session cookie")
         .secret_version = version(2);
     loaded.session_secret_match = Some(loaded_session_secret_match(
-        StoredSecretMatch::PreviousExpired,
+        StoredSecretMatch::PreviousAfterGrace,
     ));
 
     let transition = reduce_command(
@@ -187,7 +226,7 @@ fn expired_previous_session_secret_audits_and_deletes_cookie_without_revoking_se
         }),
         &loaded,
     )
-    .expect("expired previous secret is a mismatch, not a reducer error");
+    .expect("previous-after-grace secret is a mismatch, not a reducer error");
 
     assert_eq!(transition.outcome, Outcome::NeedsFullAuthentication);
     assert!(
@@ -206,11 +245,26 @@ fn expired_previous_session_secret_audits_and_deletes_cookie_without_revoking_se
         ]
     );
     assert!(
-        !transition
+        transition
             .commit_plan
             .mutations
             .iter()
-            .any(|mutation| matches!(mutation, Mutation::RevokeSession { .. }))
+            .any(|mutation| matches!(
+                mutation,
+                Mutation::RevokeSession {
+                    session_id,
+                    reason: RevocationReason::Tripwire,
+                    revoked_at,
+                } if *session_id == id("session") && *revoked_at == at(55)
+            ))
+    );
+    assert!(
+        transition
+            .commit_plan
+            .audit_events
+            .iter()
+            .any(|event| event.kind == AuditEventKind::SessionRevoked
+                && event.session_id == Some(id("session")))
     );
 }
 
@@ -256,6 +310,69 @@ fn session_credential_mismatch_audit_survives_when_trusted_device_replaces_sessi
     assert_eq!(
         csrf_cycle_targets(&transition.commit_plan),
         vec![Some(id("new-session"))],
+    );
+}
+
+#[test]
+fn session_tripwire_revokes_associated_trusted_device_and_blocks_revival() {
+    let mut loaded = loaded_trusted_device(500, 1_000);
+    let mut session_record = session_record(200);
+    session_record.device_credential_id = Some(id("device"));
+    loaded.session_cookie = Some(session_cookie(200));
+    loaded.session_record = Some(session_record);
+    loaded.session_secret_match = Some(loaded_session_secret_match(StoredSecretMatch::Unknown));
+
+    let transition = reduce_command(
+        &config(),
+        Command::ResolveRequest(ResolveRequest {
+            now: at(100),
+            request_kind: RequestKind::StateChanging,
+            fresh_session_id: Some(id("new-session")),
+        }),
+        &loaded,
+    )
+    .expect("session tripwire should block same-device revival");
+
+    assert_eq!(transition.outcome, Outcome::NeedsFullAuthentication);
+    assert!(
+        transition
+            .commit_plan
+            .mutations
+            .iter()
+            .any(|mutation| matches!(
+                mutation,
+                Mutation::RevokeSession {
+                    session_id,
+                    reason: RevocationReason::Tripwire,
+                    ..
+                } if *session_id == id("session")
+            ))
+    );
+    assert!(
+        transition
+            .commit_plan
+            .mutations
+            .iter()
+            .any(|mutation| matches!(
+                mutation,
+                Mutation::RevokeTrustedDeviceCredential {
+                    device_credential_id,
+                    reason: RevocationReason::Tripwire,
+                    ..
+                } if *device_credential_id == id("device")
+            ))
+    );
+    assert!(
+        transition
+            .commit_plan
+            .response_effects
+            .contains(&ResponseEffect::DeleteSessionCookie)
+    );
+    assert!(
+        transition
+            .commit_plan
+            .response_effects
+            .contains(&ResponseEffect::DeleteTrustedDeviceCookie)
     );
 }
 
@@ -309,7 +426,7 @@ fn trusted_device_replaces_bad_cross_subject_session_after_loading_both_subject_
 }
 
 #[test]
-fn unknown_session_secret_audits_and_deletes_cookie_without_revoking_session() {
+fn unknown_session_secret_triggers_session_tripwire() {
     let mut loaded = loaded_session(200);
     loaded.session_secret_match = Some(loaded_session_secret_match(StoredSecretMatch::Unknown));
 
@@ -341,11 +458,26 @@ fn unknown_session_secret_audits_and_deletes_cookie_without_revoking_session() {
         ]
     );
     assert!(
-        !transition
+        transition
             .commit_plan
             .mutations
             .iter()
-            .any(|mutation| matches!(mutation, Mutation::RevokeSession { .. }))
+            .any(|mutation| matches!(
+                mutation,
+                Mutation::RevokeSession {
+                    session_id,
+                    reason: RevocationReason::Tripwire,
+                    revoked_at,
+                } if *session_id == id("session") && *revoked_at == at(50)
+            ))
+    );
+    assert!(
+        transition
+            .commit_plan
+            .audit_events
+            .iter()
+            .any(|event| event.kind == AuditEventKind::SessionRevoked
+                && event.session_id == Some(id("session")))
     );
 }
 

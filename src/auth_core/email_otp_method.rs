@@ -24,6 +24,7 @@ const EMAIL_OTP_STORE_CHALLENGE_OPERATION: &str = "email_otp_store_challenge";
 const EMAIL_OTP_CONSUME_CHALLENGE_OPERATION: &str = "email_otp_consume_challenge";
 const EMAIL_OTP_QUEUE_DELIVERY_OPERATION: &str = "email_otp_queue_delivery";
 const EMAIL_OTP_RESPONSE_SECRET_CONTEXT: &[u8] = b"paranoid/auth/v1/email-otp-response-secret";
+const EMAIL_OTP_DEFAULT_SOURCE_ID_CONTEXT: &[u8] = b"paranoid/auth/v1/email-otp/default-source-id";
 const EMAIL_OTP_RESPONSE_SECRET_BYTES: usize = 16;
 const DEFAULT_EMAIL_OTP_TABLE_PREFIX: &str = "__paranoid_auth_email_otp_";
 
@@ -195,18 +196,21 @@ impl PostgresEmailOtpMethodPlugin {
         )?])
     }
 
-    async fn resolve_subject_id_for_challenge(
+    async fn resolve_verified_identifier_for_challenge(
         &self,
         tx: &mut Tx<'_>,
         challenge_id: &ActiveProofChallengeId,
-    ) -> Result<Option<SubjectId>, PostgresEmailOtpMethodError> {
+    ) -> Result<
+        super::postgres_method_runtime::PostgresOutOfBandProofResolution,
+        PostgresEmailOtpMethodError,
+    > {
         let statement = format!(
             "SELECT recipient_handle FROM {} WHERE challenge_id = $1 AND consumed_at IS NULL",
             self.config.table_names()?.challenge_table.quoted()
         );
         tx.record_database_operation(
             DatabaseOperationKind::FetchOptional,
-            "auth_core.email_otp.resolve_subject.fetch_recipient_handle",
+            "auth_core.email_otp.resolve_verified_identifier.fetch_recipient_handle",
             Some(statement.as_str()),
         );
         let recipient_handle_result = async {
@@ -218,15 +222,25 @@ impl PostgresEmailOtpMethodPlugin {
                 .map_err(PostgresEmailOtpMethodError::Database)?
                 .ok_or(PostgresEmailOtpMethodError::Core(
                     Error::LoadedStateContradiction(
-                        "email otp challenge was not open during subject resolution",
+                        "email otp challenge was not open during verified identifier resolution",
                     ),
                 ))
         }
         .await;
         let recipient_handle = recipient_handle_result?;
-        self.subject_resolver
-            .resolve_subject_id_for_recipient_handle(tx, &recipient_handle)
-            .await
+        let verified_identifier = self
+            .subject_resolver
+            .resolve_verified_identifier_for_recipient_handle(tx, &recipient_handle)
+            .await?;
+        Ok(
+            super::postgres_method_runtime::PostgresOutOfBandProofResolution::new(
+                verified_identifier.subject_id,
+                Some(VerifiedProofSource::new(
+                    VerifiedProofSourceKind::OutOfBandIdentifier,
+                    verified_identifier.source_id,
+                )),
+            ),
+        )
     }
 
     fn validate_request_method(
@@ -279,11 +293,24 @@ impl PostgresEmailOtpMethodPlugin {
             "SELECT count(*) FROM {} WHERE consumed_at IS NULL",
             self.config.table_names()?.challenge_table.quoted()
         );
-        pooler_safe_query_scalar::<i64>(sqlx::AssertSqlSafe(statement.as_str()))
-            .fetch_one(pool.sqlx_pool())
+        let mut tx = pool
+            .begin_transaction()
+            .await
+            .map_err(PostgresEmailOtpMethodError::Database)?;
+        let result = pooler_safe_query_scalar::<i64>(sqlx::AssertSqlSafe(statement.as_str()))
+            .fetch_one(tx.sqlx_transaction().as_mut())
             .await
             .map_err(DbError::query)
-            .map_err(PostgresEmailOtpMethodError::Database)
+            .map_err(PostgresEmailOtpMethodError::Database);
+        let rollback_result = tx
+            .rollback()
+            .await
+            .map_err(PostgresEmailOtpMethodError::Database);
+        match (result, rollback_result) {
+            (Ok(value), Ok(())) => Ok(value),
+            (Err(error), _) => Err(error),
+            (Ok(_), Err(error)) => Err(error),
+        }
     }
 
     #[cfg(test)]
@@ -295,11 +322,24 @@ impl PostgresEmailOtpMethodPlugin {
             "SELECT count(*) FROM {}",
             self.config.table_names()?.delivery_command_table.quoted()
         );
-        pooler_safe_query_scalar::<i64>(sqlx::AssertSqlSafe(statement.as_str()))
-            .fetch_one(pool.sqlx_pool())
+        let mut tx = pool
+            .begin_transaction()
+            .await
+            .map_err(PostgresEmailOtpMethodError::Database)?;
+        let result = pooler_safe_query_scalar::<i64>(sqlx::AssertSqlSafe(statement.as_str()))
+            .fetch_one(tx.sqlx_transaction().as_mut())
             .await
             .map_err(DbError::query)
-            .map_err(PostgresEmailOtpMethodError::Database)
+            .map_err(PostgresEmailOtpMethodError::Database);
+        let rollback_result = tx
+            .rollback()
+            .await
+            .map_err(PostgresEmailOtpMethodError::Database);
+        match (result, rollback_result) {
+            (Ok(value), Ok(())) => Ok(value),
+            (Err(error), _) => Err(error),
+            (Ok(_), Err(error)) => Err(error),
+        }
     }
 
     #[cfg(test)]
@@ -312,12 +352,25 @@ impl PostgresEmailOtpMethodPlugin {
             "SELECT recipient_handle, encrypted_response_secret FROM {} WHERE challenge_id = $1",
             self.config.table_names()?.challenge_table.quoted()
         );
-        let row = pooler_safe_query(sqlx::AssertSqlSafe(statement.as_str()))
+        let mut tx = pool
+            .begin_transaction()
+            .await
+            .map_err(PostgresEmailOtpMethodError::Database)?;
+        let result = pooler_safe_query(sqlx::AssertSqlSafe(statement.as_str()))
             .bind(challenge_id.as_bytes())
-            .fetch_one(pool.sqlx_pool())
+            .fetch_one(tx.sqlx_transaction().as_mut())
             .await
             .map_err(DbError::query)
-            .map_err(PostgresEmailOtpMethodError::Database)?;
+            .map_err(PostgresEmailOtpMethodError::Database);
+        let rollback_result = tx
+            .rollback()
+            .await
+            .map_err(PostgresEmailOtpMethodError::Database);
+        let row = match (result, rollback_result) {
+            (Ok(row), Ok(())) => row,
+            (Err(error), _) => return Err(error),
+            (Ok(_), Err(error)) => return Err(error),
+        };
         let recipient_handle: String = row
             .try_get("recipient_handle")
             .map_err(DbError::query)
@@ -408,7 +461,7 @@ impl PostgresAuthMethodPlugin for PostgresEmailOtpMethodPlugin {
             })
     }
 
-    fn resolve_out_of_band_subject_id<'a, 'tx>(
+    fn resolve_out_of_band_proof<'a, 'tx>(
         &'a self,
         tx: &'a mut Tx<'tx>,
         challenge_id: &'a ActiveProofChallengeId,
@@ -417,7 +470,7 @@ impl PostgresAuthMethodPlugin for PostgresEmailOtpMethodPlugin {
         Box<
             dyn Future<
                     Output = Result<
-                        Option<SubjectId>,
+                        super::postgres_method_runtime::PostgresOutOfBandProofResolution,
                         super::postgres_method_runtime::PostgresAuthMethodBuildError,
                     >,
                 > + Send
@@ -425,12 +478,12 @@ impl PostgresAuthMethodPlugin for PostgresEmailOtpMethodPlugin {
         >,
     > {
         Box::pin(async move {
-            self.resolve_subject_id_for_challenge(tx, challenge_id)
+            self.resolve_verified_identifier_for_challenge(tx, challenge_id)
                 .await
                 .map_err(|error| {
                     super::postgres_method_runtime::PostgresAuthMethodBuildError::plugin_rejected(
                         &self.method,
-                        "out_of_band_subject_resolution",
+                        "out_of_band_proof_resolution",
                         error,
                     )
                 })
@@ -826,13 +879,19 @@ impl Default for PostgresEmailOtpMethodPluginConfig {
 }
 
 pub(crate) trait PostgresEmailOtpSubjectResolver: Send + Sync {
-    fn resolve_subject_id_for_recipient_handle<'a, 'tx>(
+    fn resolve_verified_identifier_for_recipient_handle<'a, 'tx>(
         &'a self,
         tx: &'a mut Tx<'tx>,
         recipient_handle: &'a str,
     ) -> Pin<
         Box<
-            dyn Future<Output = Result<Option<SubjectId>, PostgresEmailOtpMethodError>> + Send + 'a,
+            dyn Future<
+                    Output = Result<
+                        PostgresEmailOtpVerifiedIdentifier,
+                        PostgresEmailOtpMethodError,
+                    >,
+                > + Send
+                + 'a,
         >,
     >;
 }
@@ -840,18 +899,43 @@ pub(crate) trait PostgresEmailOtpSubjectResolver: Send + Sync {
 struct NoopEmailOtpSubjectResolver;
 
 impl PostgresEmailOtpSubjectResolver for NoopEmailOtpSubjectResolver {
-    fn resolve_subject_id_for_recipient_handle<'a, 'tx>(
+    fn resolve_verified_identifier_for_recipient_handle<'a, 'tx>(
         &'a self,
         tx: &'a mut Tx<'tx>,
         recipient_handle: &'a str,
     ) -> Pin<
         Box<
-            dyn Future<Output = Result<Option<SubjectId>, PostgresEmailOtpMethodError>> + Send + 'a,
+            dyn Future<
+                    Output = Result<
+                        PostgresEmailOtpVerifiedIdentifier,
+                        PostgresEmailOtpMethodError,
+                    >,
+                > + Send
+                + 'a,
         >,
     > {
         let _ = tx;
-        let _ = recipient_handle;
-        Box::pin(async { Ok(None) })
+        Box::pin(async move {
+            Ok(PostgresEmailOtpVerifiedIdentifier::new(
+                None,
+                default_email_otp_source_id_for_recipient_handle(recipient_handle)?,
+            ))
+        })
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct PostgresEmailOtpVerifiedIdentifier {
+    subject_id: Option<SubjectId>,
+    source_id: VerifiedProofSourceId,
+}
+
+impl PostgresEmailOtpVerifiedIdentifier {
+    pub(crate) fn new(subject_id: Option<SubjectId>, source_id: VerifiedProofSourceId) -> Self {
+        Self {
+            subject_id,
+            source_id,
+        }
     }
 }
 
@@ -987,6 +1071,17 @@ fn email_otp_response_secret_context(
     push_len_prefixed_bytes(&mut context, challenge_id.as_bytes());
     push_len_prefixed_bytes(&mut context, recipient_handle.as_bytes());
     context
+}
+
+fn default_email_otp_source_id_for_recipient_handle(
+    recipient_handle: &str,
+) -> Result<VerifiedProofSourceId, PostgresEmailOtpMethodError> {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(EMAIL_OTP_DEFAULT_SOURCE_ID_CONTEXT);
+    hasher.update(&(recipient_handle.len() as u64).to_le_bytes());
+    hasher.update(recipient_handle.as_bytes());
+    VerifiedProofSourceId::from_bytes(hasher.finalize().as_bytes().to_vec())
+        .map_err(PostgresEmailOtpMethodError::Core)
 }
 
 fn push_len_prefixed_bytes(target: &mut Vec<u8>, bytes: &[u8]) {

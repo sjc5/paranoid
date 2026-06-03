@@ -68,6 +68,14 @@ pub enum ActiveProofChallengeIdKind {}
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum VerifiedProofSourceIdKind {}
 
+/// Semantic marker for effective recovery-authority identifiers.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub enum RecoveryAuthorityIdKind {}
+
+/// Semantic marker for pending credential-lifecycle action identifiers.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub enum PendingCredentialLifecycleActionIdKind {}
+
 /// Opaque auth subject id.
 pub type SubjectId = Id<SubjectIdKind>;
 
@@ -85,6 +93,12 @@ pub type ActiveProofChallengeId = Id<ActiveProofChallengeIdKind>;
 
 /// Opaque identifier for the credential or external authority that produced a proof.
 pub type VerifiedProofSourceId = Id<VerifiedProofSourceIdKind>;
+
+/// Opaque identifier for one effective authority that can recover or mutate credentials.
+pub type RecoveryAuthorityId = Id<RecoveryAuthorityIdKind>;
+
+/// Opaque identifier for one delayed credential-lifecycle action.
+pub type PendingCredentialLifecycleActionId = Id<PendingCredentialLifecycleActionIdKind>;
 
 /// Unix timestamp in whole seconds.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]

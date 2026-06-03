@@ -1,6 +1,6 @@
 use super::{
     Error, METHOD_LABEL_MAX_BYTES, ProofFamily, ProofInteraction, ProofSubjectRole, ProofUse,
-    SatisfiedProof, validate_auth_identifier_string,
+    SatisfiedProof, VerifiedProofSource, validate_auth_identifier_string,
 };
 
 /// Configurable proof-stack policy for final auth transitions.
@@ -247,10 +247,20 @@ impl ProofStackPolicy {
         Ok(())
     }
 
-    fn is_satisfied_by(&self, proofs: &[SatisfiedProof]) -> bool {
-        self.accepted_stacks
-            .iter()
-            .any(|accepted_stack| accepted_stack.is_satisfied_by(proofs))
+    fn evaluate(&self, proofs: &[SatisfiedProof]) -> ProofStackEvaluation {
+        let mut saw_source_policy_failure = false;
+        for accepted_stack in &self.accepted_stacks {
+            match accepted_stack.evaluate(proofs) {
+                ProofStackEvaluation::Satisfied => return ProofStackEvaluation::Satisfied,
+                ProofStackEvaluation::Unsatisfied => {}
+                ProofStackEvaluation::SourcePolicyFailed => saw_source_policy_failure = true,
+            }
+        }
+        if saw_source_policy_failure {
+            ProofStackEvaluation::SourcePolicyFailed
+        } else {
+            ProofStackEvaluation::Unsatisfied
+        }
     }
 }
 
@@ -325,6 +335,8 @@ impl ProofRequirement {
 pub struct ProofStackRequirement {
     /// Proofs that must all be present in the satisfied proof stack.
     pub required_proofs: Vec<ProofRequirement>,
+    /// Source-provenance requirement for the matched proofs.
+    pub source_policy: ProofStackSourcePolicy,
 }
 
 impl ProofStackRequirement {
@@ -332,6 +344,7 @@ impl ProofStackRequirement {
     pub fn one_any_method_label_in_family(family: ProofFamily) -> Self {
         Self {
             required_proofs: vec![ProofRequirement::any_method_label_in_family(family)],
+            source_policy: ProofStackSourcePolicy::NoSourceConstraint,
         }
     }
 
@@ -342,10 +355,11 @@ impl ProofStackRequirement {
     ) -> Result<Self, Error> {
         Ok(Self {
             required_proofs: vec![ProofRequirement::exact_method(family, method_label)?],
+            source_policy: ProofStackSourcePolicy::NoSourceConstraint,
         })
     }
 
-    /// Returns a stack satisfied by all listed proof families using any method label in each family.
+    /// Returns a stack satisfied by all listed proof families with known distinct sources.
     pub fn all_any_method_label_in_each_family(
         families: impl IntoIterator<Item = ProofFamily>,
     ) -> Self {
@@ -354,6 +368,7 @@ impl ProofStackRequirement {
                 .into_iter()
                 .map(ProofRequirement::any_method_label_in_family)
                 .collect(),
+            source_policy: ProofStackSourcePolicy::RequireKnownDistinctSources,
         }
     }
 
@@ -383,11 +398,40 @@ impl ProofStackRequirement {
         Ok(())
     }
 
-    fn is_satisfied_by(&self, proofs: &[SatisfiedProof]) -> bool {
-        self.required_proofs
-            .iter()
-            .all(|required_proof| proof_stack_contains_requirement(proofs, required_proof))
+    fn evaluate(&self, proofs: &[SatisfiedProof]) -> ProofStackEvaluation {
+        match self.source_policy {
+            ProofStackSourcePolicy::NoSourceConstraint => {
+                if self
+                    .required_proofs
+                    .iter()
+                    .all(|required_proof| proof_stack_contains_requirement(proofs, required_proof))
+                {
+                    ProofStackEvaluation::Satisfied
+                } else {
+                    ProofStackEvaluation::Unsatisfied
+                }
+            }
+            ProofStackSourcePolicy::RequireKnownDistinctSources => {
+                evaluate_known_distinct_source_requirement(&self.required_proofs, proofs)
+            }
+        }
     }
+}
+
+/// Source-provenance requirement for one accepted proof-stack shape.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ProofStackSourcePolicy {
+    /// Matched proofs do not need source provenance for this stack.
+    NoSourceConstraint,
+    /// Every matched proof must carry a known source, and no two matched proofs may share it.
+    RequireKnownDistinctSources,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ProofStackEvaluation {
+    Satisfied,
+    Unsatisfied,
+    SourcePolicyFailed,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -413,10 +457,15 @@ pub(super) fn validate_satisfied_proof_stack_for_use(
     proof_use: ProofUse,
 ) -> Result<(), Error> {
     validate_proofs_for_use(proofs, proof_use)?;
-    if !satisfied_proof_stack_can_satisfy_use(proof_policy, proofs, proof_use) {
-        return Err(Error::SatisfiedProofStackCannotSatisfyUse { proof_use });
+    match evaluate_satisfied_proof_stack_for_use(proof_policy, proofs, proof_use) {
+        ProofStackEvaluation::Satisfied => Ok(()),
+        ProofStackEvaluation::Unsatisfied => {
+            Err(Error::SatisfiedProofStackCannotSatisfyUse { proof_use })
+        }
+        ProofStackEvaluation::SourcePolicyFailed => {
+            Err(Error::ProofStackRequiresKnownDistinctProofSources { proof_use })
+        }
     }
-    Ok(())
 }
 
 fn validate_proofs_for_use(proofs: &[SatisfiedProof], proof_use: ProofUse) -> Result<(), Error> {
@@ -442,15 +491,15 @@ fn validate_proof_for_use(proof: &SatisfiedProof, proof_use: ProofUse) -> Result
     Ok(())
 }
 
-fn satisfied_proof_stack_can_satisfy_use(
+fn evaluate_satisfied_proof_stack_for_use(
     proof_policy: &ProofPolicy,
     proofs: &[SatisfiedProof],
     proof_use: ProofUse,
-) -> bool {
+) -> ProofStackEvaluation {
     if let Some(policy) = proof_policy.stack_policy_for_use(proof_use) {
-        return policy.is_satisfied_by(proofs);
+        return policy.evaluate(proofs);
     }
-    match proof_use {
+    if match proof_use {
         ProofUse::BindSubjectToActiveProofAttempt => {
             proof_stack_contains_any_family(proofs, proof_family_can_bind_subject)
         }
@@ -464,6 +513,10 @@ fn satisfied_proof_stack_can_satisfy_use(
         ProofUse::ContributeToFullAuthentication
         | ProofUse::ReviveTrustedDeviceWithActiveProof
         | ProofUse::SatisfyStepUp => false,
+    } {
+        ProofStackEvaluation::Satisfied
+    } else {
+        ProofStackEvaluation::Unsatisfied
     }
 }
 
@@ -487,6 +540,42 @@ fn proof_stack_contains_requirement(
     proofs
         .iter()
         .any(|proof| required_proof.is_satisfied_by(proof))
+}
+
+fn evaluate_known_distinct_source_requirement(
+    required_proofs: &[ProofRequirement],
+    proofs: &[SatisfiedProof],
+) -> ProofStackEvaluation {
+    if required_proofs.iter().any(|required_proof| {
+        !proofs
+            .iter()
+            .any(|proof| required_proof.is_satisfied_by(proof))
+    }) {
+        return ProofStackEvaluation::Unsatisfied;
+    }
+
+    let mut used_sources: Vec<VerifiedProofSource> = Vec::with_capacity(required_proofs.len());
+    for required_proof in required_proofs {
+        let mut selected_source = None;
+        for proof in proofs
+            .iter()
+            .filter(|proof| required_proof.is_satisfied_by(proof))
+        {
+            let Some(source) = proof.source() else {
+                continue;
+            };
+            if !used_sources.iter().any(|used_source| used_source == source) {
+                selected_source = Some(source.clone());
+                break;
+            }
+        }
+        if let Some(source) = selected_source {
+            used_sources.push(source);
+        } else {
+            return ProofStackEvaluation::SourcePolicyFailed;
+        }
+    }
+    ProofStackEvaluation::Satisfied
 }
 
 fn has_duplicate_proof_family(required_proofs: &[ProofRequirement]) -> bool {

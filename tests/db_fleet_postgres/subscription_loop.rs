@@ -944,9 +944,7 @@ async fn fleet_subscription_polling_loop_stops_before_first_database_poll() {
 #[tokio::test]
 async fn fleet_subscription_polling_loop_stops_during_poll_error_backoff() {
     let test_database = TestDatabase::connect().await;
-    let timeout_database_url = direct_test_database_url();
-    let timeout_pool =
-        connect_paranoid_pool_with_statement_timeout(&timeout_database_url, "50ms").await;
+    let timeout_pool = connect_paranoid_pool(&statement_timeout_test_database_url()).await;
 
     #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
     struct TestEvent;

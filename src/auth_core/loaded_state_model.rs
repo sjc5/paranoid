@@ -33,7 +33,7 @@ pub enum StoredSecretMatch {
     /// The presented secret matched the previous stored MAC inside the race grace window.
     PreviousWithinGrace,
     /// The presented secret matched the previous stored MAC after the race grace window.
-    PreviousExpired,
+    PreviousAfterGrace,
     /// The presented secret did not match any stored MAC for the loaded record.
     Unknown,
 }
@@ -317,6 +317,8 @@ pub struct ActiveProofContinuationCookieDraft {
     pub attempt_id: ActiveProofAttemptId,
     /// Transition the attempt is trying to satisfy.
     pub proof_use: ProofUse,
+    /// Subject copied into the encrypted cookie when the attempt is already subject-bound.
+    pub subject_id: Option<SubjectId>,
     /// Fast-fail attempt expiry copied from the authoritative record.
     pub attempt_fast_fail_until: UnixSeconds,
 }

@@ -284,7 +284,7 @@ fn trusted_device_previous_secret_reported_within_grace_after_deadline_is_reject
 }
 
 #[test]
-fn expired_previous_trusted_device_secret_audits_and_deletes_cookie_without_revoking_device() {
+fn previous_after_grace_trusted_device_secret_triggers_device_tripwire() {
     let mut loaded = loaded_trusted_device(500, 1_000);
     loaded
         .trusted_device_cookie
@@ -298,7 +298,7 @@ fn expired_previous_trusted_device_secret_audits_and_deletes_cookie_without_revo
     device_record.previous_secret_version = Some(version(7));
     device_record.previous_secret_accept_until = Some(at(105));
     loaded.trusted_device_secret_match = Some(loaded_trusted_device_secret_match(
-        StoredSecretMatch::PreviousExpired,
+        StoredSecretMatch::PreviousAfterGrace,
     ));
 
     let transition = reduce_command(
@@ -310,7 +310,7 @@ fn expired_previous_trusted_device_secret_audits_and_deletes_cookie_without_revo
         }),
         &loaded,
     )
-    .expect("expired previous device secret is a mismatch, not a reducer error");
+    .expect("previous-after-grace device secret is a mismatch, not a reducer error");
 
     assert_eq!(transition.outcome, Outcome::NeedsFullAuthentication);
     assert!(
@@ -326,16 +326,31 @@ fn expired_previous_trusted_device_secret_audits_and_deletes_cookie_without_revo
         vec![ResponseEffect::DeleteTrustedDeviceCookie]
     );
     assert!(
-        !transition
+        transition
             .commit_plan
             .mutations
             .iter()
-            .any(|mutation| matches!(mutation, Mutation::RevokeTrustedDeviceCredential { .. }))
+            .any(|mutation| matches!(
+                mutation,
+                Mutation::RevokeTrustedDeviceCredential {
+                    device_credential_id,
+                    reason: RevocationReason::Tripwire,
+                    revoked_at,
+                } if *device_credential_id == id("device") && *revoked_at == at(105)
+            ))
+    );
+    assert!(
+        transition
+            .commit_plan
+            .audit_events
+            .iter()
+            .any(|event| event.kind == AuditEventKind::TrustedDeviceRevoked
+                && event.device_credential_id == Some(id("device")))
     );
 }
 
 #[test]
-fn unknown_trusted_device_secret_audits_and_deletes_cookie_without_revoking_device() {
+fn unknown_trusted_device_secret_triggers_device_tripwire() {
     let mut loaded = loaded_trusted_device(500, 1_000);
     loaded.trusted_device_secret_match = Some(loaded_trusted_device_secret_match(
         StoredSecretMatch::Unknown,
@@ -366,11 +381,26 @@ fn unknown_trusted_device_secret_audits_and_deletes_cookie_without_revoking_devi
         vec![ResponseEffect::DeleteTrustedDeviceCookie]
     );
     assert!(
-        !transition
+        transition
             .commit_plan
             .mutations
             .iter()
-            .any(|mutation| matches!(mutation, Mutation::RevokeTrustedDeviceCredential { .. }))
+            .any(|mutation| matches!(
+                mutation,
+                Mutation::RevokeTrustedDeviceCredential {
+                    device_credential_id,
+                    reason: RevocationReason::Tripwire,
+                    revoked_at,
+                } if *device_credential_id == id("device") && *revoked_at == at(100)
+            ))
+    );
+    assert!(
+        transition
+            .commit_plan
+            .audit_events
+            .iter()
+            .any(|event| event.kind == AuditEventKind::TrustedDeviceRevoked
+                && event.device_credential_id == Some(id("device")))
     );
 }
 

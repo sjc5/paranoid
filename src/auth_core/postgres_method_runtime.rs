@@ -62,22 +62,23 @@ pub(crate) trait PostgresAuthMethodPlugin: Send + Sync {
         ))
     }
 
-    fn resolve_out_of_band_subject_id<'a, 'tx>(
+    fn resolve_out_of_band_proof<'a, 'tx>(
         &'a self,
         tx: &'a mut Tx<'tx>,
         challenge_id: &'a ActiveProofChallengeId,
         response: &'a CompleteOutOfBandChallengeResponse,
     ) -> Pin<
         Box<
-            dyn Future<Output = Result<Option<SubjectId>, PostgresAuthMethodBuildError>>
-                + Send
+            dyn Future<
+                    Output = Result<PostgresOutOfBandProofResolution, PostgresAuthMethodBuildError>,
+                > + Send
                 + 'a,
         >,
     > {
         let _ = tx;
         let _ = challenge_id;
         let _ = response;
-        Box::pin(async { Ok(None) })
+        Box::pin(async { Ok(PostgresOutOfBandProofResolution::new(None, None)) })
     }
 
     fn verify_active_proof_method_response_before_state_load(
@@ -122,6 +123,16 @@ pub(crate) trait PostgresAuthMethodPlugin: Send + Sync {
         })
     }
 
+    fn verify_known_subject_active_proof_method_response_before_state_load(
+        &self,
+        continuation: &ActiveProofContinuationCookieDraft,
+        response: &CompleteKnownSubjectActiveProofMethodResponse,
+    ) -> Result<(), PostgresAuthMethodBuildError> {
+        let _ = continuation;
+        let _ = response;
+        Ok(())
+    }
+
     fn verify_known_subject_active_proof_method_response<'a, 'tx>(
         &'a self,
         tx: &'a mut Tx<'tx>,
@@ -145,6 +156,59 @@ pub(crate) trait PostgresAuthMethodPlugin: Send + Sync {
             Err(PostgresAuthMethodBuildError::unsupported(
                 self.method(),
                 "known_subject_active_proof_completion",
+            ))
+        })
+    }
+
+    fn build_credential_reset_commit_work<'a, 'tx>(
+        &'a self,
+        tx: &'a mut Tx<'tx>,
+        request: CredentialResetMethodWorkBuildRequest<'a>,
+    ) -> Pin<
+        Box<
+            dyn Future<Output = Result<Vec<MethodCommitWork>, PostgresAuthMethodBuildError>>
+                + Send
+                + 'a,
+        >,
+    > {
+        let _ = tx;
+        Box::pin(async move {
+            Err(PostgresAuthMethodBuildError::unsupported(
+                self.method(),
+                match request.authority {
+                    CredentialResetMethodWorkAuthority::Immediate { .. } => {
+                        "authenticated_credential_reset"
+                    }
+                    CredentialResetMethodWorkAuthority::MaturePendingAction { .. } => {
+                        "mature_pending_credential_reset"
+                    }
+                },
+            ))
+        })
+    }
+
+    fn build_credential_lifecycle_commit_work<'a, 'tx>(
+        &'a self,
+        tx: &'a mut Tx<'tx>,
+        request: CredentialLifecycleMethodWorkBuildRequest<'a>,
+    ) -> Pin<
+        Box<
+            dyn Future<Output = Result<Vec<MethodCommitWork>, PostgresAuthMethodBuildError>>
+                + Send
+                + 'a,
+        >,
+    > {
+        let _ = tx;
+        Box::pin(async move {
+            Err(PostgresAuthMethodBuildError::unsupported(
+                self.method(),
+                match request.pending_action.action {
+                    CredentialLifecycleAction::Replace => "mature_pending_credential_replacement",
+                    CredentialLifecycleAction::Regenerate => {
+                        "mature_pending_credential_regeneration"
+                    }
+                    _ => "mature_pending_credential_lifecycle_action",
+                },
             ))
         })
     }
@@ -280,15 +344,15 @@ impl PostgresAuthMethodRegistry {
             .build_out_of_band_completion_commit_work(challenge_id, response)
     }
 
-    pub(crate) async fn resolve_out_of_band_subject_id<'tx>(
+    pub(crate) async fn resolve_out_of_band_proof<'tx>(
         &self,
         tx: &mut Tx<'tx>,
         proof: &ProofSummary,
         challenge_id: &ActiveProofChallengeId,
         response: &CompleteOutOfBandChallengeResponse,
-    ) -> Result<Option<SubjectId>, PostgresAuthMethodBuildError> {
+    ) -> Result<PostgresOutOfBandProofResolution, PostgresAuthMethodBuildError> {
         self.plugin_for_proof(proof)?
-            .resolve_out_of_band_subject_id(tx, challenge_id, response)
+            .resolve_out_of_band_proof(tx, challenge_id, response)
             .await
     }
 
@@ -326,6 +390,38 @@ impl PostgresAuthMethodRegistry {
     ) -> Result<KnownSubjectActiveProofMethodVerification, PostgresAuthMethodBuildError> {
         self.plugin_for_method(&response.method)?
             .verify_known_subject_active_proof_method_response(tx, subject_id, response)
+            .await
+    }
+
+    pub(crate) fn verify_known_subject_active_proof_method_response_before_state_load(
+        &self,
+        continuation: &ActiveProofContinuationCookieDraft,
+        response: &CompleteKnownSubjectActiveProofMethodResponse,
+    ) -> Result<(), PostgresAuthMethodBuildError> {
+        self.plugin_for_method(&response.method)?
+            .verify_known_subject_active_proof_method_response_before_state_load(
+                continuation,
+                response,
+            )
+    }
+
+    pub(crate) async fn build_credential_reset_commit_work<'tx>(
+        &self,
+        tx: &mut Tx<'tx>,
+        request: CredentialResetMethodWorkBuildRequest<'_>,
+    ) -> Result<Vec<MethodCommitWork>, PostgresAuthMethodBuildError> {
+        self.plugin_for_credential_target(request.target_credential)?
+            .build_credential_reset_commit_work(tx, request)
+            .await
+    }
+
+    pub(crate) async fn build_credential_lifecycle_commit_work<'tx>(
+        &self,
+        tx: &mut Tx<'tx>,
+        request: CredentialLifecycleMethodWorkBuildRequest<'_>,
+    ) -> Result<Vec<MethodCommitWork>, PostgresAuthMethodBuildError> {
+        self.plugin_for_credential_target(request.target_credential)?
+            .build_credential_lifecycle_commit_work(tx, request)
             .await
     }
 
@@ -367,6 +463,22 @@ impl PostgresAuthMethodRegistry {
                 family: proof.family(),
                 method_label: proof.method_label().to_owned(),
             })
+    }
+
+    fn plugin_for_credential_target(
+        &self,
+        target: &CredentialInstanceMetadata,
+    ) -> Result<&dyn PostgresAuthMethodPlugin, PostgresAuthMethodBuildError> {
+        let key = PostgresAuthMethodRegistryKey {
+            proof_family_wire_id: proof_family_wire_id(target.proof_family()),
+            method_label: target.method_label().to_owned(),
+        };
+        self.plugins.get(&key).map(Arc::as_ref).ok_or_else(|| {
+            PostgresAuthMethodBuildError::UnregisteredMethod {
+                family: target.proof_family(),
+                method_label: target.method_label().to_owned(),
+            }
+        })
     }
 }
 
@@ -421,11 +533,18 @@ impl VerifiedActiveProofMethodResponse {
     pub(crate) fn new(
         verified_proof: VerifiedActiveProof,
         method_commit_work: Vec<MethodCommitWork>,
-    ) -> Self {
-        Self {
+    ) -> Result<Self, Error> {
+        if active_method_proof_family_requires_source(verified_proof.proof().family())
+            && verified_proof.source().is_none()
+        {
+            return Err(Error::ProofFamilyRequiresVerifiedProofSource {
+                family: verified_proof.proof().family(),
+            });
+        }
+        Ok(Self {
             verified_proof,
             method_commit_work,
-        }
+        })
     }
 
     pub(crate) fn into_parts(self) -> (VerifiedActiveProof, Vec<MethodCommitWork>) {
@@ -435,6 +554,17 @@ impl VerifiedActiveProofMethodResponse {
     pub(crate) fn verified_proof(&self) -> &VerifiedActiveProof {
         &self.verified_proof
     }
+}
+
+fn active_method_proof_family_requires_source(family: ProofFamily) -> bool {
+    matches!(
+        family,
+        ProofFamily::MessageSignature
+            | ProofFamily::SharedSecretOtp
+            | ProofFamily::OriginBoundPublicKey
+            | ProofFamily::FederatedIdentityAssertion
+            | ProofFamily::RecoveryCode
+    )
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -497,6 +627,32 @@ impl ActiveProofMethodAuthoritativeConfirmation {
     }
 }
 
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct CredentialResetMethodWorkBuildRequest<'a> {
+    pub(crate) now: UnixSeconds,
+    pub(crate) target_credential: &'a CredentialInstanceMetadata,
+    pub(crate) method_payload: &'a CredentialResetMethodPayload,
+    pub(crate) authority: CredentialResetMethodWorkAuthority<'a>,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum CredentialResetMethodWorkAuthority<'a> {
+    Immediate {
+        lifecycle_context: &'a CredentialLifecycleActionContext,
+    },
+    MaturePendingAction {
+        pending_action: &'a PendingCredentialLifecycleActionRecord,
+    },
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct CredentialLifecycleMethodWorkBuildRequest<'a> {
+    pub(crate) now: UnixSeconds,
+    pub(crate) target_credential: &'a CredentialInstanceMetadata,
+    pub(crate) pending_action: &'a PendingCredentialLifecycleActionRecord,
+    pub(crate) method_payload: &'a CredentialLifecycleMethodPayload,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct ActiveProofMethodChallengeBuild {
     presentation: ActiveProofMethodChallengePresentation,
@@ -531,6 +687,30 @@ impl ActiveProofMethodChallengeBuild {
 pub(crate) struct PostgresOutOfBandChallengeIssueBuild {
     response_secret: ActiveProofChallengeResponseSecret,
     method_commit_work: Vec<MethodCommitWork>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct PostgresOutOfBandProofResolution {
+    subject_id: Option<SubjectId>,
+    source: Option<VerifiedProofSource>,
+}
+
+impl PostgresOutOfBandProofResolution {
+    pub(crate) fn new(subject_id: Option<SubjectId>, source: Option<VerifiedProofSource>) -> Self {
+        Self { subject_id, source }
+    }
+
+    pub(crate) fn into_verified_proof(
+        self,
+        proof: ProofSummary,
+    ) -> Result<VerifiedActiveProof, Error> {
+        match self.source {
+            Some(source) => {
+                VerifiedActiveProof::from_summary_with_source(proof, self.subject_id, source)
+            }
+            None => VerifiedActiveProof::from_summary(proof, self.subject_id),
+        }
+    }
 }
 
 impl PostgresOutOfBandChallengeIssueBuild {

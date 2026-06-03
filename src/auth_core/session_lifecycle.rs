@@ -194,11 +194,7 @@ pub(super) fn complete_step_up(
     if !secret_match.is_accepted() {
         return Ok(transition(
             Outcome::NeedsFullAuthentication,
-            session_credential_mismatch_plan(
-                command.now,
-                Some(record.subject_id.clone()),
-                Some(record.session_id.clone()),
-            ),
+            session_tripwire_plan(command.now, record),
         ));
     }
     let attempt = active_proof::validate_active_proof_attempt_satisfies_use(
@@ -317,13 +313,7 @@ pub(super) fn complete_trusted_device_revival_with_active_proof(
     if !secret_match.is_accepted() {
         return Ok(transition(
             Outcome::NeedsFullAuthentication,
-            credential_mismatch_plan(
-                command.now,
-                Some(record.subject_id.clone()),
-                None,
-                Some(record.device_credential_id.clone()),
-                ResponseEffect::DeleteTrustedDeviceCookie,
-            ),
+            trusted_device_tripwire_plan(command.now, record),
         ));
     }
     let attempt = active_proof::validate_active_proof_attempt_satisfies_use(

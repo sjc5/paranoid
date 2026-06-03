@@ -74,7 +74,6 @@ async fn fleet_coalescing_cache_set_fetch_and_compute_on_miss() {
 #[tokio::test]
 async fn fleet_coalescing_cache_stale_entry_reads_epoch_once_before_and_once_after_lock() {
     let test_database = TestDatabase::connect().await;
-    let direct_database_url = direct_test_database_url();
 
     let store = Store::new(test_database.config.clone()).expect("fleet store");
     let cache_key = CoalescingCacheKey::new("stale-epoch-shape").expect("cache key");
@@ -103,8 +102,7 @@ async fn fleet_coalescing_cache_stale_entry_reads_epoch_once_before_and_once_aft
         .expect("invalidate cache epoch");
 
     let epoch_key = persisted_coalescing_cache_epoch_key(&test_database.config, &cache_key);
-    let (role_name, role_password) =
-        create_non_bypass_login_role_for_test(&test_database.sqlx_pool).await;
+    let role_name = non_bypass_test_role_name();
     grant_fleet_test_tables_to_login_role(
         &test_database.sqlx_pool,
         &test_database.config,
@@ -117,8 +115,7 @@ async fn fleet_coalescing_cache_stale_entry_reads_epoch_once_before_and_once_aft
         &epoch_key,
     )
     .await;
-    let non_bypass_pool =
-        connect_paranoid_pool_as_login_role(&direct_database_url, &role_name, &role_password).await;
+    let non_bypass_pool = connect_paranoid_pool(&non_bypass_test_database_url()).await;
     let compute_count = Arc::new(AtomicUsize::new(0));
     let value = cache
         .fetch_or_compute(&non_bypass_pool, ["user-1"], {

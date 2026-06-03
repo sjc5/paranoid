@@ -51,6 +51,19 @@ pub(super) fn resolve_request(
     }
 
     if let Some(device_cookie) = &loaded.trusted_device_cookie {
+        if pending_session_rejection_plan.as_ref().is_some_and(|plan| {
+            plan_revokes_trusted_device(plan, &device_cookie.device_credential_id)
+        }) {
+            let mut plan = pending_session_rejection_plan.unwrap_or_default();
+            if !plan
+                .response_effects
+                .contains(&ResponseEffect::DeleteTrustedDeviceCookie)
+            {
+                plan.response_effects
+                    .push(ResponseEffect::DeleteTrustedDeviceCookie);
+            }
+            return Ok(transition(Outcome::NeedsFullAuthentication, plan));
+        }
         let mut device_resolution = if command.now >= device_cookie.device_fast_fail_until {
             let mut plan = CommitPlan::default();
             plan.response_effects
@@ -120,13 +133,9 @@ fn resolve_loaded_session(
         .kind();
     validate_session_secret_match_consistency(now, secret_match, cookie, record)?;
     if !secret_match.is_accepted() {
-        return Ok(LoadedSessionResolution::Rejected(
-            session_credential_mismatch_plan(
-                now,
-                Some(record.subject_id.clone()),
-                Some(record.session_id.clone()),
-            ),
-        ));
+        return Ok(LoadedSessionResolution::Rejected(session_tripwire_plan(
+            now, record,
+        )));
     }
 
     if request_kind == RequestKind::Sensitive && !step_up_is_fresh(record.step_up_expires_at, now) {
@@ -262,13 +271,7 @@ fn resolve_loaded_trusted_device(
     if !secret_match.is_accepted() {
         return Ok(transition(
             Outcome::NeedsFullAuthentication,
-            credential_mismatch_plan(
-                now,
-                Some(record.subject_id.clone()),
-                None,
-                Some(record.device_credential_id.clone()),
-                ResponseEffect::DeleteTrustedDeviceCookie,
-            ),
+            trusted_device_tripwire_plan(now, record),
         ));
     }
 

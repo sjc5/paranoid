@@ -2,7 +2,8 @@ mod common;
 
 use common::{
     connect_sqlx_pool_for_harness, drop_test_table as common_drop_test_table,
-    standard_test_database_url,
+    read_only_test_database_url as common_read_only_test_database_url,
+    read_only_test_role_name as common_read_only_test_role_name, standard_test_database_url,
 };
 use paranoid::db::{
     Error as DbError, PgIdentifier, PgQualifiedTableName, PoolConfig, WritePool,
@@ -33,12 +34,9 @@ use paranoid::queue::{
 };
 use secrecy::SecretString;
 use serde::{Deserialize, Serialize};
-use sqlx::ConnectOptions;
 use sqlx::PgPool;
-use sqlx::postgres::PgConnectOptions;
 use std::error::Error as StdError;
 use std::fmt;
-use std::str::FromStr;
 use std::time::Duration;
 
 const TEST_TASK_NAME: &str = "marker_task";
@@ -160,15 +158,10 @@ async fn read_only_role_hidden_behind_write_pool_proves_public_db_handle_contrac
         .await
         .expect("seed Fleet topic event");
 
-    let (read_only_role_name, read_only_role_password) =
-        create_read_only_login_role(&admin_sqlx_pool).await;
+    let read_only_role_name = read_only_test_role_name();
     grant_schema_read_access_to_login_role(&admin_sqlx_pool, &read_only_role_name).await;
 
-    let read_only_database_url = database_url_with_login_role(
-        &database_url,
-        &read_only_role_name,
-        &read_only_role_password,
-    );
+    let read_only_database_url = common_read_only_test_database_url();
     let read_only_backed_write_pool =
         connect_write_pool(&read_only_database_url, "paranoid_db_marker_read_only").await;
 
@@ -184,7 +177,7 @@ async fn read_only_role_hidden_behind_write_pool_proves_public_db_handle_contrac
 
     read_only_backed_write_pool.sqlx_pool().close().await;
     drop_marker_tables(&admin_sqlx_pool, &kv_config, &fleet_config, &queue_config).await;
-    drop_login_role(&admin_sqlx_pool, &read_only_role_name).await;
+    revoke_schema_read_access_from_login_role(&admin_sqlx_pool, &read_only_role_name).await;
     admin_pool.sqlx_pool().close().await;
     admin_sqlx_pool.close().await;
 }
@@ -2934,8 +2927,8 @@ fn unique_test_identifier_text(prefix: &str) -> String {
     format!("{prefix}_{id}")
 }
 
-fn unique_test_identifier(prefix: &str) -> PgIdentifier {
-    PgIdentifier::new(unique_test_identifier_text(prefix)).expect("identifier")
+fn read_only_test_role_name() -> PgIdentifier {
+    PgIdentifier::new(common_read_only_test_role_name()).expect("read-only test role name")
 }
 
 async fn connect_write_pool(database_url: &str, application_name: &str) -> WritePool {
@@ -2943,37 +2936,6 @@ async fn connect_write_pool(database_url: &str, application_name: &str) -> Write
     config.max_connections = 5;
     config.application_name = Some(application_name.to_owned());
     WritePool::connect(config).await.expect("connect WritePool")
-}
-
-async fn create_read_only_login_role(pool: &PgPool) -> (PgIdentifier, String) {
-    let role_name = unique_test_identifier("__marker_read_only_role");
-    let password = UniqueTestId::new()
-        .expect("new role password")
-        .to_text()
-        .replace('\'', "");
-    let database_name: String = sqlx::query_scalar("SELECT current_database()")
-        .fetch_one(pool)
-        .await
-        .expect("fetch current database");
-    unparameterized_simple_query(sqlx::AssertSqlSafe(format!(
-        "CREATE ROLE {} LOGIN PASSWORD {} NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT",
-        role_name.quoted(),
-        postgres_single_quoted_literal(&password)
-    )))
-    .execute(pool)
-    .await
-    .expect("create read-only login role");
-    unparameterized_simple_query(sqlx::AssertSqlSafe(format!(
-        "GRANT CONNECT ON DATABASE {} TO {}",
-        PgIdentifier::new(database_name)
-            .expect("current database identifier")
-            .quoted(),
-        role_name.quoted()
-    )))
-    .execute(pool)
-    .await
-    .expect("grant database connect");
-    (role_name, password)
 }
 
 async fn grant_schema_read_access_to_login_role(pool: &PgPool, role_name: &PgIdentifier) {
@@ -2994,11 +2956,7 @@ async fn grant_schema_read_access_to_login_role(pool: &PgPool, role_name: &PgIde
     .expect("grant schema read access");
 }
 
-async fn drop_login_role(pool: &PgPool, role_name: &PgIdentifier) {
-    let database_name: String = sqlx::query_scalar("SELECT current_database()")
-        .fetch_one(pool)
-        .await
-        .expect("fetch current database");
+async fn revoke_schema_read_access_from_login_role(pool: &PgPool, role_name: &PgIdentifier) {
     unparameterized_simple_query(sqlx::AssertSqlSafe(format!(
         "REVOKE ALL PRIVILEGES ON ALL TABLES IN SCHEMA public FROM {}",
         role_name.quoted()
@@ -3013,39 +2971,4 @@ async fn drop_login_role(pool: &PgPool, role_name: &PgIdentifier) {
     .execute(pool)
     .await
     .expect("revoke public schema privileges");
-    unparameterized_simple_query(sqlx::AssertSqlSafe(format!(
-        "REVOKE ALL PRIVILEGES ON DATABASE {} FROM {}",
-        PgIdentifier::new(database_name)
-            .expect("current database identifier")
-            .quoted(),
-        role_name.quoted()
-    )))
-    .execute(pool)
-    .await
-    .expect("revoke database privileges");
-    unparameterized_simple_query(sqlx::AssertSqlSafe(format!(
-        "DROP ROLE IF EXISTS {}",
-        role_name.quoted()
-    )))
-    .execute(pool)
-    .await
-    .expect("drop read-only role");
-}
-
-fn database_url_with_login_role(
-    database_url: &str,
-    role_name: &PgIdentifier,
-    password: &str,
-) -> String {
-    PgConnectOptions::from_str(database_url)
-        .expect("parse database URL")
-        .username(role_name.as_str())
-        .password(password)
-        .statement_cache_capacity(0)
-        .to_url_lossy()
-        .to_string()
-}
-
-fn postgres_single_quoted_literal(value: &str) -> String {
-    format!("'{}'", value.replace('\'', "''"))
 }

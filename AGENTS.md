@@ -1,3 +1,8 @@
+## Auth Initiative
+
+Re-read all docs in `docs/maintainer/auth/notes/*` at least once after each time your
+context gets compacted.
+
 ## The Paranoid Standard
 
 Paranoid is not application code. It is security, storage, coordination, and auth

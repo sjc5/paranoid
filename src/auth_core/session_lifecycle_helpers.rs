@@ -134,7 +134,7 @@ pub(super) fn validate_session_secret_match_consistency(
             previous_deadline_missing: "session previous secret match missing previous grace deadline",
             previous_version_mismatch: "session previous secret match version differs from cookie version",
             previous_within_grace_after_deadline: "session previous secret reported within grace after grace deadline",
-            previous_expired_before_deadline: "session previous secret reported expired inside grace deadline",
+            previous_after_grace_before_deadline: "session previous secret reported after grace before grace deadline",
         },
     )
 }
@@ -169,7 +169,7 @@ pub(super) fn validate_device_secret_match_consistency(
             previous_deadline_missing: "trusted-device previous secret match missing previous grace deadline",
             previous_version_mismatch: "trusted-device previous secret match version differs from cookie version",
             previous_within_grace_after_deadline: "trusted-device previous secret reported within grace after grace deadline",
-            previous_expired_before_deadline: "trusted-device previous secret reported expired inside grace deadline",
+            previous_after_grace_before_deadline: "trusted-device previous secret reported after grace before grace deadline",
         },
     )?;
     Ok(secret_match.kind())
@@ -183,7 +183,7 @@ struct SecretMatchLabels {
     previous_deadline_missing: &'static str,
     previous_version_mismatch: &'static str,
     previous_within_grace_after_deadline: &'static str,
-    previous_expired_before_deadline: &'static str,
+    previous_after_grace_before_deadline: &'static str,
 }
 
 fn validate_secret_match_consistency(
@@ -227,7 +227,7 @@ fn validate_secret_match_consistency(
                 ));
             }
         }
-        StoredSecretMatch::PreviousExpired => {
+        StoredSecretMatch::PreviousAfterGrace => {
             let previous_secret_version = previous_secret_version.ok_or(
                 Error::LoadedStateContradiction(labels.previous_version_missing),
             )?;
@@ -241,7 +241,7 @@ fn validate_secret_match_consistency(
             }
             if now < previous_secret_accept_until {
                 return Err(Error::LoadedStateContradiction(
-                    labels.previous_expired_before_deadline,
+                    labels.previous_after_grace_before_deadline,
                 ));
             }
         }
@@ -292,39 +292,119 @@ pub(super) fn subject_revocation_invalidates_record(
     matches!(subject_revocation, Some(revocation) if created_at <= revocation.revoke_records_created_at_or_before)
 }
 
-pub(super) fn credential_mismatch_plan(
+fn credential_mismatch_audit_plan(
     now: UnixSeconds,
-    subject_id: Option<SubjectId>,
+    subject_id: SubjectId,
     session_id: Option<SessionId>,
     device_credential_id: Option<TrustedDeviceCredentialId>,
-    response_effect: ResponseEffect,
 ) -> CommitPlan {
     let mut plan = CommitPlan::default();
     plan.audit_events.push(audit_event(
         AuditEventKind::CredentialMismatch,
         now,
-        subject_id,
+        Some(subject_id),
         session_id,
         device_credential_id,
     ));
-    plan.response_effects.push(response_effect);
     plan
 }
 
-pub(super) fn session_credential_mismatch_plan(
-    now: UnixSeconds,
-    subject_id: Option<SubjectId>,
-    session_id: Option<SessionId>,
-) -> CommitPlan {
-    let mut plan = credential_mismatch_plan(
+pub(super) fn session_tripwire_plan(now: UnixSeconds, record: &SessionRecord) -> CommitPlan {
+    let mut plan = credential_mismatch_audit_plan(
         now,
-        subject_id,
-        session_id,
-        None,
-        ResponseEffect::DeleteSessionCookie,
+        record.subject_id.clone(),
+        Some(record.session_id.clone()),
+        record.device_credential_id.clone(),
     );
+    plan.preconditions
+        .push(Precondition::SessionBelongsToSubject {
+            session_id: record.session_id.clone(),
+            subject_id: record.subject_id.clone(),
+        });
+    plan.mutations.push(Mutation::RevokeSession {
+        session_id: record.session_id.clone(),
+        reason: RevocationReason::Tripwire,
+        revoked_at: now,
+    });
+    plan.audit_events.push(audit_event(
+        AuditEventKind::SessionRevoked,
+        now,
+        Some(record.subject_id.clone()),
+        Some(record.session_id.clone()),
+        record.device_credential_id.clone(),
+    ));
+    if let Some(device_credential_id) = &record.device_credential_id {
+        plan.preconditions
+            .push(Precondition::TrustedDeviceBelongsToSubject {
+                device_credential_id: device_credential_id.clone(),
+                subject_id: record.subject_id.clone(),
+            });
+        plan.mutations
+            .push(Mutation::RevokeTrustedDeviceCredential {
+                device_credential_id: device_credential_id.clone(),
+                reason: RevocationReason::Tripwire,
+                revoked_at: now,
+            });
+        plan.audit_events.push(audit_event(
+            AuditEventKind::TrustedDeviceRevoked,
+            now,
+            Some(record.subject_id.clone()),
+            Some(record.session_id.clone()),
+            Some(device_credential_id.clone()),
+        ));
+        plan.response_effects
+            .push(ResponseEffect::DeleteTrustedDeviceCookie);
+    }
     push_delete_session_cookie_and_cycle_csrf(&mut plan);
     plan
+}
+
+pub(super) fn trusted_device_tripwire_plan(
+    now: UnixSeconds,
+    record: &TrustedDeviceCredentialRecord,
+) -> CommitPlan {
+    let mut plan = credential_mismatch_audit_plan(
+        now,
+        record.subject_id.clone(),
+        None,
+        Some(record.device_credential_id.clone()),
+    );
+    plan.preconditions
+        .push(Precondition::TrustedDeviceBelongsToSubject {
+            device_credential_id: record.device_credential_id.clone(),
+            subject_id: record.subject_id.clone(),
+        });
+    plan.mutations
+        .push(Mutation::RevokeTrustedDeviceCredential {
+            device_credential_id: record.device_credential_id.clone(),
+            reason: RevocationReason::Tripwire,
+            revoked_at: now,
+        });
+    plan.audit_events.push(audit_event(
+        AuditEventKind::TrustedDeviceRevoked,
+        now,
+        Some(record.subject_id.clone()),
+        None,
+        Some(record.device_credential_id.clone()),
+    ));
+    plan.response_effects
+        .push(ResponseEffect::DeleteTrustedDeviceCookie);
+    plan
+}
+
+pub(super) fn plan_revokes_trusted_device(
+    plan: &CommitPlan,
+    device_credential_id: &TrustedDeviceCredentialId,
+) -> bool {
+    plan.mutations.iter().any(|mutation| {
+        matches!(
+            mutation,
+            Mutation::RevokeTrustedDeviceCredential {
+                device_credential_id: revoked_device_credential_id,
+                ..
+            } if revoked_device_credential_id == device_credential_id
+        )
+    })
 }
 
 pub(super) fn merge_session_rejection_before_replacement_session(

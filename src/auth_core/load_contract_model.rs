@@ -170,6 +170,34 @@ impl CommandLoadedStateContract {
         Ok(contract)
     }
 
+    pub(crate) fn for_authenticated_session_lifecycle_request(
+        config: &Config,
+        now: UnixSeconds,
+        presented: &PresentedAuthCookies,
+    ) -> Result<Self, Error> {
+        config.validate()?;
+        let mut contract = Self::default();
+        if let Some(cookie) = &presented.session_cookie {
+            contract.push_presented_session_cookie(cookie);
+            if now < cookie.session_fast_fail_until {
+                contract.push_authoritative_session_requirements(cookie);
+            }
+        }
+        Ok(contract)
+    }
+
+    pub(crate) fn for_recover_or_replace_credential_lifecycle_request(
+        config: &Config,
+        attempt_id: &ActiveProofAttemptId,
+        presented: &PresentedAuthCookies,
+    ) -> Result<Self, Error> {
+        config.validate()?;
+        let mut contract = Self::default();
+        contract.push_active_proof_attempt_requirements(attempt_id);
+        contract.push_active_proof_continuation_requirement_if_presented(presented, attempt_id);
+        Ok(contract)
+    }
+
     /// Builds the loaded-state contract for resending an out-of-band challenge before
     /// method/plugin commit work has been attached.
     pub fn for_out_of_band_challenge_resend_request(
@@ -323,6 +351,11 @@ impl CommandLoadedStateContract {
                     contract.push_presented_trusted_device_cookie(cookie);
                 }
             }
+            Command::PlanCredentialReset(_) => {}
+            Command::ExecuteCredentialReset(_) => {}
+            Command::CancelPendingCredentialReset(_) => {}
+            Command::ExecuteNonResetPendingCredentialLifecycleAction(_) => {}
+            Command::CancelNonResetPendingCredentialLifecycleAction(_) => {}
         }
         Ok(contract)
     }

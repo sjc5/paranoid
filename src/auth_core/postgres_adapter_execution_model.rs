@@ -480,6 +480,53 @@ impl PostgresPreconditionExecutionContract {
                     PostgresPreconditionValidationStep::TreatOpenChallengeDedupeUniqueViolationAsPreconditionFailure,
                 ]
             }
+            Precondition::CredentialInstanceStillActive { subject_id, .. } => {
+                vec![
+                    PostgresPreconditionValidationStep::CredentialInstanceStillActiveWithSubject {
+                        subject_id: subject_id.clone(),
+                    },
+                ]
+            }
+            Precondition::NoOpenPendingCredentialLifecycleActionForTarget { now, .. } => {
+                vec![
+                    PostgresPreconditionValidationStep::CloseExpiredOpenPendingCredentialLifecycleActionsBeforeUniquenessCheck {
+                        now: *now,
+                    },
+                    PostgresPreconditionValidationStep::TreatOpenPendingCredentialLifecycleActionUniqueViolationAsPreconditionFailure,
+                ]
+            }
+            Precondition::PendingCredentialLifecycleActionStillExecutable {
+                subject_id,
+                target_credential_instance_id,
+                action,
+                now,
+                ..
+            } => {
+                vec![
+                    PostgresPreconditionValidationStep::PendingCredentialLifecycleActionOpenMatureUnexpiredAndTargetMatched {
+                        subject_id: subject_id.clone(),
+                        target_credential_instance_id: target_credential_instance_id.clone(),
+                        action: *action,
+                        now: *now,
+                    },
+                ]
+            }
+            Precondition::PendingCredentialLifecycleActionStillCancellableForTarget {
+                subject_id,
+                target_credential_instance_id,
+                action,
+                now,
+                ..
+            } => {
+                vec![
+                    PostgresPreconditionValidationStep::PendingCredentialLifecycleActionOpenUnexpiredAndTargetMatched {
+                        subject_id: subject_id.clone(),
+                        target_credential_instance_id: target_credential_instance_id.clone(),
+                        action: *action,
+                        now: *now,
+                    },
+                ]
+            }
         };
         Self {
             kind: storage_contract.kind(),
@@ -524,6 +571,13 @@ pub enum PostgresPreconditionLockStep {
         /// Dedupe key.
         challenge_dedupe_key: OutOfBandChallengeDedupeKey,
     },
+    /// Enforce the partial unique index for open pending lifecycle actions.
+    UseOpenPendingCredentialLifecycleActionUniqueIndex {
+        /// Target credential instance.
+        target_credential_instance_id: VerifiedProofSourceId,
+        /// Lifecycle action.
+        action: CredentialLifecycleAction,
+    },
 }
 
 impl PostgresPreconditionLockStep {
@@ -544,6 +598,13 @@ impl PostgresPreconditionLockStep {
                 challenge_dedupe_key,
             } => Self::UseOpenOutOfBandChallengeDedupeUniqueIndex {
                 challenge_dedupe_key: challenge_dedupe_key.clone(),
+            },
+            StorageLockRequirement::EnforceOpenPendingCredentialLifecycleActionUniqueness {
+                target_credential_instance_id,
+                action,
+            } => Self::UseOpenPendingCredentialLifecycleActionUniqueIndex {
+                target_credential_instance_id: target_credential_instance_id.clone(),
+                action: *action,
             },
         }
     }
@@ -614,6 +675,40 @@ pub enum PostgresPreconditionValidationStep {
     },
     /// The partial unique index is the race-proof dedupe check.
     TreatOpenChallengeDedupeUniqueViolationAsPreconditionFailure,
+    /// Credential instance must still be active and owned by the required subject.
+    CredentialInstanceStillActiveWithSubject {
+        /// Required subject.
+        subject_id: SubjectId,
+    },
+    /// Expired open pending lifecycle actions must be closed before uniqueness check.
+    CloseExpiredOpenPendingCredentialLifecycleActionsBeforeUniquenessCheck {
+        /// Transition time.
+        now: UnixSeconds,
+    },
+    /// The partial unique index is the race-proof open pending-action check.
+    TreatOpenPendingCredentialLifecycleActionUniqueViolationAsPreconditionFailure,
+    /// Pending credential lifecycle action must be open, mature, unexpired, and target-matched.
+    PendingCredentialLifecycleActionOpenMatureUnexpiredAndTargetMatched {
+        /// Required subject.
+        subject_id: SubjectId,
+        /// Required target credential instance.
+        target_credential_instance_id: VerifiedProofSourceId,
+        /// Required lifecycle action.
+        action: CredentialLifecycleAction,
+        /// Transition time.
+        now: UnixSeconds,
+    },
+    /// Pending credential lifecycle action must be open, unexpired, and target-matched.
+    PendingCredentialLifecycleActionOpenUnexpiredAndTargetMatched {
+        /// Required subject.
+        subject_id: SubjectId,
+        /// Required target credential instance.
+        target_credential_instance_id: VerifiedProofSourceId,
+        /// Required lifecycle action.
+        action: CredentialLifecycleAction,
+        /// Transition time.
+        now: UnixSeconds,
+    },
     /// Subject revocation cutoff must not invalidate the guarded record.
     SubjectAuthStateDoesNotInvalidateRecord,
 }
@@ -905,6 +1000,16 @@ fn postgres_table_for_record_kind(kind: &CoreStorageRecordKind) -> PostgresAuthC
         }
         CoreStorageRecordKind::ActiveProofChallenge => PostgresAuthCoreTable::ActiveProofChallenge,
         CoreStorageRecordKind::SubjectAuthState => PostgresAuthCoreTable::SubjectAuthState,
+        CoreStorageRecordKind::CredentialInstance => PostgresAuthCoreTable::CredentialInstance,
+        CoreStorageRecordKind::CredentialRecoveryAuthority => {
+            PostgresAuthCoreTable::CredentialRecoveryAuthority
+        }
+        CoreStorageRecordKind::LifecycleAuthoritySource => {
+            PostgresAuthCoreTable::LifecycleAuthoritySource
+        }
+        CoreStorageRecordKind::PendingCredentialLifecycleAction => {
+            PostgresAuthCoreTable::PendingCredentialLifecycleAction
+        }
         CoreStorageRecordKind::AuditEvent => PostgresAuthCoreTable::AuditEvent,
         CoreStorageRecordKind::CoreDurableEffectCommand => {
             PostgresAuthCoreTable::CoreDurableEffectCommand

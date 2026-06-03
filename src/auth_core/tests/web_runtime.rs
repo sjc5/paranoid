@@ -216,6 +216,7 @@ fn active_proof_continuation_headers(
                 ActiveProofContinuationCookieDraft {
                     attempt_id,
                     proof_use,
+                    subject_id: None,
                     attempt_fast_fail_until,
                 },
                 AuthCredentialSecret::try_from(b"runtime-test-continuation".as_slice())
@@ -612,6 +613,122 @@ fn web_runtime_rejects_direct_active_proof_attempt_start() {
     ));
     assert_eq!(adapter.load_calls, 0);
     assert_eq!(adapter.commit_calls, 0);
+}
+
+#[test]
+fn web_runtime_rejects_direct_credential_lifecycle_commands() {
+    let target_credential_id: VerifiedProofSourceId = id("password-credential");
+    let email_authority: RecoveryAuthorityId = id("primary-email-authority");
+    let target_credential = message_signature_credential_metadata("password-credential");
+    let lifecycle_context = credential_lifecycle_context(
+        target_credential.clone(),
+        [CredentialRecoveryAuthority::new(
+            target_credential_id.clone(),
+            CredentialLifecycleAction::Reset,
+            email_authority.clone(),
+            RecoveryAuthorityTiming::Immediate,
+        )],
+        [out_of_band_identifier_lifecycle_evidence(
+            "primary-email",
+            [email_authority],
+        )],
+    );
+    let pending_reset = PendingCredentialLifecycleActionRecord::new_open(
+        id("pending-reset"),
+        id("subject"),
+        target_credential_id.clone(),
+        CredentialLifecycleAction::Reset,
+        at(100),
+        at(200),
+        at(300),
+    )
+    .expect("pending reset");
+    let pending_replacement = PendingCredentialLifecycleActionRecord::new_open(
+        id("pending-replacement"),
+        id("subject"),
+        target_credential_id,
+        CredentialLifecycleAction::Replace,
+        at(100),
+        at(200),
+        at(300),
+    )
+    .expect("pending replacement");
+
+    let cases = [
+        (
+            Command::PlanCredentialReset(PlanCredentialReset {
+                now: at(150),
+                lifecycle_context: lifecycle_context.clone(),
+                active_proof_attempt_to_close: None,
+                independent_evidence_required:
+                    CredentialLifecycleIndependentEvidenceRequirement::Required,
+                pending_action: None,
+                immediate_subject_auth_revocation:
+                    CredentialResetSubjectAuthRevocation::PreserveExistingAuthState,
+            }),
+            Error::CredentialResetPlanningRequiresRuntimeLifecycleDecision,
+        ),
+        (
+            Command::ExecuteCredentialReset(ExecuteCredentialReset {
+                now: at(250),
+                execution_authority: CredentialResetExecutionAuthority::Immediate {
+                    lifecycle_context,
+                    independent_evidence_required:
+                        CredentialLifecycleIndependentEvidenceRequirement::Required,
+                },
+                method_commit_work: vec![password_reset_method_commit_work(b"verifier")],
+                subject_auth_revocation:
+                    CredentialResetSubjectAuthRevocation::PreserveExistingAuthState,
+            }),
+            Error::CredentialResetExecutionRequiresRuntimeMethodDispatch,
+        ),
+        (
+            Command::CancelPendingCredentialReset(CancelPendingCredentialReset {
+                now: at(150),
+                target_credential: target_credential.clone(),
+                pending_action: pending_reset,
+            }),
+            Error::CredentialResetCancellationRequiresRuntimeLifecycleDecision,
+        ),
+        (
+            Command::ExecuteNonResetPendingCredentialLifecycleAction(
+                ExecuteNonResetPendingCredentialLifecycleAction {
+                    now: at(250),
+                    target_credential: target_credential.clone(),
+                    pending_action: pending_replacement.clone(),
+                    method_commit_work: vec![password_reset_method_commit_work(b"verifier")],
+                    subject_auth_revocation:
+                        CredentialLifecycleSubjectAuthRevocation::PreserveExistingAuthState,
+                },
+            ),
+            Error::CredentialLifecycleExecutionRequiresRuntimeMethodDispatch,
+        ),
+        (
+            Command::CancelNonResetPendingCredentialLifecycleAction(
+                CancelNonResetPendingCredentialLifecycleAction {
+                    now: at(150),
+                    target_credential,
+                    pending_action: pending_replacement,
+                },
+            ),
+            Error::CredentialLifecycleCancellationRequiresRuntimeLifecycleDecision,
+        ),
+    ];
+
+    for (command, expected_error) in cases {
+        let runtime = auth_web_runtime();
+        let mut adapter = RuntimeTestAdapter::new(LoadedState::default());
+        let error = runtime
+            .execute_from_headers(&HeaderMap::new(), command, &mut adapter)
+            .expect_err("direct credential lifecycle command must be runtime-owned");
+
+        assert!(matches!(
+            error,
+            AuthWebRuntimeExecutionError::Core(actual_error) if actual_error == expected_error
+        ));
+        assert_eq!(adapter.load_calls, 0);
+        assert_eq!(adapter.commit_calls, 0);
+    }
 }
 
 #[test]

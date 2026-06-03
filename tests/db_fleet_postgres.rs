@@ -1,8 +1,10 @@
 mod common;
 
 use common::{
-    connect_sqlx_pool_for_harness, direct_test_database_url as common_direct_test_database_url,
-    drop_test_table as common_drop_test_table, fetch_table_exists, standard_test_database_url,
+    connect_sqlx_pool_for_harness, drop_test_table as common_drop_test_table, fetch_table_exists,
+    non_bypass_test_database_url as common_non_bypass_test_database_url,
+    non_bypass_test_role_name as common_non_bypass_test_role_name, standard_test_database_url,
+    statement_timeout_test_database_url as common_statement_timeout_test_database_url,
 };
 use paranoid::db::{
     Error as DbError, PgIdentifier, PgQualifiedTableName, PgSqlState, Pool, PoolConfig, WritePool,
@@ -36,11 +38,8 @@ use paranoid::kv::{
 };
 use secrecy::SecretString;
 use serde::{Deserialize, Serialize};
-use sqlx::ConnectOptions;
 use sqlx::PgPool;
-use sqlx::postgres::PgConnectOptions;
 use std::future::Future;
-use std::str::FromStr;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -237,8 +236,16 @@ fn test_database_url() -> String {
     standard_test_database_url()
 }
 
-fn direct_test_database_url() -> String {
-    common_direct_test_database_url()
+fn non_bypass_test_database_url() -> String {
+    common_non_bypass_test_database_url()
+}
+
+fn non_bypass_test_role_name() -> PgIdentifier {
+    PgIdentifier::new(common_non_bypass_test_role_name()).expect("non-bypass test role name")
+}
+
+fn statement_timeout_test_database_url() -> String {
+    common_statement_timeout_test_database_url()
 }
 
 async fn connect_paranoid_pool(database_url: &str) -> WritePool {
@@ -248,31 +255,6 @@ async fn connect_paranoid_pool(database_url: &str) -> WritePool {
     WritePool::connect(config)
         .await
         .expect("connect paranoid pool")
-}
-
-async fn connect_paranoid_pool_with_statement_timeout(
-    database_url: &str,
-    statement_timeout: &str,
-) -> WritePool {
-    let separator = if database_url.contains('?') { '&' } else { '?' };
-    let connect_url =
-        format!("{database_url}{separator}options[statement_timeout]={statement_timeout}");
-    connect_paranoid_pool(&connect_url).await
-}
-
-async fn connect_paranoid_pool_as_login_role(
-    database_url: &str,
-    role_name: &PgIdentifier,
-    role_password: &str,
-) -> WritePool {
-    let connect_url = PgConnectOptions::from_str(database_url)
-        .expect("parse test database URL")
-        .username(role_name.as_str())
-        .password(role_password)
-        .statement_cache_capacity(0)
-        .to_url_lossy()
-        .to_string();
-    connect_paranoid_pool(&connect_url).await
 }
 
 async fn connect_sqlx_pool(database_url: &str) -> PgPool {
@@ -619,20 +601,6 @@ async fn drop_test_function_cascade(pool: &PgPool, function_name: &PgIdentifier)
 
 fn postgres_single_quoted_literal(value: &str) -> String {
     format!("'{}'", value.replace('\'', "''"))
-}
-
-async fn create_non_bypass_login_role_for_test(pool: &PgPool) -> (PgIdentifier, String) {
-    let role_name = unique_test_identifier("__fleet_rs_rls_user");
-    let role_password: String = UniqueTestId::new().expect("new role password id").to_text();
-    sqlx::query(sqlx::AssertSqlSafe(format!(
-        "CREATE ROLE {} LOGIN PASSWORD {}",
-        role_name.quoted(),
-        postgres_single_quoted_literal(&role_password)
-    )))
-    .execute(pool)
-    .await
-    .expect("create non-bypass login role");
-    (role_name, role_password)
 }
 
 async fn grant_fleet_test_tables_to_login_role(

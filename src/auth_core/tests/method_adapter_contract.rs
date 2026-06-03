@@ -136,6 +136,51 @@ fn online_guessable_message_signature_method_contract_requires_weak_gate_without
 }
 
 #[test]
+fn active_method_acceptance_requires_source_for_credential_or_external_authority_proofs() {
+    for family in [
+        ProofFamily::MessageSignature,
+        ProofFamily::SharedSecretOtp,
+        ProofFamily::OriginBoundPublicKey,
+        ProofFamily::FederatedIdentityAssertion,
+        ProofFamily::RecoveryCode,
+    ] {
+        let proof = proof_method(family).verified_proof_summary();
+        let subject_id = match family {
+            ProofFamily::MessageSignature
+            | ProofFamily::OriginBoundPublicKey
+            | ProofFamily::FederatedIdentityAssertion => Some(id("subject")),
+            ProofFamily::SharedSecretOtp | ProofFamily::RecoveryCode => None,
+            ProofFamily::OutOfBandCode | ProofFamily::TrustedDevice => None,
+        };
+        let verified_proof =
+            VerifiedActiveProof::from_summary(proof, subject_id).expect("verified proof");
+
+        assert_eq!(
+            super::super::postgres_method_runtime::VerifiedActiveProofMethodResponse::new(
+                verified_proof,
+                Vec::new(),
+            )
+            .expect_err("active method proof must carry source provenance"),
+            Error::ProofFamilyRequiresVerifiedProofSource { family },
+        );
+    }
+
+    let sourced_totp = VerifiedActiveProof::from_summary_with_source(
+        proof_method(ProofFamily::SharedSecretOtp).verified_proof_summary(),
+        None,
+        proof_source("totp-credential"),
+    )
+    .expect("verified sourced TOTP proof");
+    assert!(
+        super::super::postgres_method_runtime::VerifiedActiveProofMethodResponse::new(
+            sourced_totp,
+            Vec::new(),
+        )
+        .is_ok()
+    );
+}
+
+#[test]
 fn recovery_code_contract_requires_success_commit_work_and_keeps_response_effects_forbidden() {
     let contract = MethodAdapterContract::for_method(proof_method(ProofFamily::RecoveryCode));
 

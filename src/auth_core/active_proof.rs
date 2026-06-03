@@ -77,11 +77,7 @@ pub(super) fn start_active_proof_attempt_for_current_session(
     if !secret_match.is_accepted() {
         return Ok(transition(
             Outcome::NeedsFullAuthentication,
-            super::session_lifecycle_helpers::session_credential_mismatch_plan(
-                command.now,
-                Some(record.subject_id.clone()),
-                Some(record.session_id.clone()),
-            ),
+            super::session_lifecycle_helpers::session_tripwire_plan(command.now, record),
         ));
     }
     let mut transition = start_active_proof_attempt_for_subject(
@@ -161,13 +157,7 @@ pub(super) fn start_active_proof_attempt_for_current_trusted_device(
     if !secret_match.is_accepted() {
         return Ok(transition(
             Outcome::NeedsFullAuthentication,
-            super::session_lifecycle_helpers::credential_mismatch_plan(
-                command.now,
-                Some(record.subject_id.clone()),
-                None,
-                Some(record.device_credential_id.clone()),
-                ResponseEffect::DeleteTrustedDeviceCookie,
-            ),
+            super::session_lifecycle_helpers::trusted_device_tripwire_plan(command.now, record),
         ));
     }
     let mut transition = start_active_proof_attempt_for_subject(
@@ -224,7 +214,7 @@ fn start_active_proof_attempt_for_subject(
         .push(active_proof_audit_event(ActiveProofAuditEventInput {
             kind: AuditEventKind::ActiveProofAttemptStarted,
             occurred_at: now,
-            subject_id,
+            subject_id: subject_id.clone(),
             session_id,
             device_credential_id,
             attempt_id: Some(attempt_id.clone()),
@@ -236,6 +226,7 @@ fn start_active_proof_attempt_for_subject(
             ActiveProofContinuationCookieDraft {
                 attempt_id: attempt_id.clone(),
                 proof_use,
+                subject_id: subject_id.clone(),
                 attempt_fast_fail_until: expires_at,
             },
         ));

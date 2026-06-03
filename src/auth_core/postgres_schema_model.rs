@@ -11,6 +11,10 @@ const POSTGRES_AUTH_CORE_TABLES: &[PostgresAuthCoreTable] = &[
     PostgresAuthCoreTable::ActiveProofChallenge,
     PostgresAuthCoreTable::ActiveProofChallengeDeliveryKey,
     PostgresAuthCoreTable::SubjectAuthState,
+    PostgresAuthCoreTable::CredentialInstance,
+    PostgresAuthCoreTable::CredentialRecoveryAuthority,
+    PostgresAuthCoreTable::LifecycleAuthoritySource,
+    PostgresAuthCoreTable::PendingCredentialLifecycleAction,
     PostgresAuthCoreTable::AuditEvent,
     PostgresAuthCoreTable::CoreDurableEffectCommand,
 ];
@@ -57,6 +61,17 @@ impl PostgresAuthCoreSchemaContract {
                 PostgresAuthCoreTable::ActiveProofChallenge
             }
             CoreStorageTarget::SubjectAuthState(_) => PostgresAuthCoreTable::SubjectAuthState,
+            CoreStorageTarget::CredentialInstance(_) => PostgresAuthCoreTable::CredentialInstance,
+            CoreStorageTarget::CredentialRecoveryAuthoritiesForCredential(_) => {
+                PostgresAuthCoreTable::CredentialRecoveryAuthority
+            }
+            CoreStorageTarget::LifecycleAuthoritySource { .. } => {
+                PostgresAuthCoreTable::LifecycleAuthoritySource
+            }
+            CoreStorageTarget::PendingCredentialLifecycleAction(_)
+            | CoreStorageTarget::OpenPendingCredentialLifecycleActionForTarget { .. } => {
+                PostgresAuthCoreTable::PendingCredentialLifecycleAction
+            }
             CoreStorageTarget::AuditEvents => PostgresAuthCoreTable::AuditEvent,
             CoreStorageTarget::CoreDurableEffectCommands => {
                 PostgresAuthCoreTable::CoreDurableEffectCommand
@@ -96,6 +111,14 @@ pub enum PostgresAuthCoreTable {
     ActiveProofChallengeDeliveryKey,
     /// Per-subject auth-state rows.
     SubjectAuthState,
+    /// Core-visible credential-instance metadata.
+    CredentialInstance,
+    /// Recovery-authority edges for credential lifecycle actions.
+    CredentialRecoveryAuthority,
+    /// Mapping from lifecycle evidence sources to effective recovery authorities.
+    LifecycleAuthoritySource,
+    /// Delayed credential lifecycle actions.
+    PendingCredentialLifecycleAction,
     /// Append-only audit event stream.
     AuditEvent,
     /// Durable core effect command outbox.
@@ -116,6 +139,10 @@ impl PostgresAuthCoreTable {
             Self::ActiveProofChallenge => "auth_active_proof_challenges",
             Self::ActiveProofChallengeDeliveryKey => "auth_active_proof_challenge_delivery_keys",
             Self::SubjectAuthState => "auth_subject_state",
+            Self::CredentialInstance => "auth_credential_instances",
+            Self::CredentialRecoveryAuthority => "auth_credential_recovery_authorities",
+            Self::LifecycleAuthoritySource => "auth_lifecycle_authority_sources",
+            Self::PendingCredentialLifecycleAction => "auth_credential_lifecycle_pending_actions",
             Self::AuditEvent => "auth_audit_events",
             Self::CoreDurableEffectCommand => "auth_core_durable_effect_commands",
         }
@@ -140,6 +167,12 @@ impl PostgresAuthCoreTable {
                 CoreStorageRecordKind::ActiveProofChallenge
             }
             Self::SubjectAuthState => CoreStorageRecordKind::SubjectAuthState,
+            Self::CredentialInstance => CoreStorageRecordKind::CredentialInstance,
+            Self::CredentialRecoveryAuthority => CoreStorageRecordKind::CredentialRecoveryAuthority,
+            Self::LifecycleAuthoritySource => CoreStorageRecordKind::LifecycleAuthoritySource,
+            Self::PendingCredentialLifecycleAction => {
+                CoreStorageRecordKind::PendingCredentialLifecycleAction
+            }
             Self::AuditEvent => CoreStorageRecordKind::AuditEvent,
             Self::CoreDurableEffectCommand => CoreStorageRecordKind::CoreDurableEffectCommand,
         }
@@ -325,6 +358,70 @@ impl PostgresAuthCoreTableContract {
                 vec![primary_key(["subject_id"])],
                 PostgresTableWritePolicy::MutableRows,
             ),
+            PostgresAuthCoreTable::CredentialInstance => table_contract(
+                table,
+                vec![
+                    id_column("credential_instance_id", false),
+                    id_column("subject_id", false),
+                    core_enum_column("credential_kind", false),
+                    validated_text_column("method_label", false, METHOD_LABEL_MAX_BYTES),
+                    core_enum_column("lifecycle_state", false),
+                    unix_seconds_column("created_at", false),
+                    unix_seconds_column("updated_at", false),
+                ],
+                vec![primary_key(["credential_instance_id"])],
+                PostgresTableWritePolicy::MutableRows,
+            ),
+            PostgresAuthCoreTable::CredentialRecoveryAuthority => table_contract(
+                table,
+                vec![
+                    id_column("target_credential_instance_id", false),
+                    core_enum_column("lifecycle_action", false),
+                    id_column("authority_id", false),
+                    core_enum_column("authority_timing", false),
+                    unix_seconds_column("created_at", false),
+                ],
+                vec![primary_key([
+                    "target_credential_instance_id",
+                    "lifecycle_action",
+                    "authority_id",
+                    "authority_timing",
+                ])],
+                PostgresTableWritePolicy::MutableRows,
+            ),
+            PostgresAuthCoreTable::LifecycleAuthoritySource => table_contract(
+                table,
+                vec![
+                    core_enum_column("source_kind", false),
+                    id_column("source_id", false),
+                    id_column("authority_id", false),
+                    unix_seconds_column("created_at", false),
+                ],
+                vec![primary_key(["source_kind", "source_id", "authority_id"])],
+                PostgresTableWritePolicy::MutableRows,
+            ),
+            PostgresAuthCoreTable::PendingCredentialLifecycleAction => table_contract(
+                table,
+                vec![
+                    id_column("pending_action_id", false),
+                    id_column("subject_id", false),
+                    id_column("target_credential_instance_id", false),
+                    core_enum_column("lifecycle_action", false),
+                    unix_seconds_column("requested_at", false),
+                    unix_seconds_column("earliest_execute_at", false),
+                    unix_seconds_column("expires_at", false),
+                    unix_seconds_column("closed_at", true),
+                ],
+                vec![
+                    primary_key(["pending_action_id"]),
+                    unique(
+                        "credential_lifecycle_open_pending_action",
+                        ["target_credential_instance_id", "lifecycle_action"],
+                        Some(PostgresUniquePredicate::OpenRow),
+                    ),
+                ],
+                PostgresTableWritePolicy::MutableRows,
+            ),
             PostgresAuthCoreTable::AuditEvent => table_contract(
                 table,
                 vec![
@@ -352,6 +449,7 @@ impl PostgresAuthCoreTableContract {
                     identity_column("effect_command_id"),
                     core_enum_column("kind", false),
                     id_column("subject_id", true),
+                    core_enum_column("security_notification_kind", true),
                     id_column("challenge_id", true),
                     validated_text_column("proof_method_label", true, METHOD_LABEL_MAX_BYTES),
                     validated_text_column(

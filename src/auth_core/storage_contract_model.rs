@@ -9,6 +9,10 @@ const CORE_STORAGE_RECORD_KINDS: &[CoreStorageRecordKind] = &[
     CoreStorageRecordKind::ActiveProofContinuationSecret,
     CoreStorageRecordKind::ActiveProofChallenge,
     CoreStorageRecordKind::SubjectAuthState,
+    CoreStorageRecordKind::CredentialInstance,
+    CoreStorageRecordKind::CredentialRecoveryAuthority,
+    CoreStorageRecordKind::LifecycleAuthoritySource,
+    CoreStorageRecordKind::PendingCredentialLifecycleAction,
     CoreStorageRecordKind::AuditEvent,
     CoreStorageRecordKind::CoreDurableEffectCommand,
 ];
@@ -43,6 +47,14 @@ pub enum CoreStorageRecordKind {
     ActiveProofChallenge,
     /// Per-subject auth state, including the subject-wide revocation cutoff.
     SubjectAuthState,
+    /// Core-visible credential-instance lifecycle metadata.
+    CredentialInstance,
+    /// Credential lifecycle recovery-authority edge.
+    CredentialRecoveryAuthority,
+    /// Mapping from a lifecycle evidence source to an effective recovery authority.
+    LifecycleAuthoritySource,
+    /// Delayed credential lifecycle action.
+    PendingCredentialLifecycleAction,
     /// Immutable audit event.
     AuditEvent,
     /// Durable command to deliver a core-owned external effect after commit.
@@ -257,6 +269,58 @@ impl CorePreconditionStorageContract {
                     StorageValidationRequirement::NoOpenOutOfBandChallengeForDedupeKey,
                 ],
             },
+            Precondition::CredentialInstanceStillActive {
+                credential_instance_id,
+                ..
+            } => Self {
+                kind: CorePreconditionKind::CredentialInstanceStillActive,
+                lock_requirements: vec![StorageLockRequirement::LockExistingRowForUpdate(
+                    CoreStorageTarget::CredentialInstance(credential_instance_id.clone()),
+                )],
+                validation_requirements: vec![
+                    StorageValidationRequirement::CredentialInstanceStillActive,
+                ],
+            },
+            Precondition::NoOpenPendingCredentialLifecycleActionForTarget {
+                target_credential_instance_id,
+                action,
+                ..
+            } => Self {
+                kind: CorePreconditionKind::NoOpenPendingCredentialLifecycleActionForTarget,
+                lock_requirements: vec![
+                    StorageLockRequirement::EnforceOpenPendingCredentialLifecycleActionUniqueness {
+                        target_credential_instance_id: target_credential_instance_id.clone(),
+                        action: *action,
+                    },
+                ],
+                validation_requirements: vec![
+                    StorageValidationRequirement::NoOpenPendingCredentialLifecycleActionForTarget,
+                ],
+            },
+            Precondition::PendingCredentialLifecycleActionStillExecutable {
+                pending_action_id,
+                ..
+            } => Self {
+                kind: CorePreconditionKind::PendingCredentialLifecycleActionStillExecutable,
+                lock_requirements: vec![StorageLockRequirement::LockExistingRowForUpdate(
+                    CoreStorageTarget::PendingCredentialLifecycleAction(pending_action_id.clone()),
+                )],
+                validation_requirements: vec![
+                    StorageValidationRequirement::PendingCredentialLifecycleActionStillExecutable,
+                ],
+            },
+            Precondition::PendingCredentialLifecycleActionStillCancellableForTarget {
+                pending_action_id,
+                ..
+            } => Self {
+                kind: CorePreconditionKind::PendingCredentialLifecycleActionStillCancellableForTarget,
+                lock_requirements: vec![StorageLockRequirement::LockExistingRowForUpdate(
+                    CoreStorageTarget::PendingCredentialLifecycleAction(pending_action_id.clone()),
+                )],
+                validation_requirements: vec![
+                    StorageValidationRequirement::PendingCredentialLifecycleActionStillCancellableForTarget,
+                ],
+            },
         }
     }
 
@@ -397,6 +461,49 @@ impl CoreMutationStorageContract {
                         subject_id: subject_id.clone(),
                     },
             },
+            Mutation::RecordCredentialLifecycleActionAuthorized {
+                target_credential_instance_id,
+                ..
+            } => Self {
+                kind: CoreMutationKind::RecordCredentialLifecycleActionAuthorized,
+                write_requirement: StorageWriteRequirement::UpdateLockedRow(
+                    CoreStorageTarget::CredentialInstance(target_credential_instance_id.clone()),
+                ),
+            },
+            Mutation::CreatePendingCredentialLifecycleAction(record) => Self {
+                kind: CoreMutationKind::CreatePendingCredentialLifecycleAction,
+                write_requirement: StorageWriteRequirement::InsertUnique(
+                    CoreStorageTarget::PendingCredentialLifecycleAction(
+                        record.pending_action_id.clone(),
+                    ),
+                ),
+            },
+            Mutation::RecordCredentialLifecycleActionExecuted {
+                target_credential_instance_id,
+                ..
+            } => Self {
+                kind: CoreMutationKind::RecordCredentialLifecycleActionExecuted,
+                write_requirement: StorageWriteRequirement::UpdateLockedRow(
+                    CoreStorageTarget::CredentialInstance(target_credential_instance_id.clone()),
+                ),
+            },
+            Mutation::SetCredentialLifecycleState {
+                credential_instance_id,
+                ..
+            } => Self {
+                kind: CoreMutationKind::SetCredentialLifecycleState,
+                write_requirement: StorageWriteRequirement::UpdateLockedRow(
+                    CoreStorageTarget::CredentialInstance(credential_instance_id.clone()),
+                ),
+            },
+            Mutation::ClosePendingCredentialLifecycleAction {
+                pending_action_id, ..
+            } => Self {
+                kind: CoreMutationKind::ClosePendingCredentialLifecycleAction,
+                write_requirement: StorageWriteRequirement::UpdateLockedRow(
+                    CoreStorageTarget::PendingCredentialLifecycleAction(pending_action_id.clone()),
+                ),
+            },
         }
     }
 
@@ -474,6 +581,14 @@ pub enum CorePreconditionKind {
     OutOfBandChallengeResendStillAllowed,
     /// No open out-of-band challenge exists for the dedupe key.
     NoOpenOutOfBandChallengeForDedupeKey,
+    /// Credential instance is still active.
+    CredentialInstanceStillActive,
+    /// No open pending credential lifecycle action exists for the target/action pair.
+    NoOpenPendingCredentialLifecycleActionForTarget,
+    /// Pending credential lifecycle action is still open, mature, unexpired, and target-matched.
+    PendingCredentialLifecycleActionStillExecutable,
+    /// Pending credential lifecycle action is still open, unexpired, and target-matched.
+    PendingCredentialLifecycleActionStillCancellableForTarget,
 }
 
 /// Core mutation kind.
@@ -509,6 +624,16 @@ pub enum CoreMutationKind {
     RevokeTrustedDeviceCredential,
     /// Raise the subject-wide auth revocation cutoff.
     RaiseSubjectAuthRevocationCutoff,
+    /// Record an immediately authorized credential lifecycle action.
+    RecordCredentialLifecycleActionAuthorized,
+    /// Create a delayed credential lifecycle action.
+    CreatePendingCredentialLifecycleAction,
+    /// Record an executed credential lifecycle action.
+    RecordCredentialLifecycleActionExecuted,
+    /// Set a credential's core-visible lifecycle state.
+    SetCredentialLifecycleState,
+    /// Close a delayed credential lifecycle action.
+    ClosePendingCredentialLifecycleAction,
 }
 
 /// Concrete storage target.
@@ -550,6 +675,28 @@ pub enum CoreStorageTarget {
     },
     /// One subject auth-state row.
     SubjectAuthState(SubjectId),
+    /// One credential-instance metadata row.
+    CredentialInstance(VerifiedProofSourceId),
+    /// Recovery-authority rows for one target credential.
+    CredentialRecoveryAuthoritiesForCredential(VerifiedProofSourceId),
+    /// One source-to-recovery-authority mapping row.
+    LifecycleAuthoritySource {
+        /// Source kind wire id.
+        source_kind: LifecycleAuthoritySourceKind,
+        /// Source id.
+        source_id: VerifiedProofSourceId,
+        /// Effective recovery authority id.
+        authority_id: RecoveryAuthorityId,
+    },
+    /// One delayed credential lifecycle action.
+    PendingCredentialLifecycleAction(PendingCredentialLifecycleActionId),
+    /// Open pending credential lifecycle actions for one target/action pair.
+    OpenPendingCredentialLifecycleActionForTarget {
+        /// Target credential instance.
+        target_credential_instance_id: VerifiedProofSourceId,
+        /// Lifecycle action.
+        action: CredentialLifecycleAction,
+    },
     /// Open out-of-band challenge dedupe key.
     OpenOutOfBandChallengeDedupeKey(OutOfBandChallengeDedupeKey),
     /// Audit event append stream.
@@ -578,10 +725,36 @@ impl CoreStorageTarget {
                 CoreStorageRecordKind::ActiveProofChallenge
             }
             Self::SubjectAuthState(_) => CoreStorageRecordKind::SubjectAuthState,
+            Self::CredentialInstance(_) => CoreStorageRecordKind::CredentialInstance,
+            Self::CredentialRecoveryAuthoritiesForCredential(_) => {
+                CoreStorageRecordKind::CredentialRecoveryAuthority
+            }
+            Self::LifecycleAuthoritySource { .. } => {
+                CoreStorageRecordKind::LifecycleAuthoritySource
+            }
+            Self::PendingCredentialLifecycleAction(_)
+            | Self::OpenPendingCredentialLifecycleActionForTarget { .. } => {
+                CoreStorageRecordKind::PendingCredentialLifecycleAction
+            }
             Self::AuditEvents => CoreStorageRecordKind::AuditEvent,
             Self::CoreDurableEffectCommands => CoreStorageRecordKind::CoreDurableEffectCommand,
         }
     }
+}
+
+/// Stored lifecycle evidence source kind.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum LifecycleAuthoritySourceKind {
+    /// A credential-instance proof source.
+    CredentialInstance,
+    /// An out-of-band identifier proof source.
+    OutOfBandIdentifier,
+    /// A federated or otherwise external authority proof source.
+    ExternalAuthority,
+    /// A live authenticated session.
+    AuthenticatedSession,
+    /// A Paranoid-shaped admin/support intervention.
+    AdminSupportIntervention,
 }
 
 /// Lock or uniqueness requirement inside the atomic transaction.
@@ -598,6 +771,13 @@ pub enum StorageLockRequirement {
     EnforceOpenOutOfBandChallengeDedupeUniqueness {
         /// Dedupe key.
         challenge_dedupe_key: OutOfBandChallengeDedupeKey,
+    },
+    /// Enforce one open pending action for one target/action pair.
+    EnforceOpenPendingCredentialLifecycleActionUniqueness {
+        /// Target credential instance.
+        target_credential_instance_id: VerifiedProofSourceId,
+        /// Lifecycle action.
+        action: CredentialLifecycleAction,
     },
 }
 
@@ -622,6 +802,14 @@ pub enum StorageValidationRequirement {
     NoOpenOutOfBandChallengeForDedupeKey,
     /// Subject auth-state cutoff does not invalidate the record being committed.
     SubjectAuthStateDoesNotInvalidateRecord,
+    /// Credential instance is active and owned by the expected subject.
+    CredentialInstanceStillActive,
+    /// No open pending credential lifecycle action exists for the target/action pair.
+    NoOpenPendingCredentialLifecycleActionForTarget,
+    /// Pending credential lifecycle action is still open, mature, unexpired, and target-matched.
+    PendingCredentialLifecycleActionStillExecutable,
+    /// Pending credential lifecycle action is still open, unexpired, and target-matched.
+    PendingCredentialLifecycleActionStillCancellableForTarget,
 }
 
 /// Required storage write behavior.

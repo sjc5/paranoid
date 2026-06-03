@@ -150,7 +150,12 @@ fn session_cookie_response_is_commit_backed(
         | Mutation::DeleteActiveProofAttempt { .. }
         | Mutation::RevokeSession { .. }
         | Mutation::RevokeTrustedDeviceCredential { .. }
-        | Mutation::RaiseSubjectAuthRevocationCutoff { .. } => false,
+        | Mutation::RaiseSubjectAuthRevocationCutoff { .. }
+        | Mutation::RecordCredentialLifecycleActionAuthorized { .. }
+        | Mutation::CreatePendingCredentialLifecycleAction(_)
+        | Mutation::RecordCredentialLifecycleActionExecuted { .. }
+        | Mutation::SetCredentialLifecycleState { .. }
+        | Mutation::ClosePendingCredentialLifecycleAction { .. } => false,
     })
 }
 
@@ -162,6 +167,7 @@ fn active_proof_continuation_cookie_response_is_commit_backed(
         Mutation::CreateActiveProofAttempt(attempt) => {
             attempt.attempt_id == cookie.attempt_id
                 && attempt.proof_use == cookie.proof_use
+                && attempt.subject_id == cookie.subject_id
                 && attempt.expires_at == cookie.attempt_fast_fail_until
                 && atomic_work.fresh_credential_secrets.contains(
                     &FreshCredentialSecret::ActiveProofContinuation {
@@ -182,7 +188,12 @@ fn active_proof_continuation_cookie_response_is_commit_backed(
         | Mutation::DeleteActiveProofAttempt { .. }
         | Mutation::RevokeSession { .. }
         | Mutation::RevokeTrustedDeviceCredential { .. }
-        | Mutation::RaiseSubjectAuthRevocationCutoff { .. } => false,
+        | Mutation::RaiseSubjectAuthRevocationCutoff { .. }
+        | Mutation::RecordCredentialLifecycleActionAuthorized { .. }
+        | Mutation::CreatePendingCredentialLifecycleAction(_)
+        | Mutation::RecordCredentialLifecycleActionExecuted { .. }
+        | Mutation::SetCredentialLifecycleState { .. }
+        | Mutation::ClosePendingCredentialLifecycleAction { .. } => false,
     })
 }
 
@@ -222,7 +233,12 @@ fn trusted_device_cookie_response_is_commit_backed(
         | Mutation::DeleteActiveProofAttempt { .. }
         | Mutation::RevokeSession { .. }
         | Mutation::RevokeTrustedDeviceCredential { .. }
-        | Mutation::RaiseSubjectAuthRevocationCutoff { .. } => false,
+        | Mutation::RaiseSubjectAuthRevocationCutoff { .. }
+        | Mutation::RecordCredentialLifecycleActionAuthorized { .. }
+        | Mutation::CreatePendingCredentialLifecycleAction(_)
+        | Mutation::RecordCredentialLifecycleActionExecuted { .. }
+        | Mutation::SetCredentialLifecycleState { .. }
+        | Mutation::ClosePendingCredentialLifecycleAction { .. } => false,
     })
 }
 
@@ -252,7 +268,12 @@ fn active_proof_challenge_cookie_response_is_commit_backed(
         | Mutation::DeleteActiveProofAttempt { .. }
         | Mutation::RevokeSession { .. }
         | Mutation::RevokeTrustedDeviceCredential { .. }
-        | Mutation::RaiseSubjectAuthRevocationCutoff { .. } => false,
+        | Mutation::RaiseSubjectAuthRevocationCutoff { .. }
+        | Mutation::RecordCredentialLifecycleActionAuthorized { .. }
+        | Mutation::CreatePendingCredentialLifecycleAction(_)
+        | Mutation::RecordCredentialLifecycleActionExecuted { .. }
+        | Mutation::SetCredentialLifecycleState { .. }
+        | Mutation::ClosePendingCredentialLifecycleAction { .. } => false,
     })
 }
 
@@ -434,7 +455,12 @@ fn expected_fresh_credential_secrets_for_mutations(
             | Mutation::DeleteActiveProofAttempt { .. }
             | Mutation::RevokeSession { .. }
             | Mutation::RevokeTrustedDeviceCredential { .. }
-            | Mutation::RaiseSubjectAuthRevocationCutoff { .. } => None,
+            | Mutation::RaiseSubjectAuthRevocationCutoff { .. }
+            | Mutation::RecordCredentialLifecycleActionAuthorized { .. }
+            | Mutation::CreatePendingCredentialLifecycleAction(_)
+            | Mutation::RecordCredentialLifecycleActionExecuted { .. }
+            | Mutation::SetCredentialLifecycleState { .. }
+            | Mutation::ClosePendingCredentialLifecycleAction { .. } => None,
         })
         .collect()
 }

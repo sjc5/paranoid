@@ -252,11 +252,21 @@ pub(super) fn active_attempt_with_satisfied_proofs(
     proof_use: ProofUse,
     satisfied_proofs: Vec<ProofSummary>,
 ) -> ActiveProofAttemptRecord {
-    ActiveProofAttemptRecord {
-        satisfied_proofs: satisfied_proofs
+    active_attempt_with_satisfied_proof_records(
+        proof_use,
+        satisfied_proofs
             .into_iter()
             .map(SatisfiedProof::new_without_source)
             .collect(),
+    )
+}
+
+pub(super) fn active_attempt_with_satisfied_proof_records(
+    proof_use: ProofUse,
+    satisfied_proofs: Vec<SatisfiedProof>,
+) -> ActiveProofAttemptRecord {
+    ActiveProofAttemptRecord {
+        satisfied_proofs,
         ..active_attempt(proof_use)
     }
 }
@@ -306,8 +316,21 @@ pub(super) fn loaded_attempt_with_satisfied_proofs(
     proof_use: ProofUse,
     satisfied_proofs: Vec<ProofSummary>,
 ) -> LoadedState {
+    loaded_attempt_with_satisfied_proof_records(
+        proof_use,
+        satisfied_proofs
+            .into_iter()
+            .map(SatisfiedProof::new_without_source)
+            .collect(),
+    )
+}
+
+pub(super) fn loaded_attempt_with_satisfied_proof_records(
+    proof_use: ProofUse,
+    satisfied_proofs: Vec<SatisfiedProof>,
+) -> LoadedState {
     LoadedState {
-        active_proof_attempt_record: Some(active_attempt_with_satisfied_proofs(
+        active_proof_attempt_record: Some(active_attempt_with_satisfied_proof_records(
             proof_use,
             satisfied_proofs,
         )),
@@ -321,8 +344,23 @@ pub(super) fn loaded_session_and_attempt(
     proof_use: ProofUse,
     satisfied_proofs: Vec<ProofSummary>,
 ) -> LoadedState {
+    loaded_session_and_attempt_with_satisfied_proof_records(
+        expires_at,
+        proof_use,
+        satisfied_proofs
+            .into_iter()
+            .map(SatisfiedProof::new_without_source)
+            .collect(),
+    )
+}
+
+pub(super) fn loaded_session_and_attempt_with_satisfied_proof_records(
+    expires_at: u64,
+    proof_use: ProofUse,
+    satisfied_proofs: Vec<SatisfiedProof>,
+) -> LoadedState {
     LoadedState {
-        active_proof_attempt_record: Some(active_attempt_with_satisfied_proofs(
+        active_proof_attempt_record: Some(active_attempt_with_satisfied_proof_records(
             proof_use,
             satisfied_proofs,
         )),
@@ -336,7 +374,24 @@ pub(super) fn loaded_trusted_device_and_attempt(
     proof_use: ProofUse,
     satisfied_proofs: Vec<ProofSummary>,
 ) -> LoadedState {
-    let mut attempt = active_attempt_with_satisfied_proofs(proof_use, satisfied_proofs);
+    loaded_trusted_device_and_attempt_with_satisfied_proof_records(
+        silent_revival_until,
+        expires_at,
+        proof_use,
+        satisfied_proofs
+            .into_iter()
+            .map(SatisfiedProof::new_without_source)
+            .collect(),
+    )
+}
+
+pub(super) fn loaded_trusted_device_and_attempt_with_satisfied_proof_records(
+    silent_revival_until: u64,
+    expires_at: u64,
+    proof_use: ProofUse,
+    satisfied_proofs: Vec<SatisfiedProof>,
+) -> LoadedState {
+    let mut attempt = active_attempt_with_satisfied_proof_records(proof_use, satisfied_proofs);
     attempt.expires_at = at(1_000);
     LoadedState {
         active_proof_attempt_record: Some(attempt),
@@ -352,8 +407,65 @@ pub(super) fn satisfied_proof(proof: ProofSummary) -> SatisfiedProof {
     SatisfiedProof::new_without_source(proof)
 }
 
+pub(super) fn satisfied_proof_with_source(
+    proof: ProofSummary,
+    source: VerifiedProofSource,
+) -> SatisfiedProof {
+    SatisfiedProof::new(proof, Some(source))
+}
+
 pub(super) fn proof_source(value: &str) -> VerifiedProofSource {
     VerifiedProofSource::new(VerifiedProofSourceKind::CredentialInstance, id(value))
+}
+
+pub(super) fn message_signature_credential_metadata(
+    credential_instance_id: &str,
+) -> CredentialInstanceMetadata {
+    CredentialInstanceMetadata::new(
+        id(credential_instance_id),
+        id("subject"),
+        CredentialInstanceKind::MessageSignatureVerifier,
+        "password_signature",
+        CredentialLifecycleState::Active,
+    )
+    .expect("credential metadata")
+}
+
+pub(super) fn credential_lifecycle_context<
+    const AUTHORITY_COUNT: usize,
+    const EVIDENCE_COUNT: usize,
+>(
+    target_credential: CredentialInstanceMetadata,
+    authorities: [CredentialRecoveryAuthority; AUTHORITY_COUNT],
+    evidence: [LifecycleAuthorityEvidence; EVIDENCE_COUNT],
+) -> CredentialLifecycleActionContext {
+    CredentialLifecycleActionContext::new(
+        target_credential,
+        CredentialRecoveryAuthorityGraph::new(authorities).expect("authority graph"),
+        evidence,
+    )
+}
+
+pub(super) fn credential_instance_lifecycle_evidence<const N: usize>(
+    source_id: &str,
+    authority_ids: [RecoveryAuthorityId; N],
+) -> LifecycleAuthorityEvidence {
+    LifecycleAuthorityEvidence::from_verified_proof_source(
+        VerifiedProofSource::new(VerifiedProofSourceKind::CredentialInstance, id(source_id)),
+        authority_ids,
+    )
+    .expect("lifecycle evidence")
+}
+
+pub(super) fn out_of_band_identifier_lifecycle_evidence<const N: usize>(
+    source_id: &str,
+    authority_ids: [RecoveryAuthorityId; N],
+) -> LifecycleAuthorityEvidence {
+    LifecycleAuthorityEvidence::from_verified_proof_source(
+        VerifiedProofSource::new(VerifiedProofSourceKind::OutOfBandIdentifier, id(source_id)),
+        authority_ids,
+    )
+    .expect("lifecycle evidence")
 }
 
 pub(super) fn proof_method(family: ProofFamily) -> ProofMethodDeclaration {
@@ -489,6 +601,22 @@ pub(super) fn recovery_code_method_commit_work() -> MethodCommitWork {
     .expect("method commit work")
 }
 
+pub(super) fn password_reset_method_commit_work(payload: &[u8]) -> MethodCommitWork {
+    MethodCommitWork::new(
+        proof(ProofFamily::MessageSignature),
+        vec![
+            MethodCommitPrecondition::new("password_verifier_version_current", payload)
+                .expect("method work item"),
+        ],
+        vec![
+            MethodCommitMutation::new("replace_password_verifier", payload)
+                .expect("method work item"),
+        ],
+        Vec::new(),
+    )
+    .expect("method commit work")
+}
+
 pub(super) fn out_of_band_method_commit_work() -> MethodCommitWork {
     MethodCommitWork::new(
         proof(ProofFamily::OutOfBandCode),
@@ -608,6 +736,69 @@ pub(super) fn plan_has_trusted_device_ownership_guard(
     })
 }
 
+pub(super) fn plan_has_credential_instance_still_active_guard(
+    plan: &CommitPlan,
+    credential_instance_id: &VerifiedProofSourceId,
+) -> bool {
+    plan.preconditions.iter().any(|precondition| {
+        matches!(
+            precondition,
+            Precondition::CredentialInstanceStillActive {
+                credential_instance_id: guarded_credential_instance_id,
+                ..
+            } if guarded_credential_instance_id == credential_instance_id
+        )
+    })
+}
+
+pub(super) fn plan_has_no_open_pending_lifecycle_action_guard(
+    plan: &CommitPlan,
+    target_credential_instance_id: &VerifiedProofSourceId,
+    action: CredentialLifecycleAction,
+) -> bool {
+    plan.preconditions.iter().any(|precondition| {
+        matches!(
+            precondition,
+            Precondition::NoOpenPendingCredentialLifecycleActionForTarget {
+                target_credential_instance_id: guarded_target_credential_instance_id,
+                action: guarded_action,
+                ..
+            } if guarded_target_credential_instance_id == target_credential_instance_id
+                && *guarded_action == action
+        )
+    })
+}
+
+pub(super) fn plan_has_pending_lifecycle_action_executable_guard(
+    plan: &CommitPlan,
+    pending_action_id: &PendingCredentialLifecycleActionId,
+) -> bool {
+    plan.preconditions.iter().any(|precondition| {
+        matches!(
+            precondition,
+            Precondition::PendingCredentialLifecycleActionStillExecutable {
+                pending_action_id: guarded_pending_action_id,
+                ..
+            } if guarded_pending_action_id == pending_action_id
+        )
+    })
+}
+
+pub(super) fn plan_has_pending_lifecycle_action_cancellable_for_target_guard(
+    plan: &CommitPlan,
+    pending_action_id: &PendingCredentialLifecycleActionId,
+) -> bool {
+    plan.preconditions.iter().any(|precondition| {
+        matches!(
+            precondition,
+            Precondition::PendingCredentialLifecycleActionStillCancellableForTarget {
+                pending_action_id: guarded_pending_action_id,
+                ..
+            } if guarded_pending_action_id == pending_action_id
+        )
+    })
+}
+
 pub(super) fn precondition_kind_names(plan: &CommitPlan) -> Vec<&'static str> {
     plan.preconditions
         .iter()
@@ -627,6 +818,18 @@ pub(super) fn precondition_kind_names(plan: &CommitPlan) -> Vec<&'static str> {
             }
             Precondition::NoOpenOutOfBandChallengeForDedupeKey { .. } => {
                 "no_open_out_of_band_challenge_for_dedupe_key"
+            }
+            Precondition::CredentialInstanceStillActive { .. } => {
+                "credential_instance_still_active"
+            }
+            Precondition::NoOpenPendingCredentialLifecycleActionForTarget { .. } => {
+                "no_open_pending_credential_lifecycle_action_for_target"
+            }
+            Precondition::PendingCredentialLifecycleActionStillExecutable { .. } => {
+                "pending_credential_lifecycle_action_still_executable"
+            }
+            Precondition::PendingCredentialLifecycleActionStillCancellableForTarget { .. } => {
+                "pending_credential_lifecycle_action_still_cancellable_for_target"
             }
         })
         .collect()
@@ -738,6 +941,68 @@ pub(super) fn assert_state_dependent_mutations_have_commit_time_guards(
                 assert!(
                     plan_has_trusted_device_ownership_guard(plan, device_credential_id),
                     "{plan_name}: trusted-device revocation must guard ownership"
+                );
+            }
+            Mutation::RecordCredentialLifecycleActionAuthorized {
+                target_credential_instance_id,
+                ..
+            } => {
+                assert!(
+                    plan_has_credential_instance_still_active_guard(
+                        plan,
+                        target_credential_instance_id
+                    ),
+                    "{plan_name}: credential lifecycle authorization must guard the target credential"
+                );
+            }
+            Mutation::CreatePendingCredentialLifecycleAction(pending_action) => {
+                assert!(
+                    plan_has_credential_instance_still_active_guard(
+                        plan,
+                        &pending_action.target_credential_instance_id,
+                    ),
+                    "{plan_name}: pending credential lifecycle action must guard the target credential"
+                );
+                assert!(
+                    plan_has_no_open_pending_lifecycle_action_guard(
+                        plan,
+                        &pending_action.target_credential_instance_id,
+                        pending_action.action,
+                    ),
+                    "{plan_name}: pending credential lifecycle action must guard open-action uniqueness"
+                );
+            }
+            Mutation::RecordCredentialLifecycleActionExecuted {
+                target_credential_instance_id,
+                ..
+            } => {
+                assert!(
+                    plan_has_credential_instance_still_active_guard(
+                        plan,
+                        target_credential_instance_id
+                    ),
+                    "{plan_name}: credential lifecycle execution must guard the target credential"
+                );
+            }
+            Mutation::SetCredentialLifecycleState {
+                credential_instance_id,
+                ..
+            } => {
+                assert!(
+                    plan_has_credential_instance_still_active_guard(plan, credential_instance_id),
+                    "{plan_name}: credential lifecycle state change must guard the target credential"
+                );
+            }
+            Mutation::ClosePendingCredentialLifecycleAction {
+                pending_action_id, ..
+            } => {
+                assert!(
+                    plan_has_pending_lifecycle_action_executable_guard(plan, pending_action_id)
+                        || plan_has_pending_lifecycle_action_cancellable_for_target_guard(
+                            plan,
+                            pending_action_id
+                        ),
+                    "{plan_name}: pending credential lifecycle action closure must guard executable or cancellable state"
                 );
             }
             Mutation::CreateActiveProofAttempt(_)

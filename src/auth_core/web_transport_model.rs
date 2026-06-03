@@ -642,6 +642,7 @@ impl TryFrom<AuthActiveProofChallengeCookiePayload> for DecodedActiveProofChalle
 struct AuthActiveProofContinuationCookiePayload {
     attempt_id: Vec<u8>,
     proof_use: u8,
+    subject_id: Option<Vec<u8>>,
     credential_secret: Vec<u8>,
     attempt_fast_fail_until: u64,
 }
@@ -653,6 +654,11 @@ impl AuthActiveProofContinuationCookiePayload {
         Self {
             attempt_id: cookie.draft().attempt_id.as_bytes().to_vec(),
             proof_use: proof_use_wire_id(cookie.draft().proof_use),
+            subject_id: cookie
+                .draft()
+                .subject_id
+                .as_ref()
+                .map(|subject_id| subject_id.as_bytes().to_vec()),
             credential_secret: cookie.credential_secret().expose_secret().to_vec(),
             attempt_fast_fail_until: cookie.draft().attempt_fast_fail_until.get(),
         }
@@ -677,9 +683,15 @@ impl TryFrom<AuthActiveProofContinuationCookiePayload> for DecodedActiveProofCon
         mut payload: AuthActiveProofContinuationCookiePayload,
     ) -> Result<Self, Self::Error> {
         let attempt_id = ActiveProofAttemptId::from_bytes(payload.attempt_id.clone())?;
+        let subject_id = payload
+            .subject_id
+            .take()
+            .map(SubjectId::from_bytes)
+            .transpose()?;
         let draft = ActiveProofContinuationCookieDraft {
             attempt_id: attempt_id.clone(),
             proof_use: proof_use_from_wire_id(payload.proof_use)?,
+            subject_id,
             attempt_fast_fail_until: UnixSeconds::new(payload.attempt_fast_fail_until),
         };
         let secret = PresentedActiveProofContinuationCookieSecret::new(
