@@ -76,6 +76,10 @@ pub enum RecoveryAuthorityIdKind {}
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum PendingCredentialLifecycleActionIdKind {}
 
+/// Semantic marker for pending subject-lifecycle action identifiers.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub enum PendingSubjectLifecycleActionIdKind {}
+
 /// Opaque auth subject id.
 pub type SubjectId = Id<SubjectIdKind>;
 
@@ -99,6 +103,9 @@ pub type RecoveryAuthorityId = Id<RecoveryAuthorityIdKind>;
 
 /// Opaque identifier for one delayed credential-lifecycle action.
 pub type PendingCredentialLifecycleActionId = Id<PendingCredentialLifecycleActionIdKind>;
+
+/// Opaque identifier for one delayed subject-lifecycle action.
+pub type PendingSubjectLifecycleActionId = Id<PendingSubjectLifecycleActionIdKind>;
 
 /// Unix timestamp in whole seconds.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]

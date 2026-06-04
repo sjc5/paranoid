@@ -46,16 +46,23 @@ tradeoff. They need a concrete design before implementation continues downstream
   facade that constructs lifecycle authority, method work, or stale-action guards
   internally for the current reset boundary. Reset pending-action expiry is
   deadline-derived, and quiet cleanup closes expired open reset actions before replacement
-  scheduling without a user-visible cancellation notice.
+  scheduling without a user-visible cancellation notice. Lower-core subject-auth-state
+  deletion scheduling, execution, cancellation, subject-specific pending-action record,
+  preconditions, storage contract, audit, and notices are defined. Postgres runtime
+  execution and authenticated cancellation facades now load subject pending-action state
+  internally and derive cancellation authority from the live session. Mounted scheduling
+  and application-owned deletion integration are not built.
 - What are the pending-action records for long waits?
-    - scheduled subject/account deletion;
     - delayed second-factor reset;
     - delayed credential replacement;
     - cancellation conditions;
     - expiration;
     - atomic execution preconditions. Credential-targeted non-reset lower-core execution
       and Postgres runtime execution/cancellation facades are defined for replacement,
-      removal, and regeneration, but the concrete subject-targeted storage record is not.
+      removal, and regeneration. Subject-auth-state deletion has a lower-core
+      subject-targeted storage record and execution/cancellation preconditions. The
+      remaining long-wait record design is for second-factor reset, delayed replacement
+      scheduling, and any other non-deletion subject-targeted waits.
 - What default and minimum delay policies should Paranoid provide for email-only password
   reset, second-factor reset, and destructive account deletion?
 - What is the concrete Paranoid-shaped admin/support recovery intervention?

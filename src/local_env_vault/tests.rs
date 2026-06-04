@@ -167,7 +167,7 @@ fn vault_dir_resolves_from_absolute_root_and_relative_parent_path() {
     );
     assert!(matches!(
         vault_dir_from_root_and_relative_parent(Path::new("relative-root"), Path::new(".")),
-        Err(Error::VaultRootMustBeAbsolute { path }) if path == PathBuf::from("relative-root")
+        Err(Error::VaultRootMustBeAbsolute { path }) if path == Path::new("relative-root")
     ));
     assert!(matches!(
         vault_dir_from_root_and_relative_parent(&root, Path::new("")),
@@ -179,7 +179,7 @@ fn vault_dir_resolves_from_absolute_root_and_relative_parent_path() {
     ));
     assert!(matches!(
         vault_dir_from_root_and_relative_parent(&root, Path::new("../outside")),
-        Err(Error::VaultParentPathMustNotTraverseParent { path }) if path == PathBuf::from("../outside")
+        Err(Error::VaultParentPathMustNotTraverseParent { path }) if path == Path::new("../outside")
     ));
 }
 

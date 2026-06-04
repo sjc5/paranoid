@@ -356,6 +356,9 @@ impl CommandLoadedStateContract {
             Command::CancelPendingCredentialReset(_) => {}
             Command::ExecuteNonResetPendingCredentialLifecycleAction(_) => {}
             Command::CancelNonResetPendingCredentialLifecycleAction(_) => {}
+            Command::ScheduleSubjectAuthStateDeletion(_) => {}
+            Command::ExecutePendingSubjectAuthStateDeletion(_) => {}
+            Command::CancelPendingSubjectAuthStateDeletion(_) => {}
         }
         Ok(contract)
     }

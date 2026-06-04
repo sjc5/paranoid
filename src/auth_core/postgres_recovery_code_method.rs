@@ -10,8 +10,8 @@ use crate::crypto::{Base58, Encrypted, Keyset, MacOverSecret, SecretBytes, decry
 #[cfg(test)]
 use crate::db::Pool;
 use crate::db::{
-    DatabaseOperationKind, DbError, PgIdentifier, PgQualifiedTableName, PgSchemaName, Tx,
-    pooler_safe_query, pooler_safe_query_scalar, unparameterized_simple_query,
+    BootstrapConfig, DatabaseOperationKind, DbError, PgIdentifier, PgQualifiedTableName,
+    PgSchemaName, Tx, pooler_safe_query, pooler_safe_query_scalar, unparameterized_simple_query,
 };
 
 use super::postgres_method_runtime::{
@@ -26,7 +26,7 @@ const RECOVERY_CODE_STILL_UNUSED_OPERATION: &str = "recovery_code_still_unused";
 const RECOVERY_CODE_CONSUME_OPERATION: &str = "recovery_code_consume";
 const RECOVERY_CODE_SECRET_CONTEXT: &[u8] = b"paranoid/auth/v1/recovery-code-secret";
 const RECOVERY_CODE_TOKEN_CONTEXT: &[u8] = b"paranoid/auth/v1/recovery-code-token";
-const DEFAULT_RECOVERY_CODE_TABLE_PREFIX: &str = "__paranoid_auth_recovery_code_";
+const DEFAULT_RECOVERY_CODE_TABLE_PREFIX: &str = "auth_recovery_code_";
 
 pub(crate) struct PostgresRecoveryCodeMethodPlugin {
     config: PostgresRecoveryCodeMethodPluginConfig,
@@ -665,6 +665,17 @@ impl PostgresRecoveryCodeMethodPluginConfig {
         Ok(config)
     }
 
+    pub(crate) fn for_db_bootstrap_config(
+        bootstrap_config: &BootstrapConfig,
+    ) -> Result<Self, PostgresRecoveryCodeMethodError> {
+        Self::new(
+            Some(bootstrap_config.schema_name().clone()),
+            PgIdentifier::new(DEFAULT_RECOVERY_CODE_TABLE_PREFIX)
+                .map_err(DbError::from)
+                .map_err(PostgresRecoveryCodeMethodError::Database)?,
+        )
+    }
+
     fn table_name(&self, suffix: &'static str) -> Result<PgQualifiedTableName, DbError> {
         Ok(PgQualifiedTableName::new(
             self.schema.clone(),
@@ -683,11 +694,29 @@ impl PostgresRecoveryCodeMethodPluginConfig {
 
 impl Default for PostgresRecoveryCodeMethodPluginConfig {
     fn default() -> Self {
-        Self {
-            schema: None,
-            table_prefix: PgIdentifier::new(DEFAULT_RECOVERY_CODE_TABLE_PREFIX)
-                .expect("default recovery code table prefix must be a valid Postgres identifier"),
-        }
+        Self::for_db_bootstrap_config(&BootstrapConfig::default())
+            .expect("default recovery code method config must derive valid bootstrap table names")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_config_uses_schema_local_bootstrap_tables() {
+        let bootstrap_config = BootstrapConfig::default();
+        let config = PostgresRecoveryCodeMethodPluginConfig::default();
+        let table_names = config.table_names().expect("table names");
+
+        assert_eq!(
+            table_names.recovery_code_table.schema(),
+            Some(bootstrap_config.schema_name())
+        );
+        assert_eq!(
+            table_names.recovery_code_table.table().as_str(),
+            "auth_recovery_code_codes"
+        );
     }
 }
 

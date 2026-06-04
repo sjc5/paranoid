@@ -59,7 +59,7 @@ fn out_of_band_method_contract_requires_encrypted_fast_fail_cookie_and_core_deli
             .contains(&MethodChallengeCookieAssociatedData::AttemptId)
     );
     assert!(contract.pre_state_load().contains(
-        &MethodPreStateLoadResponsibility::VerifyStatelessFastFailMacFromEncryptedChallengeCookie
+        &MethodPreStateLoadResponsibility::StatelessFastFailMacFromEncryptedChallengeCookie
     ));
     assert_eq!(
         contract.verification().completion_input(),
@@ -67,11 +67,11 @@ fn out_of_band_method_contract_requires_encrypted_fast_fail_cookie_and_core_deli
     );
     assert_eq!(
         contract.verification().verified_proof_identity(),
-        MethodVerifiedProofIdentitySource::CoreDerivesFromEncryptedChallengeCookie
+        MethodVerifiedProofIdentitySource::EncryptedChallengeCookie
     );
     assert_eq!(
         contract.verification().subject_binding(),
-        MethodVerifiedProofSubjectBinding::MethodMayResolveSubject
+        MethodVerifiedProofSubjectBinding::MethodMayResolve
     );
     assert!(
         contract
@@ -114,12 +114,12 @@ fn online_guessable_message_signature_method_contract_requires_weak_gate_without
     assert!(
         contract
             .pre_state_load()
-            .contains(&MethodPreStateLoadResponsibility::VerifyBoundMessageSignature)
+            .contains(&MethodPreStateLoadResponsibility::BoundMessageSignature)
     );
     assert!(
         contract
             .pre_state_load()
-            .contains(&MethodPreStateLoadResponsibility::VerifyWeakProofGateBeforeStateLoad)
+            .contains(&MethodPreStateLoadResponsibility::WeakProofGateBeforeStateLoad)
     );
     assert_eq!(
         contract.challenge_cookie().kind(),
@@ -131,7 +131,7 @@ fn online_guessable_message_signature_method_contract_requires_weak_gate_without
     );
     assert_eq!(
         contract.verification().verified_proof_identity(),
-        MethodVerifiedProofIdentitySource::CoreDerivesFromEncryptedChallengeCookie
+        MethodVerifiedProofIdentitySource::EncryptedChallengeCookie
     );
 }
 
@@ -198,11 +198,11 @@ fn recovery_code_contract_requires_success_commit_work_and_keeps_response_effect
     );
     assert_eq!(
         contract.verification().verified_proof_identity(),
-        MethodVerifiedProofIdentitySource::CoreDerivesFromMethodDeclaration
+        MethodVerifiedProofIdentitySource::MethodDeclaration
     );
     assert_eq!(
         contract.verification().subject_binding(),
-        MethodVerifiedProofSubjectBinding::MustUseKnownAttemptSubject
+        MethodVerifiedProofSubjectBinding::KnownAttemptSubject
     );
     assert!(contract.pre_state_load().is_empty());
     assert_eq!(
@@ -248,15 +248,15 @@ fn shared_secret_otp_contract_uses_known_subject_configured_secret_without_chall
     );
     assert_eq!(
         contract.verification().verified_proof_identity(),
-        MethodVerifiedProofIdentitySource::CoreDerivesFromMethodDeclaration
+        MethodVerifiedProofIdentitySource::MethodDeclaration
     );
     assert_eq!(
         contract.verification().subject_binding(),
-        MethodVerifiedProofSubjectBinding::MustUseKnownAttemptSubject
+        MethodVerifiedProofSubjectBinding::KnownAttemptSubject
     );
     assert_eq!(
         contract.pre_state_load(),
-        &[MethodPreStateLoadResponsibility::VerifyWeakProofGateBeforeStateLoad]
+        &[MethodPreStateLoadResponsibility::WeakProofGateBeforeStateLoad]
     );
     assert_eq!(
         contract.post_state_load(),
@@ -297,9 +297,9 @@ fn challenge_bound_shared_secret_otp_contract_uses_configured_secret_fast_fail_b
     assert_eq!(
         contract.pre_state_load(),
         &[
-            MethodPreStateLoadResponsibility::VerifyEncryptedChallengeCookie,
-            MethodPreStateLoadResponsibility::VerifyWeakProofGateBeforeStateLoad,
-            MethodPreStateLoadResponsibility::VerifyChallengeBoundConfiguredSecretFastFailBloomFilter,
+            MethodPreStateLoadResponsibility::EncryptedChallengeCookie,
+            MethodPreStateLoadResponsibility::WeakProofGateBeforeStateLoad,
+            MethodPreStateLoadResponsibility::ChallengeBoundConfiguredSecretFastFailBloomFilter,
         ]
     );
     assert_eq!(
@@ -312,7 +312,7 @@ fn challenge_bound_shared_secret_otp_contract_uses_configured_secret_fast_fail_b
     );
     assert_eq!(
         contract.verification().subject_binding(),
-        MethodVerifiedProofSubjectBinding::MustUseKnownAttemptSubject
+        MethodVerifiedProofSubjectBinding::KnownAttemptSubject
     );
     assert_eq!(
         contract.postgres_state()[0].purpose(),
@@ -356,11 +356,11 @@ fn trusted_device_method_contract_is_core_owned_not_plugin_lifecycle() {
     );
     assert_eq!(
         contract.verification().verified_proof_identity(),
-        MethodVerifiedProofIdentitySource::CoreDerivesFromTrustedDeviceCredential
+        MethodVerifiedProofIdentitySource::TrustedDeviceCredential
     );
     assert_eq!(
         contract.verification().subject_binding(),
-        MethodVerifiedProofSubjectBinding::CoreUsesTrustedDeviceCredentialSubject
+        MethodVerifiedProofSubjectBinding::TrustedDeviceCredentialSubject
     );
     assert!(
         contract

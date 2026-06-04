@@ -23,6 +23,18 @@ async fn fleet_schema_setup_and_validation_emit_expected_database_operation_shap
     observer.clear();
 
     store
+        .migrate_schema(&observed_pool)
+        .await
+        .expect("migrate already-current Fleet schema");
+    assert_eq!(
+        operation_shapes(observer.records()),
+        transaction_shapes_vec(
+            fleet_migrate_already_current_schema_in_current_transaction_shapes()
+        )
+    );
+    observer.clear();
+
+    store
         .validate_schema(&observed_pool)
         .await
         .expect("validate Fleet schema");

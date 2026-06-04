@@ -20,9 +20,9 @@ use super::super::postgres_totp_method::{
 };
 use crate::crypto::SecretBytes;
 use crate::db::{
-    DatabaseOperationObserver, PgIdentifier, PgQualifiedTableName, PgSchemaName, Pool, PoolConfig,
-    Tx, pooler_safe_query, pooler_safe_query_as, pooler_safe_query_scalar,
-    unparameterized_simple_query,
+    BootstrapConfig, DatabaseOperationObserver, PgIdentifier, PgQualifiedTableName, PgSchemaName,
+    Pool, PoolConfig, Tx, WritePool, pooler_safe_query, pooler_safe_query_as,
+    pooler_safe_query_scalar, unparameterized_simple_query,
 };
 use http::HeaderMap;
 use http::header::{COOKIE, HeaderValue};
@@ -234,15 +234,7 @@ impl PostgresRuntimeTestHarness {
         include_totp_plugin: bool,
         include_recovery_code_plugin: bool,
     ) -> Self {
-        let database_url = std::env::var("PARANOID_TEST_DATABASE_URL")
-            .ok()
-            .filter(|value| !value.trim().is_empty())
-            .or_else(|| {
-                std::env::var("TEST_DSN")
-                    .ok()
-                    .filter(|value| !value.trim().is_empty())
-            })
-            .expect("required auth Postgres runtime test database URL missing; run through the isolated DB harness so TEST_DSN or PARANOID_TEST_DATABASE_URL is set");
+        let database_url = required_auth_postgres_runtime_test_database_url();
 
         let raw_pool = Pool::connect(PoolConfig::new(SecretString::from(database_url)))
             .await
@@ -816,19 +808,17 @@ impl TestPostgresAuthMethodPlugin {
                 error.to_string(),
             )
         })?;
-        Ok(
-            super::super::postgres_method_runtime::VerifiedActiveProofMethodResponse::new(
-                verified_proof,
-                Vec::new(),
-            )
-            .map_err(|error| {
-                super::super::postgres_method_runtime::PostgresAuthMethodBuildError::plugin_rejected(
-                    &self.method,
-                    "active_proof_completion",
-                    error.to_string(),
-                )
-            })?,
+        super::super::postgres_method_runtime::VerifiedActiveProofMethodResponse::new(
+            verified_proof,
+            Vec::new(),
         )
+        .map_err(|error| {
+            super::super::postgres_method_runtime::PostgresAuthMethodBuildError::plugin_rejected(
+                &self.method,
+                "active_proof_completion",
+                error.to_string(),
+            )
+        })
     }
 }
 
@@ -908,10 +898,10 @@ fn test_response_challenge_prefix(family: ProofFamily) -> Option<&'static [u8]> 
     }
 }
 
-fn test_method_runtime_challenge_bytes<'a>(
-    method_challenge: &'a ActiveProofMethodChallengePresentation,
+fn test_method_runtime_challenge_bytes(
+    method_challenge: &ActiveProofMethodChallengePresentation,
     family: ProofFamily,
-) -> &'a [u8] {
+) -> &[u8] {
     method_challenge
         .as_bytes()
         .strip_prefix(
@@ -1695,6 +1685,75 @@ fn postgres_method_registry_rejects_core_owned_method_registration() {
 }
 
 #[tokio::test]
+async fn auth_bootstrap_facade_uses_db_foundation_schema() {
+    let _postgres_runtime_test_guard = AUTH_POSTGRES_RUNTIME_TEST_LOCK.lock().await;
+    let database_url = required_auth_postgres_runtime_test_database_url();
+    let write_pool = WritePool::connect(PoolConfig::new(SecretString::from(database_url.clone())))
+        .await
+        .expect("connect write test database");
+    let raw_pool = Pool::connect(PoolConfig::new(SecretString::from(database_url)))
+        .await
+        .expect("connect test database");
+    let database_operation_observer = DatabaseOperationObserver::default();
+    let pool = raw_pool.clone_with_database_operation_observer(database_operation_observer.clone());
+    let schema_name = unique_runtime_test_schema_name();
+    let schema = PgSchemaName::new(schema_name.clone());
+    let db_bootstrap_config = BootstrapConfig::new(schema.clone());
+    db_bootstrap_config
+        .migrate_schema(&write_pool)
+        .await
+        .expect("migrate DB foundation before auth bootstrap");
+
+    let auth_bootstrap = first_party_postgres_auth_bootstrap_for_test(db_bootstrap_config.clone());
+    let store_config = auth_bootstrap
+        .auth_store_config()
+        .expect("auth store config");
+
+    let _runtime = auth_bootstrap
+        .migrate_schema_and_build_web_runtime_after_db_bootstrap(
+            pool.clone(),
+            AuthWebRuntime::new(config(), auth_web_transport()),
+            Arc::new(TestWeakProofGateVerifier),
+        )
+        .await
+        .expect("migrate auth schema and build runtime");
+    first_party_postgres_auth_bootstrap_for_test(db_bootstrap_config.clone())
+        .validate_schema_after_db_bootstrap(&pool)
+        .await
+        .expect("validate auth schema through bootstrap facade");
+
+    for table_name in [
+        "auth_sessions",
+        "auth_subject_state",
+        "auth_email_otp_challenges",
+        "auth_email_otp_delivery_commands",
+        "auth_totp_verifiers",
+        "auth_recovery_code_codes",
+    ] {
+        assert!(
+            auth_runtime_test_table_exists(&pool, &schema, table_name).await,
+            "expected auth bootstrap table {table_name} in DB foundation schema"
+        );
+    }
+
+    let ledger_row_count = count_auth_schema_ledger_rows(&pool, &store_config).await;
+    assert_eq!(
+        ledger_row_count, 1,
+        "auth bootstrap must record exactly one auth-core row in the DB foundation schema ledger"
+    );
+    assert!(
+        database_operation_observer
+            .records()
+            .into_iter()
+            .filter_map(|record| record.statement)
+            .all(|statement| !statement.contains("pg_advisory")),
+        "auth bootstrap must not use the DB bootstrap advisory-lock exception"
+    );
+
+    drop_auth_runtime_test_schema(&pool, &schema).await;
+}
+
+#[tokio::test]
 async fn postgres_runtime_completes_message_signature_through_method_registry() {
     let _postgres_runtime_test_guard = AUTH_POSTGRES_RUNTIME_TEST_LOCK.lock().await;
     let harness =
@@ -1991,12 +2050,15 @@ async fn postgres_runtime_rejects_active_method_cookie_without_sealed_method_sta
     )
     .expect("nonce");
     let challenge_cookie = ActiveProofChallengeCookieDraft::new_without_response_mac(
-        id("missing-method-state-attempt"),
-        id("missing-method-state-challenge"),
-        ProofSummary::new(ProofFamily::MessageSignature, "ssh_signature").expect("proof"),
-        at(20),
-        at(60),
-        nonce.clone(),
+        ActiveProofChallengeCookieContext::new(
+            id("missing-method-state-attempt"),
+            id("missing-method-state-challenge"),
+            ProofSummary::new(ProofFamily::MessageSignature, "ssh_signature").expect("proof"),
+            at(20),
+            at(60),
+            nonce.clone(),
+        )
+        .expect("challenge cookie context"),
     )
     .expect("challenge cookie without method state");
     let effects = MaterializedResponseEffects::from_vec(vec![
@@ -2048,12 +2110,15 @@ async fn postgres_runtime_rejects_expired_active_method_cookie_before_plugin_dis
     )
     .expect("nonce");
     let challenge_cookie = ActiveProofChallengeCookieDraft::new_with_method_challenge_state(
-        id("expired-active-method-attempt"),
-        id("expired-active-method-challenge"),
-        ProofSummary::new(ProofFamily::MessageSignature, "ssh_signature").expect("proof"),
-        at(20),
-        at(30),
-        nonce,
+        ActiveProofChallengeCookieContext::new(
+            id("expired-active-method-attempt"),
+            id("expired-active-method-challenge"),
+            ProofSummary::new(ProofFamily::MessageSignature, "ssh_signature").expect("proof"),
+            at(20),
+            at(30),
+            nonce,
+        )
+        .expect("challenge cookie context"),
         ActiveProofMethodChallengeState::try_from_bytes(b"expired-active-method-state".as_slice())
             .expect("method challenge state"),
     )
@@ -3252,6 +3317,75 @@ async fn postgres_runtime_rejects_direct_credential_reset_commands() {
         )
     ));
 
+    let direct_subject_deletion_schedule =
+        Command::ScheduleSubjectAuthStateDeletion(ScheduleSubjectAuthStateDeletion {
+            now: at(30),
+            subject_id: id("subject"),
+            pending_action: PendingSubjectLifecycleActionSchedule {
+                pending_action_id: id("direct-subject-deletion-pending-action"),
+                earliest_execute_at: at(100),
+                expires_at: at(200),
+            },
+        });
+
+    let subject_deletion_schedule_error = runtime
+        .execute_from_headers(&HeaderMap::new(), direct_subject_deletion_schedule)
+        .await
+        .expect_err("runtime must not accept caller-provided subject deletion schedule facts");
+
+    assert!(matches!(
+        subject_deletion_schedule_error,
+        super::super::postgres_runtime::AuthPostgresWebRuntimeExecutionError::Core(
+            Error::SubjectAuthStateDeletionSchedulingRequiresRuntimeLifecycleDecision
+        )
+    ));
+
+    let direct_subject_deletion_pending_action = PendingSubjectLifecycleActionRecord::new_open(
+        id("direct-subject-deletion-pending-action"),
+        id("subject"),
+        SubjectLifecycleAction::DeleteSubjectAuthState,
+        at(10),
+        at(20),
+        at(200),
+    )
+    .expect("pending subject deletion action");
+
+    let direct_subject_deletion_execute =
+        Command::ExecutePendingSubjectAuthStateDeletion(ExecutePendingSubjectAuthStateDeletion {
+            now: at(30),
+            pending_action: direct_subject_deletion_pending_action.clone(),
+        });
+
+    let subject_deletion_execute_error = runtime
+        .execute_from_headers(&HeaderMap::new(), direct_subject_deletion_execute)
+        .await
+        .expect_err("runtime must not accept caller-provided subject deletion execution facts");
+
+    assert!(matches!(
+        subject_deletion_execute_error,
+        super::super::postgres_runtime::AuthPostgresWebRuntimeExecutionError::Core(
+            Error::SubjectAuthStateDeletionExecutionRequiresRuntimeLifecycleDecision
+        )
+    ));
+
+    let direct_subject_deletion_cancel =
+        Command::CancelPendingSubjectAuthStateDeletion(CancelPendingSubjectAuthStateDeletion {
+            now: at(30),
+            pending_action: direct_subject_deletion_pending_action,
+        });
+
+    let subject_deletion_cancel_error = runtime
+        .execute_from_headers(&HeaderMap::new(), direct_subject_deletion_cancel)
+        .await
+        .expect_err("runtime must not accept caller-provided subject deletion cancellation facts");
+
+    assert!(matches!(
+        subject_deletion_cancel_error,
+        super::super::postgres_runtime::AuthPostgresWebRuntimeExecutionError::Core(
+            Error::SubjectAuthStateDeletionCancellationRequiresRuntimeLifecycleDecision
+        )
+    ));
+
     harness.drop_schema().await;
 }
 
@@ -4447,6 +4581,294 @@ async fn postgres_runtime_authenticated_pending_credential_replacement_cancellat
             Error::PendingCredentialLifecycleActionNotCancellable
         )
     ));
+
+    harness.drop_schema().await;
+}
+
+#[tokio::test]
+async fn postgres_runtime_mature_pending_subject_auth_state_deletion_closes_action_and_revokes_auth_state()
+ {
+    let _postgres_runtime_test_guard = AUTH_POSTGRES_RUNTIME_TEST_LOCK.lock().await;
+    let harness = PostgresRuntimeTestHarness::connect_required_with_email_otp_method().await;
+    let pool = &harness.pool;
+    let store_config = &harness.store_config;
+    let runtime = &harness.runtime;
+    let subject_id = id("pending-subject-deletion-subject");
+    let issued_auth = complete_full_authentication_through_runtime(
+        runtime,
+        pool,
+        store_config,
+        email_otp_plugin_for_harness(&harness),
+        "pending-subject-deletion-bootstrap",
+        20,
+        subject_id.clone(),
+        false,
+    )
+    .await;
+    let pending_action_id = id("pending-subject-deletion-action");
+    let seed_store = super::super::postgres_store::PostgresAuthStore::new(
+        store_config.clone(),
+        test_keyset("tests.auth.postgres-runtime.credentials.v1"),
+    );
+    seed_store
+        .store_pending_subject_lifecycle_actions_for_test(
+            pool,
+            &[PendingSubjectLifecycleActionRecord::new_open(
+                pending_action_id.clone(),
+                subject_id.clone(),
+                SubjectLifecycleAction::DeleteSubjectAuthState,
+                at(100),
+                at(200),
+                at(300),
+            )
+            .expect("pending subject auth-state deletion action")],
+        )
+        .await
+        .expect("seed pending subject auth-state deletion action");
+
+    let execution = runtime
+        .execute_mature_pending_subject_auth_state_deletion_from_headers(
+            &HeaderMap::new(),
+            ExecuteMaturePendingSubjectAuthStateDeletionInput {
+                now: at(250),
+                pending_action_id: pending_action_id.clone(),
+            },
+        )
+        .await
+        .expect("execute mature pending subject auth-state deletion");
+
+    assert_eq!(
+        execution.outcome(),
+        &Outcome::PendingSubjectAuthStateDeletionExecuted(
+            PendingSubjectAuthStateDeletionExecutionOutcome {
+                subject_id: subject_id.clone(),
+                pending_action_id: pending_action_id.clone(),
+            }
+        )
+    );
+    assert_eq!(
+        count_open_pending_subject_lifecycle_actions_for_pending_action(
+            pool,
+            store_config,
+            &pending_action_id,
+            SubjectLifecycleAction::DeleteSubjectAuthState,
+        )
+        .await,
+        0,
+        "execution must close the pending subject auth-state deletion action"
+    );
+    assert_eq!(
+        count_security_notification_effects_for_subject(pool, store_config, &subject_id).await,
+        1,
+        "execution must commit the subject auth-state deletion security notice"
+    );
+
+    let resolved_after_deletion = runtime
+        .execute_request_resolution_from_headers(
+            &headers_from_cookie_pairs(&[issued_auth.session_cookie_pair.as_str()]),
+            ResolveRequestInput {
+                now: at(260),
+                request_kind: RequestKind::StateChanging,
+            },
+        )
+        .await
+        .expect("resolve original session after subject auth-state deletion");
+    assert_eq!(
+        resolved_after_deletion.outcome(),
+        &Outcome::NeedsFullAuthentication,
+        "subject auth-state deletion must invalidate sessions created before the deletion cutoff"
+    );
+
+    let replay_error = runtime
+        .execute_mature_pending_subject_auth_state_deletion_from_headers(
+            &HeaderMap::new(),
+            ExecuteMaturePendingSubjectAuthStateDeletionInput {
+                now: at(260),
+                pending_action_id,
+            },
+        )
+        .await
+        .expect_err("closed pending subject auth-state deletion must not replay");
+
+    assert!(matches!(
+        replay_error,
+        super::super::postgres_runtime::AuthPostgresWebRuntimeExecutionError::Core(
+            Error::PendingSubjectLifecycleActionNotExecutable
+        )
+    ));
+
+    harness.drop_schema().await;
+}
+
+#[tokio::test]
+async fn postgres_runtime_authenticated_pending_subject_auth_state_deletion_cancellation_closes_open_action()
+ {
+    let _postgres_runtime_test_guard = AUTH_POSTGRES_RUNTIME_TEST_LOCK.lock().await;
+    let harness = PostgresRuntimeTestHarness::connect_required_with_email_otp_method().await;
+    let pool = &harness.pool;
+    let store_config = &harness.store_config;
+    let runtime = &harness.runtime;
+    let subject_id = id("pending-subject-deletion-cancel-subject");
+    let issued_auth = complete_full_authentication_through_runtime(
+        runtime,
+        pool,
+        store_config,
+        email_otp_plugin_for_harness(&harness),
+        "pending-subject-deletion-cancel-bootstrap",
+        20,
+        subject_id.clone(),
+        false,
+    )
+    .await;
+    let pending_action_id = id("pending-subject-deletion-cancel-action");
+    let seed_store = super::super::postgres_store::PostgresAuthStore::new(
+        store_config.clone(),
+        test_keyset("tests.auth.postgres-runtime.credentials.v1"),
+    );
+    seed_store
+        .store_pending_subject_lifecycle_actions_for_test(
+            pool,
+            &[PendingSubjectLifecycleActionRecord::new_open(
+                pending_action_id.clone(),
+                subject_id.clone(),
+                SubjectLifecycleAction::DeleteSubjectAuthState,
+                at(100),
+                at(200),
+                at(300),
+            )
+            .expect("pending subject auth-state deletion action")],
+        )
+        .await
+        .expect("seed pending subject auth-state deletion action");
+    let headers = headers_from_cookie_pairs(&[issued_auth.session_cookie_pair.as_str()]);
+
+    let cancellation = runtime
+        .execute_authenticated_pending_subject_auth_state_deletion_cancellation_from_headers(
+            &headers,
+            CancelAuthenticatedPendingSubjectAuthStateDeletionInput {
+                now: at(90),
+                pending_action_id: pending_action_id.clone(),
+            },
+        )
+        .await
+        .expect("cancel pending subject auth-state deletion");
+
+    assert_eq!(
+        cancellation.outcome(),
+        &Outcome::PendingSubjectAuthStateDeletionCancelled(
+            PendingSubjectAuthStateDeletionCancellationOutcome {
+                subject_id: subject_id.clone(),
+                pending_action_id: pending_action_id.clone(),
+            }
+        )
+    );
+    assert_eq!(
+        count_open_pending_subject_lifecycle_actions_for_pending_action(
+            pool,
+            store_config,
+            &pending_action_id,
+            SubjectLifecycleAction::DeleteSubjectAuthState,
+        )
+        .await,
+        0,
+        "cancellation must close the pending subject auth-state deletion action"
+    );
+    assert_eq!(
+        count_security_notification_effects_for_subject(pool, store_config, &subject_id).await,
+        1,
+        "cancellation must commit the subject auth-state deletion cancellation notice"
+    );
+
+    let replay_error = runtime
+        .execute_authenticated_pending_subject_auth_state_deletion_cancellation_from_headers(
+            &headers,
+            CancelAuthenticatedPendingSubjectAuthStateDeletionInput {
+                now: at(100),
+                pending_action_id,
+            },
+        )
+        .await
+        .expect_err("closed pending subject auth-state deletion cancellation must not replay");
+
+    assert!(matches!(
+        replay_error,
+        super::super::postgres_runtime::AuthPostgresWebRuntimeExecutionError::Core(
+            Error::PendingSubjectLifecycleActionNotCancellable
+        )
+    ));
+
+    harness.drop_schema().await;
+}
+
+#[tokio::test]
+async fn postgres_runtime_subject_auth_state_deletion_cancellation_rejects_wrong_subject_session() {
+    let _postgres_runtime_test_guard = AUTH_POSTGRES_RUNTIME_TEST_LOCK.lock().await;
+    let harness = PostgresRuntimeTestHarness::connect_required_with_email_otp_method().await;
+    let pool = &harness.pool;
+    let store_config = &harness.store_config;
+    let runtime = &harness.runtime;
+    let pending_subject_id = id("pending-subject-deletion-owner");
+    let session_subject_id = id("pending-subject-deletion-other-session");
+    let issued_auth = complete_full_authentication_through_runtime(
+        runtime,
+        pool,
+        store_config,
+        email_otp_plugin_for_harness(&harness),
+        "pending-subject-deletion-wrong-session-bootstrap",
+        20,
+        session_subject_id,
+        false,
+    )
+    .await;
+    let pending_action_id = id("pending-subject-deletion-wrong-session-action");
+    let seed_store = super::super::postgres_store::PostgresAuthStore::new(
+        store_config.clone(),
+        test_keyset("tests.auth.postgres-runtime.credentials.v1"),
+    );
+    seed_store
+        .store_pending_subject_lifecycle_actions_for_test(
+            pool,
+            &[PendingSubjectLifecycleActionRecord::new_open(
+                pending_action_id.clone(),
+                pending_subject_id,
+                SubjectLifecycleAction::DeleteSubjectAuthState,
+                at(100),
+                at(200),
+                at(300),
+            )
+            .expect("pending subject auth-state deletion action")],
+        )
+        .await
+        .expect("seed pending subject auth-state deletion action");
+
+    let cancellation_error = runtime
+        .execute_authenticated_pending_subject_auth_state_deletion_cancellation_from_headers(
+            &headers_from_cookie_pairs(&[issued_auth.session_cookie_pair.as_str()]),
+            CancelAuthenticatedPendingSubjectAuthStateDeletionInput {
+                now: at(90),
+                pending_action_id: pending_action_id.clone(),
+            },
+        )
+        .await
+        .expect_err("wrong subject session must not cancel pending subject auth-state deletion");
+
+    assert!(matches!(
+        cancellation_error,
+        super::super::postgres_runtime::AuthPostgresWebRuntimeExecutionError::Core(
+            Error::CredentialLifecycleActionNotAuthorized
+        )
+    ));
+    assert_eq!(
+        count_open_pending_subject_lifecycle_actions_for_pending_action(
+            pool,
+            store_config,
+            &pending_action_id,
+            SubjectLifecycleAction::DeleteSubjectAuthState,
+        )
+        .await,
+        1,
+        "wrong-subject cancellation must leave the pending subject auth-state deletion action open"
+    );
 
     harness.drop_schema().await;
 }
@@ -6983,6 +7405,92 @@ fn postgres_runtime_test_store(
     )
 }
 
+fn first_party_postgres_auth_bootstrap_for_test(
+    db_bootstrap_config: BootstrapConfig,
+) -> super::super::postgres_bootstrap::PostgresAuthBootstrap {
+    super::super::postgres_bootstrap::PostgresAuthBootstrap::new(
+        db_bootstrap_config,
+        test_keyset("tests.auth.postgres-bootstrap.credentials.v1"),
+    )
+    .with_email_otp_method(
+        test_keyset("tests.auth.postgres-bootstrap.email-otp.v1"),
+        Arc::new(EmbeddedSubjectEmailOtpResolver),
+    )
+    .expect("add email otp method")
+    .with_totp_method(
+        test_keyset("tests.auth.postgres-bootstrap.totp.v1"),
+        TestTotpCodeVerifier,
+    )
+    .expect("add totp method")
+    .with_recovery_code_method(test_keyset(
+        "tests.auth.postgres-bootstrap.recovery-code.v1",
+    ))
+    .expect("add recovery code method")
+}
+
+fn required_auth_postgres_runtime_test_database_url() -> String {
+    std::env::var("PARANOID_TEST_DATABASE_URL")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| {
+            std::env::var("TEST_DSN")
+                .ok()
+                .filter(|value| !value.trim().is_empty())
+        })
+        .expect("required auth Postgres runtime test database URL missing; run through the isolated DB harness so TEST_DSN or PARANOID_TEST_DATABASE_URL is set")
+}
+
+async fn auth_runtime_test_table_exists(
+    pool: &Pool,
+    schema: &PgSchemaName,
+    table_name: &str,
+) -> bool {
+    let statement = r#"
+        SELECT EXISTS (
+            SELECT 1
+            FROM information_schema.tables
+            WHERE table_schema = $1 AND table_name = $2
+        )
+    "#;
+    auth_runtime_test_fetch_one_in_transaction!(
+        pool,
+        pooler_safe_query_scalar::<bool>(sqlx::AssertSqlSafe(statement))
+            .bind(schema.as_str())
+            .bind(table_name),
+        "check auth runtime test table exists"
+    )
+}
+
+async fn count_auth_schema_ledger_rows(
+    pool: &Pool,
+    store_config: &super::super::postgres_store::PostgresAuthStoreConfig,
+) -> i64 {
+    let schema_ledger_table = store_config
+        .schema_ledger_table_name()
+        .expect("auth schema ledger table name");
+    let statement = format!(
+        "SELECT count(*) FROM {} WHERE component = $1 AND instance_key = $2",
+        schema_ledger_table.quoted()
+    );
+    auth_runtime_test_fetch_one_in_transaction!(
+        pool,
+        pooler_safe_query_scalar::<i64>(sqlx::AssertSqlSafe(statement.as_str()))
+            .bind("auth_core")
+            .bind(super::super::postgres_store::schema_instance_key(
+                store_config,
+            )),
+        "count auth schema ledger rows"
+    )
+}
+
+async fn drop_auth_runtime_test_schema(pool: &Pool, schema: &PgSchemaName) {
+    let drop_schema = format!("DROP SCHEMA {} CASCADE", schema.identifier().quoted());
+    unparameterized_simple_query(sqlx::AssertSqlSafe(drop_schema.as_str()))
+        .execute(pool.sqlx_pool())
+        .await
+        .expect("drop auth runtime test schema");
+}
+
 fn cookie_pair_from_set_cookie<'a>(
     headers: &'a AuthSetCookieHeaders,
     cookie_prefix: &str,
@@ -7425,6 +7933,7 @@ fn complete_out_of_band_challenge_command(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn complete_full_authentication_through_runtime(
     runtime: &super::super::postgres_runtime::PostgresAuthWebRuntime,
     pool: &Pool,
@@ -7711,6 +8220,28 @@ async fn count_open_pending_credential_lifecycle_actions_for_pending_action(
             .bind(pending_action_id.as_bytes())
             .bind(super::super::postgres_store::i32_from_credential_lifecycle_action(action),),
         "count open pending credential lifecycle actions for pending action"
+    )
+}
+
+async fn count_open_pending_subject_lifecycle_actions_for_pending_action(
+    pool: &Pool,
+    store_config: &super::super::postgres_store::PostgresAuthStoreConfig,
+    pending_action_id: &PendingSubjectLifecycleActionId,
+    action: SubjectLifecycleAction,
+) -> i64 {
+    let table = store_config
+        .table_name(PostgresAuthCoreTable::PendingSubjectLifecycleAction)
+        .expect("pending subject lifecycle action table");
+    let statement = format!(
+        "SELECT count(*) FROM {} WHERE pending_action_id = $1 AND subject_lifecycle_action = $2 AND closed_at IS NULL",
+        table.quoted()
+    );
+    auth_runtime_test_fetch_one_in_transaction!(
+        pool,
+        pooler_safe_query_scalar::<i64>(sqlx::AssertSqlSafe(statement.as_str()))
+            .bind(pending_action_id.as_bytes())
+            .bind(super::super::postgres_store::i32_from_subject_lifecycle_action(action),),
+        "count open pending subject lifecycle actions for pending action"
     )
 }
 

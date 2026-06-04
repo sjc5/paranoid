@@ -82,4 +82,10 @@ pub enum AuditEventKind {
     CredentialRegenerationExecuted,
     /// A delayed credential-set regeneration action was cancelled.
     CredentialRegenerationPendingActionCancelled,
+    /// A delayed subject-auth-state deletion action was scheduled.
+    SubjectAuthStateDeletionPendingActionScheduled,
+    /// A delayed subject-auth-state deletion action was executed.
+    SubjectAuthStateDeletionExecuted,
+    /// A delayed subject-auth-state deletion action was cancelled.
+    SubjectAuthStateDeletionPendingActionCancelled,
 }

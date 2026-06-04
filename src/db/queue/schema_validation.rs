@@ -18,33 +18,15 @@ pub(super) async fn validate_schema_in_current_transaction(
         tx,
         &config.table_name,
         &job_status_constraint_identifier(config),
-        &[
-            "'pending'",
-            "'running'",
-            "'completed'",
-            "'failed'",
-            "status",
-        ],
-        Some(&["pending", "running", "completed", "failed"]),
+        job_status_constraint_fragments(),
+        Some(job_status_constraint_literals()),
     )
     .await?;
     validate_named_check_constraint(
         tx,
         &config.table_name,
         &job_lifecycle_constraint_identifier(config),
-        &[
-            "status='pending'",
-            "status='running'",
-            "worker_idisnull",
-            "worker_idisnotnull",
-            "claimed_by_worker_atisnull",
-            "claimed_by_worker_atisnotnull",
-            "execution_started_atisnull",
-            "execution_heartbeat_atisnull",
-            "execution_heartbeat_atisnotnull",
-            "finished_atisnull",
-            "finished_atisnotnull",
-        ],
+        job_lifecycle_constraint_fragments(),
         None,
     )
     .await?;
@@ -52,7 +34,7 @@ pub(super) async fn validate_schema_in_current_transaction(
         tx,
         &config.table_name,
         &job_numeric_constraint_identifier(config),
-        &["retry_count>=0", "max_retries>=0", "timeout_nanos"],
+        numeric_constraint_fragments(),
         None,
     )
     .await?;
@@ -60,7 +42,7 @@ pub(super) async fn validate_schema_in_current_transaction(
         tx,
         &config.table_name,
         &job_text_constraint_identifier(config),
-        &["task_name", "dedupe_key", "worker_id", "octet_length"],
+        job_text_constraint_fragments(),
         None,
     )
     .await?;
@@ -68,26 +50,15 @@ pub(super) async fn validate_schema_in_current_transaction(
         tx,
         &config.dead_letter_table_name,
         &dead_letter_reason_constraint_identifier(config),
-        &[
-            "'max_retries_exceeded'",
-            "'permanent_error'",
-            "'operator_action'",
-            "'execution_expired'",
-            "reason",
-        ],
-        Some(&[
-            "max_retries_exceeded",
-            "permanent_error",
-            "operator_action",
-            "execution_expired",
-        ]),
+        dead_letter_reason_constraint_fragments(),
+        Some(dead_letter_reason_constraint_literals()),
     )
     .await?;
     validate_named_check_constraint(
         tx,
         &config.dead_letter_table_name,
         &dead_letter_numeric_constraint_identifier(config),
-        &["retry_count>=0", "max_retries>=0", "timeout_nanos"],
+        numeric_constraint_fragments(),
         None,
     )
     .await?;
@@ -95,7 +66,7 @@ pub(super) async fn validate_schema_in_current_transaction(
         tx,
         &config.dead_letter_table_name,
         &dead_letter_text_constraint_identifier(config),
-        &["task_name", "dedupe_key", "octet_length"],
+        dead_letter_text_constraint_fragments(),
         None,
     )
     .await?;
@@ -103,12 +74,7 @@ pub(super) async fn validate_schema_in_current_transaction(
         tx,
         &config.pause_table_name,
         &pause_key_task_constraint_identifier(config),
-        &[
-            "key='__global__'",
-            "task_nameisnull",
-            "task_nameisnotnull",
-            "key=('task:'::text||task_name)",
-        ],
+        pause_key_task_constraint_fragments(),
         None,
     )
     .await?;
@@ -116,7 +82,7 @@ pub(super) async fn validate_schema_in_current_transaction(
         tx,
         &config.pause_table_name,
         &pause_text_constraint_identifier(config),
-        &["task_name", "octet_length"],
+        pause_text_constraint_fragments(),
         None,
     )
     .await?;
@@ -171,14 +137,15 @@ async fn validate_table_columns(
         .collect::<Result<Vec<_>, Error>>()?;
 
     for required_column in required_columns {
+        let required_column_name = required_column.column.name();
         let Some(actual_column) = actual_columns
             .iter()
-            .find(|column| column.name == required_column.name)
+            .find(|column| column.name == required_column_name)
         else {
             return Err(DbError::schema_mismatch(format!(
                 "table {} is missing column {}",
                 table_name.quoted(),
-                required_column.name
+                required_column_name
             ))
             .into());
         };
@@ -192,8 +159,8 @@ async fn validate_named_check_constraint(
     tx: &mut Tx<'_>,
     table_name: &PgQualifiedTableName,
     constraint_name: &PgIdentifier,
-    required_fragments_after_normalization: &[&str],
-    exact_single_quoted_literals_after_normalization: Option<&[&str]>,
+    required_fragments_after_normalization: Vec<String>,
+    exact_single_quoted_literals_after_normalization: Option<Vec<String>>,
 ) -> Result<(), Error> {
     let statement = r#"
         SELECT pg_get_constraintdef(con.oid)
@@ -229,7 +196,7 @@ async fn validate_named_check_constraint(
     };
 
     let normalized = normalize_check_constraint_expression(&definition).to_ascii_lowercase();
-    for fragment in required_fragments_after_normalization {
+    for fragment in &required_fragments_after_normalization {
         if !normalized.contains(fragment) {
             return Err(DbError::schema_mismatch(format!(
                 "table {} check constraint {} has incompatible definition",
@@ -241,11 +208,11 @@ async fn validate_named_check_constraint(
     }
     if let Some(expected_literals) = exact_single_quoted_literals_after_normalization {
         let actual_literals = single_quoted_literals_from_normalized_expression(&normalized);
-        let expected_literals = expected_literals.iter().copied().collect::<HashSet<_>>();
+        let expected_literals = expected_literals.into_iter().collect::<HashSet<_>>();
         if actual_literals.len() != expected_literals.len()
             || !actual_literals
                 .iter()
-                .all(|literal| expected_literals.contains(literal.as_str()))
+                .all(|literal| expected_literals.contains(literal))
         {
             return Err(DbError::schema_mismatch(format!(
                 "table {} check constraint {} has incompatible definition",
@@ -274,127 +241,126 @@ fn single_quoted_literals_from_normalized_expression(expression: &str) -> HashSe
     literals
 }
 
+fn job_status_constraint_fragments() -> Vec<String> {
+    vec![
+        quoted_job_status_fragment(JobStatus::Pending),
+        quoted_job_status_fragment(JobStatus::Running),
+        quoted_job_status_fragment(JobStatus::Completed),
+        quoted_job_status_fragment(JobStatus::Failed),
+        QueueColumn::Status.name().to_owned(),
+    ]
+}
+
+fn job_status_constraint_literals() -> Vec<String> {
+    vec![
+        JobStatus::Pending.as_str().to_owned(),
+        JobStatus::Running.as_str().to_owned(),
+        JobStatus::Completed.as_str().to_owned(),
+        JobStatus::Failed.as_str().to_owned(),
+    ]
+}
+
+fn job_lifecycle_constraint_fragments() -> Vec<String> {
+    let status = QueueColumn::Status.name();
+    vec![
+        format!("{}='{}'", status, JobStatus::Pending.as_str()),
+        format!("{}='{}'", status, JobStatus::Running.as_str()),
+        normalized_is_null_fragment(QueueColumn::WorkerId),
+        normalized_is_not_null_fragment(QueueColumn::WorkerId),
+        normalized_is_null_fragment(QueueColumn::ClaimedByWorkerAt),
+        normalized_is_not_null_fragment(QueueColumn::ClaimedByWorkerAt),
+        normalized_is_null_fragment(QueueColumn::ExecutionStartedAt),
+        normalized_is_null_fragment(QueueColumn::ExecutionHeartbeatAt),
+        normalized_is_not_null_fragment(QueueColumn::ExecutionHeartbeatAt),
+        normalized_is_null_fragment(QueueColumn::FinishedAt),
+        normalized_is_not_null_fragment(QueueColumn::FinishedAt),
+    ]
+}
+
+fn numeric_constraint_fragments() -> Vec<String> {
+    vec![
+        format!("{}>=0", QueueColumn::RetryCount.name()),
+        format!("{}>=0", QueueColumn::MaxRetries.name()),
+        QueueColumn::TimeoutNanos.name().to_owned(),
+    ]
+}
+
+fn job_text_constraint_fragments() -> Vec<String> {
+    vec![
+        QueueColumn::TaskName.name().to_owned(),
+        QueueColumn::DedupeKey.name().to_owned(),
+        QueueColumn::WorkerId.name().to_owned(),
+        "octet_length".to_owned(),
+    ]
+}
+
+fn dead_letter_reason_constraint_fragments() -> Vec<String> {
+    vec![
+        quoted_dead_letter_reason_fragment(DeadLetterReason::MaxRetriesExceeded),
+        quoted_dead_letter_reason_fragment(DeadLetterReason::PermanentError),
+        quoted_dead_letter_reason_fragment(DeadLetterReason::OperatorAction),
+        quoted_dead_letter_reason_fragment(DeadLetterReason::ExecutionExpired),
+        QueueColumn::Reason.name().to_owned(),
+    ]
+}
+
+fn dead_letter_reason_constraint_literals() -> Vec<String> {
+    vec![
+        DeadLetterReason::MaxRetriesExceeded.as_str().to_owned(),
+        DeadLetterReason::PermanentError.as_str().to_owned(),
+        DeadLetterReason::OperatorAction.as_str().to_owned(),
+        DeadLetterReason::ExecutionExpired.as_str().to_owned(),
+    ]
+}
+
+fn dead_letter_text_constraint_fragments() -> Vec<String> {
+    vec![
+        QueueColumn::TaskName.name().to_owned(),
+        QueueColumn::DedupeKey.name().to_owned(),
+        "octet_length".to_owned(),
+    ]
+}
+
+fn pause_key_task_constraint_fragments() -> Vec<String> {
+    let key = QueueColumn::Key.name();
+    let task_name = QueueColumn::TaskName.name();
+    vec![
+        format!("{key}='{GLOBAL_PAUSE_KEY}'"),
+        normalized_is_null_fragment(QueueColumn::TaskName),
+        normalized_is_not_null_fragment(QueueColumn::TaskName),
+        format!("{key}=('task:'::text||{task_name})"),
+    ]
+}
+
+fn pause_text_constraint_fragments() -> Vec<String> {
+    vec![
+        QueueColumn::TaskName.name().to_owned(),
+        "octet_length".to_owned(),
+    ]
+}
+
+fn quoted_job_status_fragment(status: JobStatus) -> String {
+    format!("'{}'", status.as_str())
+}
+
+fn quoted_dead_letter_reason_fragment(reason: DeadLetterReason) -> String {
+    format!("'{}'", reason.as_str())
+}
+
+fn normalized_is_null_fragment(column: QueueColumn) -> String {
+    format!("{}isnull", column.name())
+}
+
+fn normalized_is_not_null_fragment(column: QueueColumn) -> String {
+    format!("{}isnotnull", column.name())
+}
+
 async fn validate_required_indexes(tx: &mut Tx<'_>, config: &StoreConfig) -> Result<(), Error> {
-    for required_index in [
-        RequiredQueueIndex {
-            table_name: &config.table_name,
-            index_name: migration_index_identifier(
-                INDEX_KIND,
-                &config.table_name,
-                PENDING_RUN_AT_INDEX_SUFFIX,
-            ),
-            columns: &["status", "run_at_or_after", "id"],
-            predicate_fragments_after_normalization: &["status='pending'"],
-            unique: false,
-        },
-        RequiredQueueIndex {
-            table_name: &config.table_name,
-            index_name: migration_index_identifier(
-                INDEX_KIND,
-                &config.table_name,
-                PENDING_TASK_RUN_AT_INDEX_SUFFIX,
-            ),
-            columns: &["task_name", "run_at_or_after", "id"],
-            predicate_fragments_after_normalization: &["status='pending'"],
-            unique: false,
-        },
-        RequiredQueueIndex {
-            table_name: &config.table_name,
-            index_name: migration_index_identifier(
-                INDEX_KIND,
-                &config.table_name,
-                TASK_STATUS_INDEX_SUFFIX,
-            ),
-            columns: &["task_name", "status"],
-            predicate_fragments_after_normalization: &[],
-            unique: false,
-        },
-        RequiredQueueIndex {
-            table_name: &config.table_name,
-            index_name: migration_index_identifier(
-                INDEX_KIND,
-                &config.table_name,
-                WORKER_INDEX_SUFFIX,
-            ),
-            columns: &["worker_id"],
-            predicate_fragments_after_normalization: &["worker_idisnotnull"],
-            unique: false,
-        },
-        RequiredQueueIndex {
-            table_name: &config.table_name,
-            index_name: migration_index_identifier(
-                INDEX_KIND,
-                &config.table_name,
-                EXECUTION_HEARTBEAT_INDEX_SUFFIX,
-            ),
-            columns: &["status", "execution_heartbeat_at", "id"],
-            predicate_fragments_after_normalization: &[
-                "status='running'",
-                "execution_heartbeat_atisnotnull",
-            ],
-            unique: false,
-        },
-        RequiredQueueIndex {
-            table_name: &config.table_name,
-            index_name: migration_index_identifier(
-                INDEX_KIND,
-                &config.table_name,
-                CLEANUP_INDEX_SUFFIX,
-            ),
-            columns: &["finished_at", "id"],
-            predicate_fragments_after_normalization: &[
-                "status",
-                "'completed'",
-                "'failed'",
-                "finished_atisnotnull",
-            ],
-            unique: false,
-        },
-        RequiredQueueIndex {
-            table_name: &config.dead_letter_table_name,
-            index_name: migration_index_identifier(
-                INDEX_KIND,
-                &config.dead_letter_table_name,
-                DEAD_LETTERED_AT_INDEX_SUFFIX,
-            ),
-            columns: &["dead_lettered_at", "id"],
-            predicate_fragments_after_normalization: &[],
-            unique: false,
-        },
-        RequiredQueueIndex {
-            table_name: &config.dead_letter_table_name,
-            index_name: migration_index_identifier(
-                INDEX_KIND,
-                &config.dead_letter_table_name,
-                TASK_DEAD_LETTERED_AT_INDEX_SUFFIX,
-            ),
-            columns: &["task_name", "dead_lettered_at", "id"],
-            predicate_fragments_after_normalization: &[],
-            unique: false,
-        },
-        RequiredQueueIndex {
-            table_name: &config.dead_letter_table_name,
-            index_name: migration_index_identifier(
-                UNIQUE_INDEX_KIND,
-                &config.dead_letter_table_name,
-                ORIGINAL_JOB_INDEX_SUFFIX,
-            ),
-            columns: &["original_job_id"],
-            predicate_fragments_after_normalization: &[],
-            unique: true,
-        },
-        RequiredQueueIndex {
-            table_name: &config.pause_table_name,
-            index_name: migration_index_identifier(
-                INDEX_KIND,
-                &config.pause_table_name,
-                PAUSE_TASK_INDEX_SUFFIX,
-            ),
-            columns: &["task_name"],
-            predicate_fragments_after_normalization: &["task_nameisnotnull"],
-            unique: false,
-        },
-    ] {
+    for required_index in queue_schema_index_definitions()
+        .into_iter()
+        .filter(|definition| definition.predicate != QueueIndexPredicate::ActiveDedupe)
+        .map(|definition| RequiredQueueIndex::from_definition(config, definition))
+    {
         validate_required_index(tx, required_index).await?;
     }
     Ok(())
@@ -403,21 +369,64 @@ async fn validate_required_indexes(tx: &mut Tx<'_>, config: &StoreConfig) -> Res
 struct RequiredQueueIndex<'a> {
     table_name: &'a PgQualifiedTableName,
     index_name: PgIdentifier,
-    columns: &'a [&'a str],
-    predicate_fragments_after_normalization: &'a [&'a str],
+    columns: Vec<&'static str>,
+    predicate_fragments_after_normalization: Vec<String>,
     unique: bool,
+}
+
+impl<'a> RequiredQueueIndex<'a> {
+    fn from_definition(config: &'a StoreConfig, definition: QueueIndexDefinition) -> Self {
+        let table_name = definition.table.table_name(config);
+        Self {
+            table_name,
+            index_name: migration_index_identifier(definition.kind, table_name, definition.suffix),
+            columns: definition
+                .columns
+                .iter()
+                .map(|column| column.name())
+                .collect(),
+            predicate_fragments_after_normalization: definition
+                .predicate
+                .fragments_after_normalization(),
+            unique: definition.unique,
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum QueueIndexValidationField {
+    Column0,
+    Column1,
+    Column2,
+    Predicate,
+}
+
+impl QueueIndexValidationField {
+    const fn name(self) -> &'static str {
+        match self {
+            Self::Column0 => "column_0",
+            Self::Column1 => "column_1",
+            Self::Column2 => "column_2",
+            Self::Predicate => "predicate",
+        }
+    }
 }
 
 async fn validate_required_index(
     tx: &mut Tx<'_>,
     required_index: RequiredQueueIndex<'_>,
 ) -> Result<(), Error> {
-    let statement = r#"
+    let column_0 = QueueIndexValidationField::Column0.name();
+    let column_1 = QueueIndexValidationField::Column1.name();
+    let column_2 = QueueIndexValidationField::Column2.name();
+    let predicate = QueueIndexValidationField::Predicate.name();
+    let statement = format!(
+        r#"
         SELECT
-            attr0.attname AS column_0,
-            attr1.attname AS column_1,
-            attr2.attname AS column_2,
-            pg_get_expr(idx.indpred, idx.indrelid) AS predicate
+            attr0.attname AS {column_0},
+            attr1.attname AS {column_1},
+            attr2.attname AS {column_2},
+            pg_get_expr(idx.indpred, idx.indrelid) AS {predicate}
         FROM pg_index idx
         JOIN pg_class table_class ON table_class.oid = idx.indrelid
         JOIN pg_namespace table_namespace ON table_namespace.oid = table_class.relnamespace
@@ -441,13 +450,14 @@ async fn validate_required_index(
           AND idx.indisunique = $4
           AND idx.indnkeyatts = $5
           AND idx.indexprs IS NULL
-        "#;
+        "#
+    );
     tx.record_database_operation(
         DatabaseOperationKind::FetchOptional,
         QUEUE_OPERATION_SCHEMA_VALIDATE_NAMED_INDEX,
-        Some(statement),
+        Some(statement.as_str()),
     );
-    let row = pooler_safe_query(statement)
+    let row = pooler_safe_query(sqlx::AssertSqlSafe(statement.as_str()))
         .bind(
             required_index
                 .table_name
@@ -475,18 +485,18 @@ async fn validate_required_index(
     };
 
     let actual_columns = [
-        row.try_get::<Option<String>, _>("column_0")
+        row.try_get::<Option<String>, _>(QueueIndexValidationField::Column0.name())
             .map_err(Error::decode_row)?,
-        row.try_get::<Option<String>, _>("column_1")
+        row.try_get::<Option<String>, _>(QueueIndexValidationField::Column1.name())
             .map_err(Error::decode_row)?,
-        row.try_get::<Option<String>, _>("column_2")
+        row.try_get::<Option<String>, _>(QueueIndexValidationField::Column2.name())
             .map_err(Error::decode_row)?,
     ];
     let actual_columns = actual_columns
         .iter()
         .filter_map(Option::as_deref)
         .collect::<Vec<_>>();
-    if actual_columns != required_index.columns {
+    if actual_columns.as_slice() != required_index.columns.as_slice() {
         return Err(DbError::schema_mismatch(format!(
             "index {} on table {} has incompatible columns",
             required_index.index_name.quoted(),
@@ -496,12 +506,12 @@ async fn validate_required_index(
     }
 
     let predicate = row
-        .try_get::<Option<String>, _>("predicate")
+        .try_get::<Option<String>, _>(QueueIndexValidationField::Predicate.name())
         .map_err(Error::decode_row)?
         .unwrap_or_default();
     let normalized_predicate =
         normalize_check_constraint_expression(&predicate).to_ascii_lowercase();
-    for fragment in required_index.predicate_fragments_after_normalization {
+    for fragment in &required_index.predicate_fragments_after_normalization {
         if !normalized_predicate.contains(fragment) {
             return Err(DbError::schema_mismatch(format!(
                 "index {} on table {} has incompatible predicate",
@@ -531,13 +541,13 @@ async fn validate_active_dedupe_conflict_arbiter(
     tx: &mut Tx<'_>,
     config: &StoreConfig,
 ) -> Result<(), Error> {
+    let insert_columns = enqueue_with_dedupe_insert_columns_sql();
+    let conflict_columns = active_dedupe_conflict_columns_sql();
+    let conflict_predicate = active_dedupe_conflict_predicate_sql();
     let statement = format!(
         r#"
         EXPLAIN (COSTS OFF)
-        INSERT INTO {} (
-            id, task_name, payload, status, run_at_or_after,
-            max_retries, timeout_nanos, created_at, updated_at, dedupe_key
-        ) VALUES (
+        INSERT INTO {} ({}) VALUES (
             decode(repeat('00', {}), 'hex'),
             '__paranoid_queue_dedupe_contract_validation',
             '{{}}'::jsonb,
@@ -549,12 +559,15 @@ async fn validate_active_dedupe_conflict_arbiter(
             statement_timestamp(),
             '__paranoid_queue_dedupe_contract_validation'
         )
-        ON CONFLICT (task_name, dedupe_key)
-        WHERE dedupe_key IS NOT NULL AND status IN ('pending', 'running')
+        ON CONFLICT ({})
+        WHERE {}
         DO NOTHING
         "#,
         config.table_name.quoted(),
-        JOB_ID_SIZE
+        insert_columns,
+        JOB_ID_SIZE,
+        conflict_columns,
+        conflict_predicate
     );
     tx.record_database_operation(
         DatabaseOperationKind::Execute,
@@ -573,13 +586,15 @@ fn validate_required_column(
     required_column: RequiredColumn,
     actual_column: &ActualColumn,
 ) -> Result<(), Error> {
-    if actual_column.data_type != required_column.data_type {
+    let required_column_name = required_column.column.name();
+    let required_data_type = required_column.column.validation_type();
+    if actual_column.data_type != required_data_type {
         return Err(DbError::schema_mismatch(format!(
             "table {} column {} has type {}, expected {}",
             table_name.quoted(),
-            required_column.name,
+            required_column_name,
             actual_column.data_type,
-            required_column.data_type
+            required_data_type
         ))
         .into());
     }
@@ -587,17 +602,17 @@ fn validate_required_column(
         return Err(DbError::schema_mismatch(format!(
             "table {} column {} nullability does not match queue schema",
             table_name.quoted(),
-            required_column.name
+            required_column_name
         ))
         .into());
     }
-    if required_column.collation_required
+    if required_column.column.requires_bytewise_collation()
         && !matches!(actual_column.collation.as_deref(), Some("C" | "POSIX"))
     {
         return Err(DbError::schema_mismatch(format!(
             "table {} column {} must use C/POSIX collation",
             table_name.quoted(),
-            required_column.name
+            required_column_name
         ))
         .into());
     }

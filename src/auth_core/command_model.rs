@@ -58,6 +58,12 @@ pub enum Command {
     ),
     /// Cancel an open delayed non-reset credential lifecycle action.
     CancelNonResetPendingCredentialLifecycleAction(CancelNonResetPendingCredentialLifecycleAction),
+    /// Schedule delayed deletion of one subject's Paranoid-owned auth state.
+    ScheduleSubjectAuthStateDeletion(ScheduleSubjectAuthStateDeletion),
+    /// Execute a matured delayed subject-auth-state deletion action.
+    ExecutePendingSubjectAuthStateDeletion(ExecutePendingSubjectAuthStateDeletion),
+    /// Cancel an open delayed subject-auth-state deletion action.
+    CancelPendingSubjectAuthStateDeletion(CancelPendingSubjectAuthStateDeletion),
 }
 
 impl Command {
@@ -85,6 +91,9 @@ impl Command {
             Self::CancelPendingCredentialReset(command) => command.now,
             Self::ExecuteNonResetPendingCredentialLifecycleAction(command) => command.now,
             Self::CancelNonResetPendingCredentialLifecycleAction(command) => command.now,
+            Self::ScheduleSubjectAuthStateDeletion(command) => command.now,
+            Self::ExecutePendingSubjectAuthStateDeletion(command) => command.now,
+            Self::CancelPendingSubjectAuthStateDeletion(command) => command.now,
         }
     }
 }
@@ -491,4 +500,62 @@ pub struct CancelAuthenticatedPendingCredentialLifecycleActionInput {
     pub now: UnixSeconds,
     /// Pending action to cancel.
     pub pending_action_id: PendingCredentialLifecycleActionId,
+}
+
+/// Fresh pending-action material supplied by the runtime for delayed subject deletion.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PendingSubjectLifecycleActionSchedule {
+    /// Fresh pending action id.
+    pub pending_action_id: PendingSubjectLifecycleActionId,
+    /// Earliest time this delayed action may execute.
+    pub earliest_execute_at: UnixSeconds,
+    /// Last time this delayed action remains executable.
+    pub expires_at: UnixSeconds,
+}
+
+/// Schedule delayed deletion of one subject's Paranoid-owned auth state.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ScheduleSubjectAuthStateDeletion {
+    /// Server time for this transition.
+    pub now: UnixSeconds,
+    /// Subject whose auth state is scheduled for deletion.
+    pub subject_id: SubjectId,
+    /// Runtime-owned pending-action schedule.
+    pub pending_action: PendingSubjectLifecycleActionSchedule,
+}
+
+/// Execute a matured delayed subject-auth-state deletion action.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ExecutePendingSubjectAuthStateDeletion {
+    /// Server time for this transition.
+    pub now: UnixSeconds,
+    /// Loaded pending action row.
+    pub pending_action: PendingSubjectLifecycleActionRecord,
+}
+
+/// Cancel an open delayed subject-auth-state deletion action.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CancelPendingSubjectAuthStateDeletion {
+    /// Server time for this transition.
+    pub now: UnixSeconds,
+    /// Loaded pending action row to close.
+    pub pending_action: PendingSubjectLifecycleActionRecord,
+}
+
+/// Runtime-facing matured pending subject auth-state deletion execution input.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ExecuteMaturePendingSubjectAuthStateDeletionInput {
+    /// Server time for this transition.
+    pub now: UnixSeconds,
+    /// Pending action to execute.
+    pub pending_action_id: PendingSubjectLifecycleActionId,
+}
+
+/// Runtime-facing authenticated pending subject auth-state deletion cancellation input.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CancelAuthenticatedPendingSubjectAuthStateDeletionInput {
+    /// Server time for this transition.
+    pub now: UnixSeconds,
+    /// Pending action to cancel.
+    pub pending_action_id: PendingSubjectLifecycleActionId,
 }

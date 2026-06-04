@@ -290,6 +290,21 @@ impl PostgresAuthWebRuntime {
                 Error::CredentialLifecycleCancellationRequiresRuntimeLifecycleDecision,
             ));
         }
+        if matches!(command, Command::ScheduleSubjectAuthStateDeletion(_)) {
+            return Err(AuthPostgresWebRuntimeExecutionError::core(
+                Error::SubjectAuthStateDeletionSchedulingRequiresRuntimeLifecycleDecision,
+            ));
+        }
+        if matches!(command, Command::ExecutePendingSubjectAuthStateDeletion(_)) {
+            return Err(AuthPostgresWebRuntimeExecutionError::core(
+                Error::SubjectAuthStateDeletionExecutionRequiresRuntimeLifecycleDecision,
+            ));
+        }
+        if matches!(command, Command::CancelPendingSubjectAuthStateDeletion(_)) {
+            return Err(AuthPostgresWebRuntimeExecutionError::core(
+                Error::SubjectAuthStateDeletionCancellationRequiresRuntimeLifecycleDecision,
+            ));
+        }
         let decoded = self
             .runtime
             .web_transport()
@@ -461,10 +476,7 @@ impl PostgresAuthWebRuntime {
                     .await);
                 }
             };
-        let challenge_cookie = match ActiveProofChallengeCookieDraft::new_with_response_secret(
-            self.runtime
-                .web_transport()
-                .active_proof_challenge_fast_fail_keyset(),
+        let challenge_context = match ActiveProofChallengeCookieContext::new(
             request.attempt_id.clone(),
             request.challenge_id.clone(),
             proof,
@@ -481,6 +493,22 @@ impl PostgresAuthWebRuntime {
                     .await);
                 }
             },
+        ) {
+            Ok(context) => context,
+            Err(error) => {
+                return Err(rollback_after_core_error(
+                    "auth_core.runtime.build_challenge_cookie",
+                    tx,
+                    error,
+                )
+                .await);
+            }
+        };
+        let challenge_cookie = match ActiveProofChallengeCookieDraft::new_with_response_secret(
+            self.runtime
+                .web_transport()
+                .active_proof_challenge_fast_fail_keyset(),
+            challenge_context,
             &response_secret,
         ) {
             Ok(cookie) => cookie,
@@ -723,14 +751,27 @@ impl PostgresAuthWebRuntime {
         };
         let (method_challenge, method_challenge_state, method_commit_work) =
             challenge_build.into_parts();
+        let challenge_context = match ActiveProofChallengeCookieContext::new(
+            challenge_seed.attempt_id.clone(),
+            challenge_seed.challenge_id.clone(),
+            challenge_seed.proof.clone(),
+            challenge_seed.issued_at,
+            challenge_seed.expires_at,
+            challenge_seed.nonce.clone(),
+        ) {
+            Ok(context) => context,
+            Err(error) => {
+                return Err(rollback_after_core_error(
+                    "auth_core.runtime.build_challenge_cookie",
+                    tx,
+                    error,
+                )
+                .await);
+            }
+        };
         let challenge_cookie =
             match ActiveProofChallengeCookieDraft::new_with_method_challenge_state(
-                challenge_seed.attempt_id.clone(),
-                challenge_seed.challenge_id.clone(),
-                challenge_seed.proof.clone(),
-                challenge_seed.issued_at,
-                challenge_seed.expires_at,
-                challenge_seed.nonce.clone(),
+                challenge_context,
                 method_challenge_state,
             ) {
                 Ok(cookie) => cookie,
@@ -1238,8 +1279,8 @@ impl PostgresAuthWebRuntime {
         method_commit_work.extend(authoritative_confirmation.into_method_commit_work());
         let verified = VerifiedActiveProofMethodResponse::new(verified_proof, method_commit_work)
             .map_err(AuthPostgresWebRuntimeExecutionError::core)?;
-        if let Some(subject_id) = verified.verified_proof().subject_id() {
-            if let Err(error) = self
+        if let Some(subject_id) = verified.verified_proof().subject_id()
+            && let Err(error) = self
                 .load_verified_active_proof_subject_revocation_in_current_transaction(
                     &mut tx,
                     now,
@@ -1249,14 +1290,13 @@ impl PostgresAuthWebRuntime {
                     subject_id,
                 )
                 .await
-            {
-                return Err(rollback_after_runtime_error(
-                    "auth_core.runtime.load_verified_subject_revocation",
-                    tx,
-                    error,
-                )
-                .await);
-            }
+        {
+            return Err(rollback_after_runtime_error(
+                "auth_core.runtime.load_verified_subject_revocation",
+                tx,
+                error,
+            )
+            .await);
         }
         let command =
             Command::CompleteActiveProofChallenge(command_from_active_proof_method_response(
@@ -1805,7 +1845,7 @@ impl PostgresAuthWebRuntime {
             );
         }
         let Some(session) = live_authenticated_session_record_for_lifecycle_request(now, &loaded)
-            .map_err(|error| AuthPostgresWebRuntimeExecutionError::core(error))?
+            .map_err(AuthPostgresWebRuntimeExecutionError::core)?
         else {
             if let Err(error) = tx.rollback().await {
                 return Err(AuthPostgresWebRuntimeExecutionError::store(
@@ -2402,6 +2442,193 @@ impl PostgresAuthWebRuntime {
         };
         self.commit_runtime_owned_prepared_command_inside_open_transaction(
             "auth_core.runtime.authenticated_pending_credential_lifecycle_action_cancellation",
+            now,
+            tx,
+            prepared,
+            presented_cookie_secrets,
+        )
+        .await
+    }
+
+    pub(crate) async fn execute_mature_pending_subject_auth_state_deletion_from_headers(
+        &self,
+        headers: &HeaderMap,
+        request: ExecuteMaturePendingSubjectAuthStateDeletionInput,
+    ) -> Result<AuthWebRuntimeExecution, AuthPostgresWebRuntimeExecutionError> {
+        let now = request.now;
+        let decoded = self
+            .runtime
+            .web_transport()
+            .decode_presented_cookies_from_headers(headers)
+            .map_err(AuthPostgresWebRuntimeExecutionError::web)?;
+        let (presented_cookies, presented_cookie_secrets) = decoded.into_parts();
+        let mut tx = self.begin_runtime_transaction().await?;
+        let pending_action = match self
+            .store
+            .load_pending_subject_auth_state_deletion_for_execution_in_current_transaction(
+                &mut tx,
+                &request.pending_action_id,
+            )
+            .await
+        {
+            Ok(Some(pending_action)) => pending_action,
+            Ok(None) => {
+                return Err(rollback_after_core_error(
+                    "auth_core.runtime.load_pending_subject_auth_state_deletion",
+                    tx,
+                    Error::PendingSubjectLifecycleActionNotExecutable,
+                )
+                .await);
+            }
+            Err(error) => {
+                return Err(rollback_after_store_error(
+                    "auth_core.runtime.load_pending_subject_auth_state_deletion",
+                    tx,
+                    error,
+                )
+                .await);
+            }
+        };
+        let command = Command::ExecutePendingSubjectAuthStateDeletion(
+            ExecutePendingSubjectAuthStateDeletion {
+                now,
+                pending_action,
+            },
+        );
+        let prepared = match PreparedCommandExecution::prepare(
+            self.runtime.config(),
+            command,
+            presented_cookies,
+        ) {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                return Err(
+                    rollback_after_core_error("auth_core.runtime.prepare", tx, error).await,
+                );
+            }
+        };
+        self.commit_runtime_owned_prepared_command_inside_open_transaction(
+            "auth_core.runtime.mature_pending_subject_auth_state_deletion",
+            now,
+            tx,
+            prepared,
+            presented_cookie_secrets,
+        )
+        .await
+    }
+
+    pub(crate) async fn execute_authenticated_pending_subject_auth_state_deletion_cancellation_from_headers(
+        &self,
+        headers: &HeaderMap,
+        request: CancelAuthenticatedPendingSubjectAuthStateDeletionInput,
+    ) -> Result<AuthWebRuntimeExecution, AuthPostgresWebRuntimeExecutionError> {
+        let now = request.now;
+        let decoded = self
+            .runtime
+            .web_transport()
+            .decode_presented_cookies_from_headers(headers)
+            .map_err(AuthPostgresWebRuntimeExecutionError::web)?;
+        let (presented_cookies, presented_cookie_secrets) = decoded.into_parts();
+        let loaded_state_contract =
+            CommandLoadedStateContract::for_authenticated_session_lifecycle_request(
+                self.runtime.config(),
+                now,
+                &presented_cookies,
+            )
+            .map_err(AuthPostgresWebRuntimeExecutionError::core)?;
+        let prepared_storage_boundary_contract =
+            PreparedStorageBoundaryContract::for_loaded_state_contract(&loaded_state_contract);
+        let mut tx = self.begin_runtime_transaction().await?;
+        let loaded = match self
+            .store
+            .load_state_in_current_transaction(
+                &mut tx,
+                AuthLoadStateRequest::new(
+                    now,
+                    &presented_cookies,
+                    &presented_cookie_secrets,
+                    &loaded_state_contract,
+                    &prepared_storage_boundary_contract,
+                ),
+            )
+            .await
+        {
+            Ok(loaded) => loaded,
+            Err(error) => {
+                return Err(rollback_after_store_error("auth_core.runtime.load", tx, error).await);
+            }
+        };
+        if let Err(error) = loaded_state_contract.validate_loaded_state(&loaded) {
+            return Err(
+                rollback_after_core_error("auth_core.runtime.validate_load", tx, error).await,
+            );
+        }
+        let Some(session) = live_authenticated_session_record_for_lifecycle_request(now, &loaded)
+            .map_err(AuthPostgresWebRuntimeExecutionError::core)?
+        else {
+            if let Err(error) = tx.rollback().await {
+                return Err(AuthPostgresWebRuntimeExecutionError::store(
+                    PostgresAuthStoreError::Database(error),
+                ));
+            }
+            return Ok(AuthWebRuntimeExecution::new(
+                Outcome::NeedsFullAuthentication,
+                AuthSetCookieHeaders::default(),
+            ));
+        };
+        let pending_action = match self
+            .store
+            .load_pending_subject_auth_state_deletion_for_cancellation_in_current_transaction(
+                &mut tx,
+                &request.pending_action_id,
+            )
+            .await
+        {
+            Ok(Some(pending_action)) => pending_action,
+            Ok(None) => {
+                return Err(rollback_after_core_error(
+                    "auth_core.runtime.load_pending_subject_auth_state_deletion_cancellation",
+                    tx,
+                    Error::PendingSubjectLifecycleActionNotCancellable,
+                )
+                .await);
+            }
+            Err(error) => {
+                return Err(rollback_after_store_error(
+                    "auth_core.runtime.load_pending_subject_auth_state_deletion_cancellation",
+                    tx,
+                    error,
+                )
+                .await);
+            }
+        };
+        if pending_action.subject_id != session.subject_id {
+            return Err(rollback_after_core_error(
+                "auth_core.runtime.validate_pending_subject_auth_state_deletion_cancellation_subject",
+                tx,
+                Error::CredentialLifecycleActionNotAuthorized,
+            )
+            .await);
+        }
+        let command =
+            Command::CancelPendingSubjectAuthStateDeletion(CancelPendingSubjectAuthStateDeletion {
+                now,
+                pending_action,
+            });
+        let prepared = match PreparedCommandExecution::prepare(
+            self.runtime.config(),
+            command,
+            presented_cookies,
+        ) {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                return Err(
+                    rollback_after_core_error("auth_core.runtime.prepare", tx, error).await,
+                );
+            }
+        };
+        self.commit_runtime_owned_prepared_command_inside_open_transaction(
+            "auth_core.runtime.authenticated_pending_subject_auth_state_deletion_cancellation",
             now,
             tx,
             prepared,

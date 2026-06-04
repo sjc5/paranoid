@@ -409,17 +409,16 @@ fn schema_migrations_record_versions_only_after_physical_validation() {
         rust_function_body_by_name(&kv_schema_source, "migrate_schema_in_current_transaction");
     assert_source_order(
         kv_body,
-        "validate_physical_schema_in_current_transaction(tx, config).await?",
-        "record_kv_schema_version_in_current_transaction(tx, config).await?",
-        "KV migration must physically validate the migrated schema before recording its schema version",
+        "plan_component_schema_migration_in_current_transaction(",
+        "execute_kv_current_schema_install_in_current_transaction(tx, config).await?",
+        "KV migration must classify the existing schema-ledger row before running current-schema DDL",
     );
     assert_source_order(
         kv_body,
-        "record_kv_schema_version_in_current_transaction(tx, config).await?",
-        "validate_schema_in_current_transaction(tx, config).await",
-        "KV migration must revalidate the recorded schema version before commit",
+        "validate_physical_schema_in_current_transaction(tx, config).await?",
+        "record_kv_schema_migration_completion_in_current_transaction(",
+        "KV migration must physically validate the migrated schema before recording its schema version",
     );
-
     let queue_schema_source = read_crate_source_file("src/db/queue/schema.rs");
     let queue_body = rust_function_body_by_name(
         &queue_schema_source,
@@ -427,40 +426,63 @@ fn schema_migrations_record_versions_only_after_physical_validation() {
     );
     assert_source_order(
         queue_body,
-        "validate_physical_schema_in_current_transaction(tx, queue.config_inner()).await?",
-        "record_queue_schema_version_in_current_transaction(tx, queue.config_inner()).await?",
-        "Queue migration must physically validate the migrated schema before recording its schema version",
+        "plan_component_schema_migration_in_current_transaction(",
+        "execute_queue_migration_statements_in_current_transaction(tx, queue.config_inner())",
+        "Queue migration must classify the existing schema-ledger row before running current-schema DDL",
     );
     assert_source_order(
         queue_body,
-        "record_queue_schema_version_in_current_transaction(tx, queue.config_inner()).await?",
-        "validate_queue_schema_version_in_current_transaction(tx, queue.config_inner()).await?",
-        "Queue migration must revalidate the recorded schema version before commit",
+        "validate_physical_schema_in_current_transaction(tx, queue.config_inner()).await?",
+        "record_queue_schema_migration_completion_in_current_transaction(",
+        "Queue migration must physically validate the migrated schema before recording its schema version",
     );
-
     let fleet_store_source = read_crate_source_file("src/db/fleet/store.rs");
     let fleet_body = rust_function_body_by_name_containing(
         &fleet_store_source,
         "migrate_schema_in_current_transaction",
-        "record_fleet_schema_version_in_current_transaction",
+        "record_fleet_schema_migration_completion_in_current_transaction",
+    );
+    assert_source_order(
+        fleet_body,
+        "plan_component_schema_migration_in_current_transaction(",
+        "migrate_kv_schema_in_current_transaction(tx, &config.kv_store_config()).await?",
+        "Fleet migration must classify the existing schema-ledger row before migrating backing stores",
     );
     assert_source_order(
         fleet_body,
         "migrate_kv_schema_in_current_transaction(tx, &config.kv_store_config()).await?",
-        "record_fleet_schema_version_in_current_transaction(tx, config).await?",
+        "record_fleet_schema_migration_completion_in_current_transaction(",
         "Fleet migration must finish migrating and validating its KV backing store before recording Fleet's schema version",
     );
     assert_source_order(
         fleet_body,
         "migrate_lease_schema_in_current_transaction(tx, &config.lease_store_config()).await?",
-        "record_fleet_schema_version_in_current_transaction(tx, config).await?",
+        "record_fleet_schema_migration_completion_in_current_transaction(",
         "Fleet migration must finish migrating and validating its lease backing store before recording Fleet's schema version",
     );
     assert_source_order(
         fleet_body,
-        "record_fleet_schema_version_in_current_transaction(tx, config).await?",
+        "record_fleet_schema_migration_completion_in_current_transaction(",
         "validate_schema_in_current_transaction(tx, config).await",
         "Fleet migration must revalidate the recorded schema version before commit",
+    );
+
+    let schema_ledger_source = read_crate_source_file("src/db/schema_ledger.rs");
+    let completion_body = rust_function_body_by_name(
+        &schema_ledger_source,
+        "record_component_schema_migration_completion_in_current_transaction",
+    );
+    assert_source_order(
+        completion_body,
+        "SCHEMA_LEDGER_OPERATION_RECORD_COMPONENT_VERSION",
+        "validate_component_schema_version_row_in_current_transaction(",
+        "Schema migration completion must validate the recorded fresh-install row before commit",
+    );
+    assert_source_order(
+        completion_body,
+        "SCHEMA_LEDGER_OPERATION_UPDATE_COMPONENT_VERSION",
+        "validate_component_schema_version_row_in_current_transaction(",
+        "Schema migration completion must validate the updated upgrade row before commit",
     );
 }
 

@@ -155,7 +155,9 @@ fn session_cookie_response_is_commit_backed(
         | Mutation::CreatePendingCredentialLifecycleAction(_)
         | Mutation::RecordCredentialLifecycleActionExecuted { .. }
         | Mutation::SetCredentialLifecycleState { .. }
-        | Mutation::ClosePendingCredentialLifecycleAction { .. } => false,
+        | Mutation::ClosePendingCredentialLifecycleAction { .. }
+        | Mutation::CreatePendingSubjectLifecycleAction(_)
+        | Mutation::ClosePendingSubjectLifecycleAction { .. } => false,
     })
 }
 
@@ -193,7 +195,9 @@ fn active_proof_continuation_cookie_response_is_commit_backed(
         | Mutation::CreatePendingCredentialLifecycleAction(_)
         | Mutation::RecordCredentialLifecycleActionExecuted { .. }
         | Mutation::SetCredentialLifecycleState { .. }
-        | Mutation::ClosePendingCredentialLifecycleAction { .. } => false,
+        | Mutation::ClosePendingCredentialLifecycleAction { .. }
+        | Mutation::CreatePendingSubjectLifecycleAction(_)
+        | Mutation::ClosePendingSubjectLifecycleAction { .. } => false,
     })
 }
 
@@ -238,7 +242,9 @@ fn trusted_device_cookie_response_is_commit_backed(
         | Mutation::CreatePendingCredentialLifecycleAction(_)
         | Mutation::RecordCredentialLifecycleActionExecuted { .. }
         | Mutation::SetCredentialLifecycleState { .. }
-        | Mutation::ClosePendingCredentialLifecycleAction { .. } => false,
+        | Mutation::ClosePendingCredentialLifecycleAction { .. }
+        | Mutation::CreatePendingSubjectLifecycleAction(_)
+        | Mutation::ClosePendingSubjectLifecycleAction { .. } => false,
     })
 }
 
@@ -273,7 +279,9 @@ fn active_proof_challenge_cookie_response_is_commit_backed(
         | Mutation::CreatePendingCredentialLifecycleAction(_)
         | Mutation::RecordCredentialLifecycleActionExecuted { .. }
         | Mutation::SetCredentialLifecycleState { .. }
-        | Mutation::ClosePendingCredentialLifecycleAction { .. } => false,
+        | Mutation::ClosePendingCredentialLifecycleAction { .. }
+        | Mutation::CreatePendingSubjectLifecycleAction(_)
+        | Mutation::ClosePendingSubjectLifecycleAction { .. } => false,
     })
 }
 
@@ -460,7 +468,9 @@ fn expected_fresh_credential_secrets_for_mutations(
             | Mutation::CreatePendingCredentialLifecycleAction(_)
             | Mutation::RecordCredentialLifecycleActionExecuted { .. }
             | Mutation::SetCredentialLifecycleState { .. }
-            | Mutation::ClosePendingCredentialLifecycleAction { .. } => None,
+            | Mutation::ClosePendingCredentialLifecycleAction { .. }
+            | Mutation::CreatePendingSubjectLifecycleAction(_)
+            | Mutation::ClosePendingSubjectLifecycleAction { .. } => None,
         })
         .collect()
 }

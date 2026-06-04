@@ -1,7 +1,8 @@
 use super::{
-    DatabaseOperationKind, DbError, PgQualifiedTableName, PgSqlState, Tx,
-    normalize_check_constraint_expression, pooler_safe_query, pooler_safe_query_as,
-    pooler_safe_query_scalar, sql_state_from_sqlx_error,
+    ComponentSchemaMigrationPlan, ComponentSchemaMigrationStep, DatabaseOperationKind, DbError,
+    PgQualifiedTableName, PgSqlState, RecordedComponentSchemaVersion, Tx,
+    normalize_check_constraint_expression, plan_component_schema_migration, pooler_safe_query,
+    pooler_safe_query_as, pooler_safe_query_scalar, sql_state_from_sqlx_error,
 };
 
 const SCHEMA_LEDGER_CREATE_SAVEPOINT: &str = "__paranoid_schema_ledger_create";
@@ -18,12 +19,33 @@ pub(crate) const SCHEMA_LEDGER_OPERATION_VALIDATE_CHECK_CONSTRAINTS: &str =
     "schema_ledger.validate_check_constraints";
 pub(crate) const SCHEMA_LEDGER_OPERATION_RECORD_COMPONENT_VERSION: &str =
     "schema_ledger.record_component_version";
+pub(crate) const SCHEMA_LEDGER_OPERATION_UPDATE_COMPONENT_VERSION: &str =
+    "schema_ledger.update_component_version";
 pub(crate) const SCHEMA_LEDGER_OPERATION_FETCH_COMPONENT_VERSION: &str =
     "schema_ledger.fetch_component_version";
 
 pub(crate) const MAX_SCHEMA_LEDGER_COMPONENT_BYTES: usize = 128;
 pub(crate) const MAX_SCHEMA_LEDGER_INSTANCE_KEY_BYTES: usize = 1024;
 pub(crate) const MAX_SCHEMA_LEDGER_FINGERPRINT_BYTES: usize = 256;
+const SCHEMA_LEDGER_C_COLLATION: &str = "C";
+
+const SCHEMA_LEDGER_REQUIRED_COLUMNS: [SchemaLedgerColumn; 5] = [
+    SchemaLedgerColumn::Component,
+    SchemaLedgerColumn::InstanceKey,
+    SchemaLedgerColumn::SchemaVersion,
+    SchemaLedgerColumn::SchemaFingerprint,
+    SchemaLedgerColumn::AppliedAt,
+];
+const SCHEMA_LEDGER_PRIMARY_KEY_COLUMNS: [SchemaLedgerColumn; 2] = [
+    SchemaLedgerColumn::Component,
+    SchemaLedgerColumn::InstanceKey,
+];
+const SCHEMA_LEDGER_CHECKED_COLUMNS: [SchemaLedgerColumn; 4] = [
+    SchemaLedgerColumn::Component,
+    SchemaLedgerColumn::InstanceKey,
+    SchemaLedgerColumn::SchemaVersion,
+    SchemaLedgerColumn::SchemaFingerprint,
+];
 
 #[cfg(test)]
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -37,6 +59,201 @@ pub(crate) struct ComponentSchemaVersion<'a> {
     pub(crate) instance_key: &'a str,
     pub(crate) version: i32,
     pub(crate) fingerprint: &'a str,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SchemaLedgerColumn {
+    Component,
+    InstanceKey,
+    SchemaVersion,
+    SchemaFingerprint,
+    AppliedAt,
+}
+
+impl SchemaLedgerColumn {
+    const fn name(self) -> &'static str {
+        match self {
+            Self::Component => "component",
+            Self::InstanceKey => "instance_key",
+            Self::SchemaVersion => "schema_version",
+            Self::SchemaFingerprint => "schema_fingerprint",
+            Self::AppliedAt => "applied_at",
+        }
+    }
+
+    const fn create_table_type(self) -> &'static str {
+        match self {
+            Self::Component | Self::InstanceKey | Self::SchemaFingerprint => "TEXT",
+            Self::SchemaVersion => "INTEGER",
+            Self::AppliedAt => "TIMESTAMPTZ",
+        }
+    }
+
+    const fn validation_type(self) -> &'static str {
+        match self {
+            Self::Component | Self::InstanceKey | Self::SchemaFingerprint => "text",
+            Self::SchemaVersion => "integer",
+            Self::AppliedAt => "timestamp with time zone",
+        }
+    }
+
+    const fn required_collation(self) -> Option<&'static str> {
+        match self {
+            Self::Component | Self::InstanceKey | Self::SchemaFingerprint => {
+                Some(SCHEMA_LEDGER_C_COLLATION)
+            }
+            Self::SchemaVersion | Self::AppliedAt => None,
+        }
+    }
+
+    const fn max_octet_length(self) -> Option<usize> {
+        match self {
+            Self::Component => Some(MAX_SCHEMA_LEDGER_COMPONENT_BYTES),
+            Self::InstanceKey => Some(MAX_SCHEMA_LEDGER_INSTANCE_KEY_BYTES),
+            Self::SchemaFingerprint => Some(MAX_SCHEMA_LEDGER_FINGERPRINT_BYTES),
+            Self::SchemaVersion | Self::AppliedAt => None,
+        }
+    }
+
+    fn normalized_check_constraint(self) -> Option<String> {
+        let column = self.name();
+        match self {
+            Self::Component | Self::InstanceKey | Self::SchemaFingerprint => {
+                let max_octet_length = self
+                    .max_octet_length()
+                    .expect("checked text column must have a max length");
+                Some(format!(
+                    "(octet_length({column})>0)AND(octet_length({column})<={max_octet_length})"
+                ))
+            }
+            Self::SchemaVersion => Some(format!("{column}>0")),
+            Self::AppliedAt => None,
+        }
+    }
+}
+
+struct SchemaLedgerCatalog<'a> {
+    table_name: &'a PgQualifiedTableName,
+}
+
+impl<'a> SchemaLedgerCatalog<'a> {
+    fn new(table_name: &'a PgQualifiedTableName) -> Self {
+        Self { table_name }
+    }
+
+    fn quoted_table_name(&self) -> String {
+        self.table_name.quoted().to_string()
+    }
+
+    fn create_table_statement(&self) -> String {
+        let component = SchemaLedgerColumn::Component.name();
+        let component_type = SchemaLedgerColumn::Component.create_table_type();
+        let instance_key = SchemaLedgerColumn::InstanceKey.name();
+        let instance_key_type = SchemaLedgerColumn::InstanceKey.create_table_type();
+        let schema_version = SchemaLedgerColumn::SchemaVersion.name();
+        let schema_version_type = SchemaLedgerColumn::SchemaVersion.create_table_type();
+        let schema_fingerprint = SchemaLedgerColumn::SchemaFingerprint.name();
+        let schema_fingerprint_type = SchemaLedgerColumn::SchemaFingerprint.create_table_type();
+        let applied_at = SchemaLedgerColumn::AppliedAt.name();
+        let applied_at_type = SchemaLedgerColumn::AppliedAt.create_table_type();
+        let primary_key_columns = schema_ledger_column_list(&SCHEMA_LEDGER_PRIMARY_KEY_COLUMNS);
+
+        format!(
+            r#"
+        CREATE TABLE IF NOT EXISTS {} (
+            {component} {component_type} COLLATE "C" NOT NULL CHECK (
+                octet_length({component}) > 0
+                AND octet_length({component}) <= {MAX_SCHEMA_LEDGER_COMPONENT_BYTES}
+            ),
+            {instance_key} {instance_key_type} COLLATE "C" NOT NULL CHECK (
+                octet_length({instance_key}) > 0
+                AND octet_length({instance_key}) <= {MAX_SCHEMA_LEDGER_INSTANCE_KEY_BYTES}
+            ),
+            {schema_version} {schema_version_type} NOT NULL CHECK ({schema_version} > 0),
+            {schema_fingerprint} {schema_fingerprint_type} COLLATE "C" NOT NULL CHECK (
+                octet_length({schema_fingerprint}) > 0
+                AND octet_length({schema_fingerprint}) <= {MAX_SCHEMA_LEDGER_FINGERPRINT_BYTES}
+            ),
+            {applied_at} {applied_at_type} NOT NULL,
+            PRIMARY KEY ({primary_key_columns})
+        )
+        "#,
+            self.table_name.quoted()
+        )
+    }
+
+    fn record_component_version_statement(&self) -> String {
+        let component = SchemaLedgerColumn::Component.name();
+        let instance_key = SchemaLedgerColumn::InstanceKey.name();
+        let schema_version = SchemaLedgerColumn::SchemaVersion.name();
+        let schema_fingerprint = SchemaLedgerColumn::SchemaFingerprint.name();
+        let applied_at = SchemaLedgerColumn::AppliedAt.name();
+        let primary_key_columns = schema_ledger_column_list(&SCHEMA_LEDGER_PRIMARY_KEY_COLUMNS);
+
+        format!(
+            r#"
+        INSERT INTO {} (
+            {component},
+            {instance_key},
+            {schema_version},
+            {schema_fingerprint},
+            {applied_at}
+        )
+        VALUES ($1, $2, $3, $4, statement_timestamp())
+        ON CONFLICT ({primary_key_columns})
+        DO NOTHING
+        "#,
+            self.table_name.quoted()
+        )
+    }
+
+    fn fetch_component_version_statement(&self) -> String {
+        let component = SchemaLedgerColumn::Component.name();
+        let instance_key = SchemaLedgerColumn::InstanceKey.name();
+        let schema_version = SchemaLedgerColumn::SchemaVersion.name();
+        let schema_fingerprint = SchemaLedgerColumn::SchemaFingerprint.name();
+
+        format!(
+            r#"
+        SELECT {schema_version}, {schema_fingerprint}
+        FROM {}
+        WHERE {component} = $1
+          AND {instance_key} = $2
+        "#,
+            self.table_name.quoted()
+        )
+    }
+
+    fn update_component_version_statement(&self) -> String {
+        let component = SchemaLedgerColumn::Component.name();
+        let instance_key = SchemaLedgerColumn::InstanceKey.name();
+        let schema_version = SchemaLedgerColumn::SchemaVersion.name();
+        let schema_fingerprint = SchemaLedgerColumn::SchemaFingerprint.name();
+        let applied_at = SchemaLedgerColumn::AppliedAt.name();
+
+        format!(
+            r#"
+        UPDATE {}
+        SET
+            {schema_version} = $5,
+            {schema_fingerprint} = $6,
+            {applied_at} = statement_timestamp()
+        WHERE {component} = $1
+          AND {instance_key} = $2
+          AND {schema_version} = $3
+          AND {schema_fingerprint} = $4
+        "#,
+            self.table_name.quoted()
+        )
+    }
+}
+
+fn schema_ledger_column_list(columns: &[SchemaLedgerColumn]) -> String {
+    columns
+        .iter()
+        .map(|column| column.name())
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 #[cfg(test)]
@@ -57,6 +274,7 @@ pub(crate) fn test_schema_ledger_config() -> SchemaLedgerConfig {
     SchemaLedgerConfig::new(test_schema_ledger_table_name())
 }
 
+#[cfg(feature = "__auth_wip")]
 pub(crate) async fn record_component_schema_version_in_current_transaction(
     tx: &mut Tx<'_>,
     table_name: &PgQualifiedTableName,
@@ -64,22 +282,9 @@ pub(crate) async fn record_component_schema_version_in_current_transaction(
 ) -> Result<(), DbError> {
     validate_component_schema_version(component_schema_version)?;
     execute_schema_ledger_migration_in_current_transaction(tx, table_name).await?;
+    let catalog = SchemaLedgerCatalog::new(table_name);
 
-    let statement = format!(
-        r#"
-        INSERT INTO {} (
-            component,
-            instance_key,
-            schema_version,
-            schema_fingerprint,
-            applied_at
-        )
-        VALUES ($1, $2, $3, $4, statement_timestamp())
-        ON CONFLICT (component, instance_key)
-        DO NOTHING
-        "#,
-        table_name.quoted()
-    );
+    let statement = catalog.record_component_version_statement();
 
     tx.record_database_operation(
         DatabaseOperationKind::Execute,
@@ -98,6 +303,81 @@ pub(crate) async fn record_component_schema_version_in_current_transaction(
     Ok(())
 }
 
+pub(crate) async fn plan_component_schema_migration_in_current_transaction<'a>(
+    tx: &mut Tx<'_>,
+    table_name: &PgQualifiedTableName,
+    component_schema_version: ComponentSchemaVersion<'_>,
+    upgrade_steps: &'a [ComponentSchemaMigrationStep<'a>],
+) -> Result<ComponentSchemaMigrationPlan<'a>, DbError> {
+    validate_component_schema_version(component_schema_version)?;
+    execute_schema_ledger_migration_in_current_transaction(tx, table_name).await?;
+    let recorded = fetch_component_schema_version_row_in_current_transaction(
+        tx,
+        table_name,
+        component_schema_version,
+    )
+    .await?;
+    plan_component_schema_migration(component_schema_version, recorded, upgrade_steps)
+}
+
+pub(crate) async fn record_component_schema_migration_completion_in_current_transaction(
+    tx: &mut Tx<'_>,
+    table_name: &PgQualifiedTableName,
+    component_schema_version: ComponentSchemaVersion<'_>,
+    prior_recorded_version: Option<&RecordedComponentSchemaVersion>,
+) -> Result<(), DbError> {
+    validate_component_schema_version(component_schema_version)?;
+    let catalog = SchemaLedgerCatalog::new(table_name);
+
+    if let Some(prior_recorded_version) = prior_recorded_version {
+        let statement = catalog.update_component_version_statement();
+        tx.record_database_operation(
+            DatabaseOperationKind::Execute,
+            SCHEMA_LEDGER_OPERATION_UPDATE_COMPONENT_VERSION,
+            Some(statement.as_str()),
+        );
+        let rows_affected = pooler_safe_query(sqlx::AssertSqlSafe(statement.as_str()))
+            .bind(component_schema_version.component)
+            .bind(component_schema_version.instance_key)
+            .bind(prior_recorded_version.version)
+            .bind(prior_recorded_version.fingerprint.as_str())
+            .bind(component_schema_version.version)
+            .bind(component_schema_version.fingerprint)
+            .execute(tx.inner.as_mut())
+            .await
+            .map_err(DbError::query)?
+            .rows_affected();
+        if rows_affected != 1 {
+            return Err(DbError::schema_mismatch(format!(
+                "schema ledger row for component {:?} instance {:?} changed before migration completion",
+                component_schema_version.component, component_schema_version.instance_key
+            )));
+        }
+    } else {
+        let statement = catalog.record_component_version_statement();
+        tx.record_database_operation(
+            DatabaseOperationKind::Execute,
+            SCHEMA_LEDGER_OPERATION_RECORD_COMPONENT_VERSION,
+            Some(statement.as_str()),
+        );
+        pooler_safe_query(sqlx::AssertSqlSafe(statement.as_str()))
+            .bind(component_schema_version.component)
+            .bind(component_schema_version.instance_key)
+            .bind(component_schema_version.version)
+            .bind(component_schema_version.fingerprint)
+            .execute(tx.inner.as_mut())
+            .await
+            .map_err(DbError::query)?;
+    }
+
+    validate_component_schema_version_row_in_current_transaction(
+        tx,
+        table_name,
+        component_schema_version,
+    )
+    .await
+}
+
 pub(crate) async fn validate_component_schema_version_in_current_transaction(
     tx: &mut Tx<'_>,
     table_name: &PgQualifiedTableName,
@@ -105,16 +385,64 @@ pub(crate) async fn validate_component_schema_version_in_current_transaction(
 ) -> Result<(), DbError> {
     validate_component_schema_version(component_schema_version)?;
     validate_schema_ledger_with_transaction(tx, table_name).await?;
+    validate_component_schema_version_row_in_current_transaction(
+        tx,
+        table_name,
+        component_schema_version,
+    )
+    .await
+}
 
-    let statement = format!(
-        r#"
-        SELECT schema_version, schema_fingerprint
-        FROM {}
-        WHERE component = $1
-          AND instance_key = $2
-        "#,
-        table_name.quoted()
-    );
+async fn validate_component_schema_version_row_in_current_transaction(
+    tx: &mut Tx<'_>,
+    table_name: &PgQualifiedTableName,
+    component_schema_version: ComponentSchemaVersion<'_>,
+) -> Result<(), DbError> {
+    let actual = fetch_component_schema_version_row_in_current_transaction(
+        tx,
+        table_name,
+        component_schema_version,
+    )
+    .await?;
+
+    let Some(actual) = actual else {
+        return Err(DbError::schema_mismatch(format!(
+            "schema ledger row for component {:?} instance {:?} was not found",
+            component_schema_version.component, component_schema_version.instance_key
+        )));
+    };
+
+    if actual.version != component_schema_version.version {
+        return Err(DbError::schema_mismatch(format!(
+            "schema ledger row for component {:?} instance {:?} recorded version {}, expected {}",
+            component_schema_version.component,
+            component_schema_version.instance_key,
+            actual.version,
+            component_schema_version.version
+        )));
+    }
+
+    if actual.fingerprint != component_schema_version.fingerprint {
+        return Err(DbError::schema_mismatch(format!(
+            "schema ledger row for component {:?} instance {:?} recorded fingerprint {:?}, expected {:?}",
+            component_schema_version.component,
+            component_schema_version.instance_key,
+            actual.fingerprint,
+            component_schema_version.fingerprint
+        )));
+    }
+
+    Ok(())
+}
+
+async fn fetch_component_schema_version_row_in_current_transaction(
+    tx: &mut Tx<'_>,
+    table_name: &PgQualifiedTableName,
+    component_schema_version: ComponentSchemaVersion<'_>,
+) -> Result<Option<RecordedComponentSchemaVersion>, DbError> {
+    let catalog = SchemaLedgerCatalog::new(table_name);
+
+    let statement = catalog.fetch_component_version_statement();
 
     tx.record_database_operation(
         DatabaseOperationKind::FetchOptional,
@@ -128,34 +456,12 @@ pub(crate) async fn validate_component_schema_version_in_current_transaction(
         .await
         .map_err(DbError::query)?;
 
-    let Some((actual_version, actual_fingerprint)) = actual else {
-        return Err(DbError::schema_mismatch(format!(
-            "schema ledger row for component {:?} instance {:?} was not found",
-            component_schema_version.component, component_schema_version.instance_key
-        )));
-    };
-
-    if actual_version != component_schema_version.version {
-        return Err(DbError::schema_mismatch(format!(
-            "schema ledger row for component {:?} instance {:?} recorded version {}, expected {}",
-            component_schema_version.component,
-            component_schema_version.instance_key,
-            actual_version,
-            component_schema_version.version
-        )));
-    }
-
-    if actual_fingerprint != component_schema_version.fingerprint {
-        return Err(DbError::schema_mismatch(format!(
-            "schema ledger row for component {:?} instance {:?} recorded fingerprint {:?}, expected {:?}",
-            component_schema_version.component,
-            component_schema_version.instance_key,
-            actual_fingerprint,
-            component_schema_version.fingerprint
-        )));
-    }
-
-    Ok(())
+    Ok(
+        actual.map(|(version, fingerprint)| RecordedComponentSchemaVersion {
+            version,
+            fingerprint,
+        }),
+    )
 }
 
 pub(crate) fn schema_instance_key_for_parts<'a, I>(parts: I) -> String
@@ -276,16 +582,17 @@ async fn validate_schema_ledger_with_transaction_table(
     tx: &mut Tx<'_>,
     table_name: &PgQualifiedTableName,
 ) -> Result<(), DbError> {
-    let quoted_table_name = table_name.quoted().to_string();
-    validate_schema_ledger_required_columns(tx, &quoted_table_name).await?;
-    validate_schema_ledger_primary_key(tx, &quoted_table_name).await?;
-    validate_schema_ledger_required_check_constraints(tx, &quoted_table_name).await
+    let catalog = SchemaLedgerCatalog::new(table_name);
+    validate_schema_ledger_required_columns(tx, &catalog).await?;
+    validate_schema_ledger_primary_key(tx, &catalog).await?;
+    validate_schema_ledger_required_check_constraints(tx, &catalog).await
 }
 
 async fn validate_schema_ledger_required_columns(
     tx: &mut Tx<'_>,
-    quoted_table_name: &str,
+    catalog: &SchemaLedgerCatalog<'_>,
 ) -> Result<(), DbError> {
+    let quoted_table_name = catalog.quoted_table_name();
     let statement = r#"
         SELECT
             attr.attname,
@@ -304,18 +611,16 @@ async fn validate_schema_ledger_required_columns(
         Some(statement),
     );
     let actual_columns = pooler_safe_query_as::<(String, String, bool, Option<String>)>(statement)
-        .bind(quoted_table_name)
+        .bind(quoted_table_name.as_str())
         .fetch_all(tx.inner.as_mut())
         .await
         .map_err(DbError::query)?;
 
-    for (name, expected_type, expected_not_null, expected_collation) in [
-        ("component", "text", true, Some("C")),
-        ("instance_key", "text", true, Some("C")),
-        ("schema_version", "integer", true, None),
-        ("schema_fingerprint", "text", true, Some("C")),
-        ("applied_at", "timestamp with time zone", true, None),
-    ] {
+    for column in SCHEMA_LEDGER_REQUIRED_COLUMNS {
+        let name = column.name();
+        let expected_type = column.validation_type();
+        let expected_not_null = true;
+        let expected_collation = column.required_collation();
         let Some((_, actual_type, actual_not_null, actual_collation)) = actual_columns
             .iter()
             .find(|(column_name, ..)| column_name == name)
@@ -354,19 +659,20 @@ async fn validate_schema_ledger_required_columns(
 
 async fn validate_schema_ledger_primary_key(
     tx: &mut Tx<'_>,
-    quoted_table_name: &str,
+    catalog: &SchemaLedgerCatalog<'_>,
 ) -> Result<(), DbError> {
+    let quoted_table_name = catalog.quoted_table_name();
     let statement = r#"
         SELECT EXISTS (
             SELECT 1
             FROM pg_index idx
             JOIN pg_attribute component_attr
               ON component_attr.attrelid = idx.indrelid
-             AND component_attr.attname = 'component'
+             AND component_attr.attname = $2
              AND NOT component_attr.attisdropped
             JOIN pg_attribute instance_attr
               ON instance_attr.attrelid = idx.indrelid
-             AND instance_attr.attname = 'instance_key'
+             AND instance_attr.attname = $3
              AND NOT instance_attr.attisdropped
             WHERE idx.indrelid = to_regclass($1)
               AND idx.indisprimary
@@ -385,15 +691,18 @@ async fn validate_schema_ledger_primary_key(
         Some(statement),
     );
     let has_primary_key = pooler_safe_query_scalar::<bool>(statement)
-        .bind(quoted_table_name)
+        .bind(quoted_table_name.as_str())
+        .bind(SchemaLedgerColumn::Component.name())
+        .bind(SchemaLedgerColumn::InstanceKey.name())
         .fetch_one(tx.inner.as_mut())
         .await
         .map_err(DbError::query)?;
 
     if !has_primary_key {
+        let primary_key_columns = schema_ledger_column_list(&SCHEMA_LEDGER_PRIMARY_KEY_COLUMNS);
         return Err(DbError::schema_mismatch(format!(
-            "schema ledger table {} must have primary key (component, instance_key)",
-            quoted_table_name
+            "schema ledger table {} must have primary key ({})",
+            quoted_table_name, primary_key_columns
         )));
     }
 
@@ -402,8 +711,9 @@ async fn validate_schema_ledger_primary_key(
 
 async fn validate_schema_ledger_required_check_constraints(
     tx: &mut Tx<'_>,
-    quoted_table_name: &str,
+    catalog: &SchemaLedgerCatalog<'_>,
 ) -> Result<(), DbError> {
+    let quoted_table_name = catalog.quoted_table_name();
     let statement = r#"
         SELECT pg_get_expr(con.conbin, con.conrelid)
         FROM pg_constraint con
@@ -417,7 +727,7 @@ async fn validate_schema_ledger_required_check_constraints(
         Some(statement),
     );
     let normalized_check_expressions = pooler_safe_query_scalar::<String>(statement)
-        .bind(quoted_table_name)
+        .bind(quoted_table_name.as_str())
         .fetch_all(tx.inner.as_mut())
         .await
         .map_err(DbError::query)?
@@ -425,18 +735,10 @@ async fn validate_schema_ledger_required_check_constraints(
         .map(|expression| normalize_check_constraint_expression(&expression))
         .collect::<Vec<String>>();
 
-    for required_expression in [
-        format!(
-            "(octet_length(component)>0)AND(octet_length(component)<={MAX_SCHEMA_LEDGER_COMPONENT_BYTES})"
-        ),
-        format!(
-            "(octet_length(instance_key)>0)AND(octet_length(instance_key)<={MAX_SCHEMA_LEDGER_INSTANCE_KEY_BYTES})"
-        ),
-        "schema_version>0".to_owned(),
-        format!(
-            "(octet_length(schema_fingerprint)>0)AND(octet_length(schema_fingerprint)<={MAX_SCHEMA_LEDGER_FINGERPRINT_BYTES})"
-        ),
-    ] {
+    for column in SCHEMA_LEDGER_CHECKED_COLUMNS {
+        let required_expression = column
+            .normalized_check_constraint()
+            .expect("checked schema ledger column must define a constraint");
         if !normalized_check_expressions
             .iter()
             .any(|expression| expression == &required_expression)
@@ -452,45 +754,24 @@ async fn validate_schema_ledger_required_check_constraints(
 }
 
 fn build_create_schema_ledger_table_statement(table_name: &PgQualifiedTableName) -> String {
-    format!(
-        r#"
-        CREATE TABLE IF NOT EXISTS {} (
-            component TEXT COLLATE "C" NOT NULL CHECK (
-                octet_length(component) > 0
-                AND octet_length(component) <= {MAX_SCHEMA_LEDGER_COMPONENT_BYTES}
-            ),
-            instance_key TEXT COLLATE "C" NOT NULL CHECK (
-                octet_length(instance_key) > 0
-                AND octet_length(instance_key) <= {MAX_SCHEMA_LEDGER_INSTANCE_KEY_BYTES}
-            ),
-            schema_version INTEGER NOT NULL CHECK (schema_version > 0),
-            schema_fingerprint TEXT COLLATE "C" NOT NULL CHECK (
-                octet_length(schema_fingerprint) > 0
-                AND octet_length(schema_fingerprint) <= {MAX_SCHEMA_LEDGER_FINGERPRINT_BYTES}
-            ),
-            applied_at TIMESTAMPTZ NOT NULL,
-            PRIMARY KEY (component, instance_key)
-        )
-        "#,
-        table_name.quoted()
-    )
+    SchemaLedgerCatalog::new(table_name).create_table_statement()
 }
 
 fn validate_component_schema_version(
     component_schema_version: ComponentSchemaVersion<'_>,
 ) -> Result<(), DbError> {
     validate_bounded_nonempty_schema_ledger_text(
-        "component",
+        SchemaLedgerColumn::Component.name(),
         component_schema_version.component,
         MAX_SCHEMA_LEDGER_COMPONENT_BYTES,
     )?;
     validate_bounded_nonempty_schema_ledger_text(
-        "instance_key",
+        SchemaLedgerColumn::InstanceKey.name(),
         component_schema_version.instance_key,
         MAX_SCHEMA_LEDGER_INSTANCE_KEY_BYTES,
     )?;
     validate_bounded_nonempty_schema_ledger_text(
-        "schema_fingerprint",
+        SchemaLedgerColumn::SchemaFingerprint.name(),
         component_schema_version.fingerprint,
         MAX_SCHEMA_LEDGER_FINGERPRINT_BYTES,
     )?;

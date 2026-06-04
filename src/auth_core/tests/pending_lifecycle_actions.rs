@@ -11,7 +11,7 @@ fn credential_targeted_pending_actions_have_explicit_execution_contracts() {
     );
     assert_eq!(
         reset.execution(),
-        PendingLifecycleActionExecution::MethodOwnedCredentialMutation
+        PendingLifecycleActionExecution::MethodOwnedCredential
     );
     assert_eq!(
         reset.credential_state_after_execution(),
@@ -23,7 +23,7 @@ fn credential_targeted_pending_actions_have_explicit_execution_contracts() {
         .expect("replace pending action contract");
     assert_eq!(
         replace.execution(),
-        PendingLifecycleActionExecution::MethodOwnedCredentialMutation
+        PendingLifecycleActionExecution::MethodOwnedCredential
     );
     assert_eq!(
         replace.credential_state_after_execution(),
@@ -35,7 +35,7 @@ fn credential_targeted_pending_actions_have_explicit_execution_contracts() {
         .expect("remove pending action contract");
     assert_eq!(
         remove.execution(),
-        PendingLifecycleActionExecution::CoreCredentialStateMutation
+        PendingLifecycleActionExecution::CoreCredentialState
     );
     assert_eq!(
         remove.credential_state_after_execution(),
@@ -47,7 +47,7 @@ fn credential_targeted_pending_actions_have_explicit_execution_contracts() {
         .expect("regenerate pending action contract");
     assert_eq!(
         regenerate.execution(),
-        PendingLifecycleActionExecution::MethodOwnedCredentialMutation
+        PendingLifecycleActionExecution::MethodOwnedCredential
     );
     assert_eq!(
         regenerate.credential_state_after_execution(),
@@ -102,7 +102,7 @@ fn subject_deletion_pending_action_is_not_credential_targeted() {
     );
     assert_eq!(
         deletion.execution(),
-        PendingLifecycleActionExecution::CoreSubjectAuthStateMutation
+        PendingLifecycleActionExecution::CoreSubjectAuthState
     );
     assert_eq!(
         deletion.credential_state_after_execution(),
@@ -120,4 +120,31 @@ fn subject_deletion_pending_action_is_not_credential_targeted() {
         deletion.revocation(),
         PendingLifecycleActionRevocation::SubjectWideOnExecution
     );
+}
+
+#[test]
+fn subject_pending_action_record_tracks_subject_action_without_credential_target() {
+    let pending_action = PendingSubjectLifecycleActionRecord::new_open(
+        id("pending-subject-deletion"),
+        id("subject"),
+        SubjectLifecycleAction::DeleteSubjectAuthState,
+        at(100),
+        at(200),
+        at(300),
+    )
+    .expect("pending subject action");
+
+    assert!(pending_action.matches_subject_action(
+        &id("subject"),
+        SubjectLifecycleAction::DeleteSubjectAuthState
+    ));
+    assert!(!pending_action.matches_subject_action(
+        &id("other-subject"),
+        SubjectLifecycleAction::DeleteSubjectAuthState
+    ));
+    assert!(pending_action.is_open());
+    assert!(!pending_action.is_executable_at(at(199)));
+    assert!(pending_action.is_executable_at(at(200)));
+    assert!(pending_action.is_cancellable_at(at(299)));
+    assert!(!pending_action.is_cancellable_at(at(300)));
 }

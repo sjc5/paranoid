@@ -144,6 +144,12 @@ pub enum Error {
     CredentialLifecycleExecutionRequiresRuntimeMethodDispatch,
     /// Non-reset credential lifecycle cancellation requires runtime-owned lifecycle loading.
     CredentialLifecycleCancellationRequiresRuntimeLifecycleDecision,
+    /// Subject auth-state deletion scheduling requires runtime-owned lifecycle loading.
+    SubjectAuthStateDeletionSchedulingRequiresRuntimeLifecycleDecision,
+    /// Subject auth-state deletion execution requires runtime-owned lifecycle loading.
+    SubjectAuthStateDeletionExecutionRequiresRuntimeLifecycleDecision,
+    /// Subject auth-state deletion cancellation requires runtime-owned lifecycle loading.
+    SubjectAuthStateDeletionCancellationRequiresRuntimeLifecycleDecision,
     /// Out-of-band proof completion must use the challenge-response runtime path.
     OutOfBandActiveProofCompletionRequiresChallengeResponse,
     /// A verified proof carried a subject even though its family cannot resolve subjects.
@@ -177,6 +183,8 @@ pub enum Error {
     MissingFreshValue(&'static str),
     /// A delayed credential lifecycle action had impossible timing.
     InvalidCredentialLifecyclePendingActionTiming,
+    /// A delayed subject lifecycle action had impossible timing.
+    InvalidSubjectLifecyclePendingActionTiming,
     /// A credential lifecycle transition was not authorized by loaded policy.
     CredentialLifecycleActionNotAuthorized,
     /// Credential reset execution requires method-owned verifier mutation work.
@@ -195,6 +203,10 @@ pub enum Error {
     PendingCredentialLifecycleActionNotExecutable,
     /// A pending credential lifecycle action was not open for cancellation.
     PendingCredentialLifecycleActionNotCancellable,
+    /// A pending subject lifecycle action was not executable at the transition time.
+    PendingSubjectLifecycleActionNotExecutable,
+    /// A pending subject lifecycle action was not open for cancellation.
+    PendingSubjectLifecycleActionNotCancellable,
     /// Fresh random material could not be generated.
     FreshRandomMaterialUnavailable,
     /// Credential secrets must not be empty.
@@ -570,6 +582,24 @@ impl fmt::Display for Error {
                     "auth core: credential lifecycle cancellation requires runtime-owned lifecycle decision"
                 )
             }
+            Self::SubjectAuthStateDeletionSchedulingRequiresRuntimeLifecycleDecision => {
+                write!(
+                    f,
+                    "auth core: subject auth-state deletion scheduling requires runtime-owned lifecycle decision"
+                )
+            }
+            Self::SubjectAuthStateDeletionExecutionRequiresRuntimeLifecycleDecision => {
+                write!(
+                    f,
+                    "auth core: subject auth-state deletion execution requires runtime-owned lifecycle decision"
+                )
+            }
+            Self::SubjectAuthStateDeletionCancellationRequiresRuntimeLifecycleDecision => {
+                write!(
+                    f,
+                    "auth core: subject auth-state deletion cancellation requires runtime-owned lifecycle decision"
+                )
+            }
             Self::OutOfBandActiveProofCompletionRequiresChallengeResponse => {
                 write!(
                     f,
@@ -604,6 +634,12 @@ impl fmt::Display for Error {
                 write!(
                     f,
                     "auth core: credential lifecycle pending action timing is invalid"
+                )
+            }
+            Self::InvalidSubjectLifecyclePendingActionTiming => {
+                write!(
+                    f,
+                    "auth core: subject lifecycle pending action timing is invalid"
                 )
             }
             Self::CredentialLifecycleActionNotAuthorized => {
@@ -658,6 +694,18 @@ impl fmt::Display for Error {
                 write!(
                     f,
                     "auth core: pending credential lifecycle action is not cancellable"
+                )
+            }
+            Self::PendingSubjectLifecycleActionNotExecutable => {
+                write!(
+                    f,
+                    "auth core: pending subject lifecycle action is not executable"
+                )
+            }
+            Self::PendingSubjectLifecycleActionNotCancellable => {
+                write!(
+                    f,
+                    "auth core: pending subject lifecycle action is not cancellable"
                 )
             }
             Self::FreshRandomMaterialUnavailable => {

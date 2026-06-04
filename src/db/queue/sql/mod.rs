@@ -8,6 +8,7 @@ mod maintenance_sql;
 mod observability_sql;
 mod operator_sql;
 mod required_columns;
+mod runtime_fragments;
 mod schema_sql;
 mod worker_sql;
 
@@ -19,5 +20,6 @@ pub(super) use maintenance_sql::*;
 pub(super) use observability_sql::*;
 pub(super) use operator_sql::*;
 pub(super) use required_columns::*;
+pub(super) use runtime_fragments::*;
 pub(super) use schema_sql::*;
 pub(super) use worker_sql::*;

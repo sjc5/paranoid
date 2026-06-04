@@ -2,120 +2,56 @@ use super::*;
 
 pub(in crate::db::queue) fn required_job_columns() -> [RequiredColumn; 17] {
     [
-        required_bytea_column("id", false),
-        required_text_column("task_name", false, true),
-        RequiredColumn {
-            name: "payload",
-            data_type: "jsonb",
-            is_nullable: false,
-            collation_required: false,
-        },
-        required_text_column("status", false, true),
-        required_timestamp_column("run_at_or_after", false),
-        required_text_column("last_error", true, true),
-        required_integer_column("retry_count", false),
-        required_integer_column("max_retries", false),
-        required_bigint_column("timeout_nanos", false),
-        required_text_column("dedupe_key", true, true),
-        required_text_column("worker_id", true, true),
-        required_timestamp_column("claimed_by_worker_at", true),
-        required_timestamp_column("execution_started_at", true),
-        required_timestamp_column("execution_heartbeat_at", true),
-        required_timestamp_column("finished_at", true),
-        required_timestamp_column("created_at", false),
-        required_timestamp_column("updated_at", false),
+        required_column(QueueColumn::Id, false),
+        required_column(QueueColumn::TaskName, false),
+        required_column(QueueColumn::Payload, false),
+        required_column(QueueColumn::Status, false),
+        required_column(QueueColumn::RunAtOrAfter, false),
+        required_column(QueueColumn::LastError, true),
+        required_column(QueueColumn::RetryCount, false),
+        required_column(QueueColumn::MaxRetries, false),
+        required_column(QueueColumn::TimeoutNanos, false),
+        required_column(QueueColumn::DedupeKey, true),
+        required_column(QueueColumn::WorkerId, true),
+        required_column(QueueColumn::ClaimedByWorkerAt, true),
+        required_column(QueueColumn::ExecutionStartedAt, true),
+        required_column(QueueColumn::ExecutionHeartbeatAt, true),
+        required_column(QueueColumn::FinishedAt, true),
+        required_column(QueueColumn::CreatedAt, false),
+        required_column(QueueColumn::UpdatedAt, false),
     ]
 }
 
 pub(in crate::db::queue) fn required_dead_letter_columns() -> [RequiredColumn; 13] {
     [
-        required_bytea_column("id", false),
-        required_bytea_column("original_job_id", false),
-        required_text_column("task_name", false, true),
-        RequiredColumn {
-            name: "payload",
-            data_type: "jsonb",
-            is_nullable: false,
-            collation_required: false,
-        },
-        required_text_column("last_error", false, true),
-        required_integer_column("retry_count", false),
-        required_integer_column("max_retries", false),
-        required_bigint_column("timeout_nanos", false),
-        required_text_column("dedupe_key", true, true),
-        required_text_column("reason", false, true),
-        required_timestamp_column("dead_lettered_at", false),
-        required_timestamp_column("created_at", false),
-        required_timestamp_column("updated_at", false),
+        required_column(QueueColumn::Id, false),
+        required_column(QueueColumn::OriginalJobId, false),
+        required_column(QueueColumn::TaskName, false),
+        required_column(QueueColumn::Payload, false),
+        required_column(QueueColumn::LastError, false),
+        required_column(QueueColumn::RetryCount, false),
+        required_column(QueueColumn::MaxRetries, false),
+        required_column(QueueColumn::TimeoutNanos, false),
+        required_column(QueueColumn::DedupeKey, true),
+        required_column(QueueColumn::Reason, false),
+        required_column(QueueColumn::DeadLetteredAt, false),
+        required_column(QueueColumn::CreatedAt, false),
+        required_column(QueueColumn::UpdatedAt, false),
     ]
 }
 
 pub(in crate::db::queue) fn required_pause_columns() -> [RequiredColumn; 4] {
     [
-        required_text_column("key", false, true),
-        required_text_column("task_name", true, true),
-        required_timestamp_column("paused_at", false),
-        required_timestamp_column("updated_at", false),
+        required_column(QueueColumn::Key, false),
+        required_column(QueueColumn::TaskName, true),
+        required_column(QueueColumn::PausedAt, false),
+        required_column(QueueColumn::UpdatedAt, false),
     ]
 }
 
-pub(in crate::db::queue) fn required_text_column(
-    name: &'static str,
-    is_nullable: bool,
-    collation_required: bool,
-) -> RequiredColumn {
+fn required_column(column: QueueColumn, is_nullable: bool) -> RequiredColumn {
     RequiredColumn {
-        name,
-        data_type: "text",
         is_nullable,
-        collation_required,
-    }
-}
-
-pub(in crate::db::queue) fn required_bytea_column(
-    name: &'static str,
-    is_nullable: bool,
-) -> RequiredColumn {
-    RequiredColumn {
-        name,
-        data_type: "bytea",
-        is_nullable,
-        collation_required: false,
-    }
-}
-
-pub(in crate::db::queue) fn required_integer_column(
-    name: &'static str,
-    is_nullable: bool,
-) -> RequiredColumn {
-    RequiredColumn {
-        name,
-        data_type: "integer",
-        is_nullable,
-        collation_required: false,
-    }
-}
-
-pub(in crate::db::queue) fn required_bigint_column(
-    name: &'static str,
-    is_nullable: bool,
-) -> RequiredColumn {
-    RequiredColumn {
-        name,
-        data_type: "bigint",
-        is_nullable,
-        collation_required: false,
-    }
-}
-
-pub(in crate::db::queue) fn required_timestamp_column(
-    name: &'static str,
-    is_nullable: bool,
-) -> RequiredColumn {
-    RequiredColumn {
-        name,
-        data_type: "timestamp with time zone",
-        is_nullable,
-        collation_required: false,
+        column,
     }
 }

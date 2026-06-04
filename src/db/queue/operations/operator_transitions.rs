@@ -126,14 +126,20 @@ where
     .fetch_one(executor)
     .await
     .map_err(DbError::query)?;
-    let inserted_id: Option<Vec<u8>> = row.try_get("inserted_id").map_err(Error::decode_row)?;
-    let target_exists: bool = row.try_get("target_exists").map_err(Error::decode_row)?;
-    let target_matches_status: bool = row
-        .try_get("target_matches_status")
+    let inserted_id: Option<Vec<u8>> = row
+        .try_get(QueueQueryField::InsertedId.name())
         .map_err(Error::decode_row)?;
-    let visible_exists: bool = row.try_get("visible_exists").map_err(Error::decode_row)?;
+    let target_exists: bool = row
+        .try_get(QueueQueryField::TargetExists.name())
+        .map_err(Error::decode_row)?;
+    let target_matches_status: bool = row
+        .try_get(QueueQueryField::TargetMatchesStatus.name())
+        .map_err(Error::decode_row)?;
+    let visible_exists: bool = row
+        .try_get(QueueQueryField::VisibleExists.name())
+        .map_err(Error::decode_row)?;
     let visible_matches_status: bool = row
-        .try_get("visible_matches_status")
+        .try_get(QueueQueryField::VisibleMatchesStatus.name())
         .map_err(Error::decode_row)?;
     move_failed_job_to_dead_letter_result_from_row_state(
         inserted_id,

@@ -2,15 +2,9 @@ use super::*;
 use crate::db::normalize_check_constraint_expression;
 use sqlx::{Executor, Postgres};
 
-const EXPIRES_AT_INDEX_SUFFIX: &str = "expires_at";
-const CREATE_LEASE_TABLE_TEMPLATE_PREFIX: &str = "CREATE TABLE IF NOT EXISTS ";
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct RequiredColumn {
-    name: &'static str,
-    data_type: &'static str,
-    not_null: bool,
-    allowed_collations: &'static [&'static str],
+    column: LeaseColumn,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -168,13 +162,14 @@ where
         .collect::<Vec<_>>();
 
     for required_column in required_columns {
+        let required_column_name = required_column.column.name();
         let Some(actual_column) = actual_columns
             .iter()
-            .find(|column| column.name == required_column.name)
+            .find(|column| column.name == required_column_name)
         else {
             return Err(DbError::schema_mismatch(format!(
                 "required column {:?} not found on table {}",
-                required_column.name, quoted_table_name
+                required_column_name, quoted_table_name
             )));
         };
 
@@ -198,7 +193,7 @@ where
             FROM pg_index idx
             JOIN pg_attribute attr
               ON attr.attrelid = idx.indrelid
-             AND attr.attname = 'key'
+             AND attr.attname = $2
              AND NOT attr.attisdropped
             WHERE idx.indrelid = to_regclass($1)
               AND idx.indisunique
@@ -218,14 +213,16 @@ where
     );
     let has_usable_unique_key = pooler_safe_query_scalar::<bool>(statement)
         .bind(quoted_table_name)
+        .bind(LeaseColumn::Key.name())
         .fetch_one(executor)
         .await
         .map_err(DbError::query)?;
 
     if !has_usable_unique_key {
-        return Err(DbError::schema_mismatch(
-            r#"column "key" must have a unique or primary key constraint usable by ON CONFLICT (key)"#,
-        ));
+        let key = LeaseColumn::Key.name();
+        return Err(DbError::schema_mismatch(format!(
+            r#"column "{key}" must have a unique or primary key constraint usable by ON CONFLICT ({key})"#
+        )));
     }
 
     Ok(())
@@ -276,50 +273,12 @@ where
         fetch_normalized_check_constraint_expressions(executor, observer, quoted_table_name)
             .await?;
 
-    let required_key_length_expression =
-        format!("(octet_length(key)>0)AND(octet_length(key)<={MAX_LEASE_KEY_BYTES})");
-    if !normalized_check_expressions
-        .iter()
-        .any(|expression| expression == &required_key_length_expression)
-    {
-        return Err(DbError::schema_mismatch(format!(
-            r#"table {} must enforce CHECK (octet_length(key) > 0 AND octet_length(key) <= {})"#,
-            quoted_table_name, MAX_LEASE_KEY_BYTES
-        )));
-    }
-
-    let required_holder_id_length_expression = format!(
-        "(octet_length(holder_id)>0)AND(octet_length(holder_id)<={MAX_LEASE_HOLDER_ID_BYTES})"
-    );
-    if !normalized_check_expressions
-        .iter()
-        .any(|expression| expression == &required_holder_id_length_expression)
-    {
-        return Err(DbError::schema_mismatch(format!(
-            r#"table {} must enforce CHECK (octet_length(holder_id) > 0 AND octet_length(holder_id) <= {})"#,
-            quoted_table_name, MAX_LEASE_HOLDER_ID_BYTES
-        )));
-    }
-
-    if !normalized_check_expressions
-        .iter()
-        .any(|expression| expression == "fencing_token>0")
-    {
-        return Err(DbError::schema_mismatch(format!(
-            r#"table {} must enforce CHECK (fencing_token > 0)"#,
-            quoted_table_name
-        )));
-    }
-
-    let required_token_length_expression = format!("octet_length(lease_token)={LEASE_TOKEN_BYTES}");
-    if !normalized_check_expressions
-        .iter()
-        .any(|expression| expression == &required_token_length_expression)
-    {
-        return Err(DbError::schema_mismatch(format!(
-            r#"table {} must enforce CHECK (octet_length(lease_token) = {})"#,
-            quoted_table_name, LEASE_TOKEN_BYTES
-        )));
+    for column in LEASE_STATE_CHECKED_COLUMNS {
+        validate_required_check_constraint(
+            quoted_table_name,
+            &normalized_check_expressions,
+            column,
+        )?;
     }
 
     Ok(())
@@ -337,29 +296,39 @@ where
         fetch_normalized_check_constraint_expressions(executor, observer, quoted_table_name)
             .await?;
 
-    let required_key_length_expression =
-        format!("(octet_length(key)>0)AND(octet_length(key)<={MAX_LEASE_KEY_BYTES})");
-    if !normalized_check_expressions
-        .iter()
-        .any(|expression| expression == &required_key_length_expression)
-    {
-        return Err(DbError::schema_mismatch(format!(
-            r#"table {} must enforce CHECK (octet_length(key) > 0 AND octet_length(key) <= {})"#,
-            quoted_table_name, MAX_LEASE_KEY_BYTES
-        )));
-    }
-
-    if !normalized_check_expressions
-        .iter()
-        .any(|expression| expression == "last_fencing_token>0")
-    {
-        return Err(DbError::schema_mismatch(format!(
-            r#"table {} must enforce CHECK (last_fencing_token > 0)"#,
-            quoted_table_name
-        )));
+    for column in LEASE_FENCING_COUNTER_CHECKED_COLUMNS {
+        validate_required_check_constraint(
+            quoted_table_name,
+            &normalized_check_expressions,
+            column,
+        )?;
     }
 
     Ok(())
+}
+
+fn validate_required_check_constraint(
+    quoted_table_name: &str,
+    normalized_check_expressions: &[String],
+    column: LeaseColumn,
+) -> Result<(), DbError> {
+    let required_expression = column
+        .normalized_check_constraint()
+        .expect("checked lease column must define a constraint");
+    if normalized_check_expressions
+        .iter()
+        .any(|expression| expression == &required_expression)
+    {
+        return Ok(());
+    }
+
+    let expected_check = column
+        .human_check_constraint()
+        .expect("checked lease column must define a constraint");
+    Err(DbError::schema_mismatch(format!(
+        "table {} must enforce CHECK ({})",
+        quoted_table_name, expected_check
+    )))
 }
 
 async fn validate_expires_at_index<'e, E>(
@@ -371,7 +340,8 @@ async fn validate_expires_at_index<'e, E>(
 where
     E: Executor<'e, Database = Postgres>,
 {
-    let index_name = migration_index_identifier(config, EXPIRES_AT_INDEX_SUFFIX);
+    let expires_at = LeaseColumn::ExpiresAt.name();
+    let index_name = migration_index_identifier(config, expires_at);
     let statement = r#"
         SELECT EXISTS (
             SELECT 1
@@ -387,7 +357,7 @@ where
               AND idx.indnkeyatts = 1
               AND idx.indpred IS NULL
               AND idx.indexprs IS NULL
-              AND attr.attname = 'expires_at'
+              AND attr.attname = $3
         )
         "#;
     record_database_operation(
@@ -399,14 +369,16 @@ where
     let has_index = pooler_safe_query_scalar::<bool>(statement)
         .bind(quoted_table_name)
         .bind(index_name.as_str())
+        .bind(expires_at)
         .fetch_one(executor)
         .await
         .map_err(DbError::query)?;
 
     if !has_index {
         return Err(DbError::schema_mismatch(format!(
-            "table {} must have expires_at index {:?}",
+            "table {} must have {} index {:?}",
             quoted_table_name,
+            expires_at,
             index_name.as_str()
         )));
     }
@@ -419,22 +391,19 @@ fn validate_required_column(
     required_column: RequiredColumn,
     actual_column: &ActualColumn,
 ) -> Result<(), DbError> {
-    if actual_column.data_type != required_column.data_type {
+    let column_name = required_column.column.name();
+    let required_data_type = required_column.column.validation_type();
+    let allowed_collations = required_column.column.allowed_collations();
+
+    if actual_column.data_type != required_data_type {
         return Err(DbError::schema_mismatch(format!(
             "column {:?} on table {} must be type {:?}, got {:?}",
-            required_column.name,
-            quoted_table_name,
-            required_column.data_type,
-            actual_column.data_type
+            column_name, quoted_table_name, required_data_type, actual_column.data_type
         )));
     }
 
-    if actual_column.not_null != required_column.not_null {
-        let expected_nullability = if required_column.not_null {
-            "NOT NULL"
-        } else {
-            "NULL"
-        };
+    if !actual_column.not_null {
+        let expected_nullability = "NOT NULL";
         let actual_nullability = if actual_column.not_null {
             "NOT NULL"
         } else {
@@ -442,22 +411,16 @@ fn validate_required_column(
         };
         return Err(DbError::schema_mismatch(format!(
             "column {:?} on table {} must be {}, got {}",
-            required_column.name, quoted_table_name, expected_nullability, actual_nullability
+            column_name, quoted_table_name, expected_nullability, actual_nullability
         )));
     }
 
-    if !required_column.allowed_collations.is_empty() {
+    if !allowed_collations.is_empty() {
         let actual_collation = actual_column.collation.as_deref().unwrap_or("<none>");
-        if !required_column
-            .allowed_collations
-            .contains(&actual_collation)
-        {
+        if !allowed_collations.contains(&actual_collation) {
             return Err(DbError::schema_mismatch(format!(
                 "column {:?} on table {} must use one of collations {:?}, got {:?}",
-                required_column.name,
-                quoted_table_name,
-                required_column.allowed_collations,
-                actual_collation
+                column_name, quoted_table_name, allowed_collations, actual_collation
             )));
         }
     }
@@ -466,106 +429,17 @@ fn validate_required_column(
 }
 
 fn required_state_columns() -> [RequiredColumn; 6] {
-    [
-        RequiredColumn {
-            name: "key",
-            data_type: "text",
-            not_null: true,
-            allowed_collations: &["C", "POSIX"],
-        },
-        RequiredColumn {
-            name: "holder_id",
-            data_type: "text",
-            not_null: true,
-            allowed_collations: &["C", "POSIX"],
-        },
-        RequiredColumn {
-            name: "fencing_token",
-            data_type: "bigint",
-            not_null: true,
-            allowed_collations: &[],
-        },
-        RequiredColumn {
-            name: "lease_token",
-            data_type: "bytea",
-            not_null: true,
-            allowed_collations: &[],
-        },
-        RequiredColumn {
-            name: "expires_at",
-            data_type: "timestamp with time zone",
-            not_null: true,
-            allowed_collations: &[],
-        },
-        RequiredColumn {
-            name: "updated_at",
-            data_type: "timestamp with time zone",
-            not_null: true,
-            allowed_collations: &[],
-        },
-    ]
+    LEASE_STATE_COLUMNS.map(|column| RequiredColumn { column })
 }
 
 fn required_fencing_counter_columns() -> [RequiredColumn; 3] {
-    [
-        RequiredColumn {
-            name: "key",
-            data_type: "text",
-            not_null: true,
-            allowed_collations: &["C", "POSIX"],
-        },
-        RequiredColumn {
-            name: "last_fencing_token",
-            data_type: "bigint",
-            not_null: true,
-            allowed_collations: &[],
-        },
-        RequiredColumn {
-            name: "updated_at",
-            data_type: "timestamp with time zone",
-            not_null: true,
-            allowed_collations: &[],
-        },
-    ]
+    LEASE_FENCING_COUNTER_COLUMNS.map(|column| RequiredColumn { column })
 }
 
 pub(super) fn build_migrate_statements(config: &StoreConfig) -> [String; 3] {
     [
-        build_create_table_statement(config),
-        build_create_fencing_counter_table_statement(config),
-        build_create_expires_at_index_statement(config),
+        create_lease_table_statement(config),
+        create_fencing_counter_table_statement(config),
+        create_expires_at_index_statement(config),
     ]
-}
-
-fn build_create_table_statement(config: &StoreConfig) -> String {
-    format!(
-        r#"{CREATE_LEASE_TABLE_TEMPLATE_PREFIX}{} (
-    key TEXT COLLATE "C" PRIMARY KEY CHECK (octet_length(key) > 0 AND octet_length(key) <= {MAX_LEASE_KEY_BYTES}),
-    holder_id TEXT COLLATE "C" NOT NULL CHECK (octet_length(holder_id) > 0 AND octet_length(holder_id) <= {MAX_LEASE_HOLDER_ID_BYTES}),
-    fencing_token BIGINT NOT NULL CHECK (fencing_token > 0),
-    lease_token BYTEA NOT NULL CHECK (octet_length(lease_token) = {LEASE_TOKEN_BYTES}),
-    expires_at TIMESTAMPTZ NOT NULL,
-    updated_at TIMESTAMPTZ NOT NULL
-)"#,
-        config.table_name.quoted()
-    )
-}
-
-fn build_create_fencing_counter_table_statement(config: &StoreConfig) -> String {
-    format!(
-        r#"{CREATE_LEASE_TABLE_TEMPLATE_PREFIX}{} (
-    key TEXT COLLATE "C" PRIMARY KEY CHECK (octet_length(key) > 0 AND octet_length(key) <= {MAX_LEASE_KEY_BYTES}),
-    last_fencing_token BIGINT NOT NULL CHECK (last_fencing_token > 0),
-    updated_at TIMESTAMPTZ NOT NULL
-)"#,
-        config.fencing_counter_table_name.quoted()
-    )
-}
-
-fn build_create_expires_at_index_statement(config: &StoreConfig) -> String {
-    format!(
-        "CREATE INDEX IF NOT EXISTS {} ON {} (expires_at)",
-        migration_index_identifier(config, EXPIRES_AT_INDEX_SUFFIX).quoted(),
-        config.table_name.quoted()
-    )
 }

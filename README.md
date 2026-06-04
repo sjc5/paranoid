@@ -31,7 +31,7 @@ Default features are disabled. Enable only the namespaces your crate uses.
 
 ```toml
 [dependencies]
-paranoid = { version = "0.0.0-pre.4", features = ["db"] }
+paranoid = { version = "0.0.0-pre.5", features = ["db"] }
 ```
 
 Available feature groups:

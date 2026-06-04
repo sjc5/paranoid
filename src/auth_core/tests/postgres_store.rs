@@ -3,12 +3,48 @@ use super::*;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::db::{
-    PgIdentifier, PgSchemaName, Pool, PoolConfig, pooler_safe_query, pooler_safe_query_scalar,
-    unparameterized_simple_query,
+    BootstrapConfig, PgIdentifier, PgSchemaName, Pool, PoolConfig, pooler_safe_query,
+    pooler_safe_query_scalar, unparameterized_simple_query,
 };
 use secrecy::SecretString;
 
 static AUTH_POSTGRES_TEST_COUNTER: AtomicU64 = AtomicU64::new(1);
+
+#[test]
+fn default_auth_store_config_uses_db_bootstrap_schema_and_ledger() {
+    let bootstrap_config = BootstrapConfig::default();
+    let store_config =
+        super::super::postgres_store::PostgresAuthStoreConfig::for_db_bootstrap_config(
+            &bootstrap_config,
+        )
+        .expect("auth store config");
+
+    assert_eq!(
+        store_config
+            .schema_ledger_table_name()
+            .expect("schema ledger table"),
+        bootstrap_config.table_names().schema_ledger
+    );
+
+    let session_table = store_config
+        .table_name(PostgresAuthCoreTable::Session)
+        .expect("session table");
+    assert_eq!(session_table.schema(), Some(bootstrap_config.schema_name()));
+    assert_eq!(session_table.table().as_str(), "auth_sessions");
+    assert!(
+        !session_table.table().as_str().starts_with("__paranoid_"),
+        "dedicated-schema auth tables must not repeat the global Paranoid namespace prefix"
+    );
+
+    assert_eq!(
+        super::super::postgres_store::PostgresAuthStoreConfig::default(),
+        store_config
+    );
+    assert!(
+        super::super::postgres_store::schema_instance_key(&store_config).len() <= 1024,
+        "auth schema ledger instance key must fit the DB schema-ledger domain"
+    );
+}
 
 #[test]
 fn postgres_store_persists_stable_wire_mappings() {

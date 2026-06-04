@@ -35,7 +35,8 @@ impl Store {
 
     pub(crate) fn new_inner(config: StoreConfig) -> Result<Self, Error> {
         validate_distinct_table_names(&config)?;
-        let queries = Queries::new(&config.table_name);
+        let catalog = KvCatalog::new(&config);
+        let queries = Queries::new(&catalog);
         Ok(Self { config, queries })
     }
 

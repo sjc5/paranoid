@@ -247,10 +247,12 @@ pub(super) fn sqlx_error_is_active_dedupe_unique_violation(
     if !sqlx_error_is_unique_violation(error) {
         return false;
     }
+    let active_dedupe_index = active_dedupe_index_definition();
+    let active_dedupe_table_name = active_dedupe_index.table.table_name(config);
     let active_dedupe_index_name = migration_index_identifier(
-        UNIQUE_INDEX_KIND,
-        &config.table_name,
-        ACTIVE_DEDUPE_INDEX_SUFFIX,
+        active_dedupe_index.kind,
+        active_dedupe_table_name,
+        active_dedupe_index.suffix,
     );
     error
         .as_database_error()

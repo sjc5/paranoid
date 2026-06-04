@@ -112,7 +112,7 @@ async fn run_child_inside_isolated_database(child_command: Vec<OsString>) -> Res
 }
 
 fn child_command_from_cli_args(args: Vec<OsString>) -> Vec<OsString> {
-    if !args.first().is_some_and(|arg| arg == "--") {
+    if args.first().is_none_or(|arg| arg != "--") {
         return Vec::new();
     }
     args.into_iter().skip(1).collect()
@@ -553,12 +553,26 @@ async fn start_embedded_postgres(run_dir: &Path, postgres_port: u16) -> Result<P
         .start_db()
         .await
         .map_err(|error| format!("start embedded Postgres: {error}"))?;
-    postgres
-        .create_database(TEST_DATABASE_NAME)
-        .await
-        .map_err(|error| format!("create embedded Postgres test database: {error}"))?;
+    create_embedded_postgres_test_database(postgres_port).await?;
 
     Ok(postgres)
+}
+
+async fn create_embedded_postgres_test_database(postgres_port: u16) -> Result<(), String> {
+    let default_database_dsn = postgres_dsn(postgres_port, TEST_USER, TEST_PASSWORD, "postgres");
+    let (client, connection) = tokio_postgres::connect(&default_database_dsn, NoTls)
+        .await
+        .map_err(|error| format!("connect to embedded Postgres for database setup: {error}"))?;
+    tokio::spawn(async move {
+        if let Err(error) = connection.await {
+            eprintln!("embedded Postgres database setup connection error: {error}");
+        }
+    });
+
+    client
+        .batch_execute(&format!("CREATE DATABASE {TEST_DATABASE_NAME}"))
+        .await
+        .map_err(|error| format!("create embedded Postgres test database: {error}"))
 }
 
 async fn configure_test_database_roles(superuser_dsn: String) -> Result<(), String> {
@@ -688,18 +702,15 @@ async fn wait_for_pgbouncer(dsn: &str, child: &mut Child) -> Result<(), String> 
             return Err(format!("PgBouncer exited before readiness: {status}"));
         }
 
-        match tokio_postgres::connect(dsn, NoTls).await {
-            Ok((client, connection)) => {
-                tokio::spawn(async move {
-                    if let Err(error) = connection.await {
-                        eprintln!("PgBouncer readiness connection error: {error}");
-                    }
-                });
-                if client.simple_query("SELECT 1").await.is_ok() {
-                    return Ok(());
+        if let Ok((client, connection)) = tokio_postgres::connect(dsn, NoTls).await {
+            tokio::spawn(async move {
+                if let Err(error) = connection.await {
+                    eprintln!("PgBouncer readiness connection error: {error}");
                 }
+            });
+            if client.simple_query("SELECT 1").await.is_ok() {
+                return Ok(());
             }
-            Err(_) => {}
         }
 
         if started_at.elapsed() >= STARTUP_TIMEOUT {

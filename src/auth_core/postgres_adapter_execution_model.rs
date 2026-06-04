@@ -527,6 +527,42 @@ impl PostgresPreconditionExecutionContract {
                     },
                 ]
             }
+            Precondition::NoOpenPendingSubjectLifecycleActionForSubject { now, .. } => {
+                vec![
+                    PostgresPreconditionValidationStep::CloseExpiredOpenPendingSubjectLifecycleActionsBeforeUniquenessCheck {
+                        now: *now,
+                    },
+                    PostgresPreconditionValidationStep::TreatOpenPendingSubjectLifecycleActionUniqueViolationAsPreconditionFailure,
+                ]
+            }
+            Precondition::PendingSubjectLifecycleActionStillExecutable {
+                subject_id,
+                action,
+                now,
+                ..
+            } => {
+                vec![
+                    PostgresPreconditionValidationStep::PendingSubjectLifecycleActionOpenMatureUnexpiredAndSubjectMatched {
+                        subject_id: subject_id.clone(),
+                        action: *action,
+                        now: *now,
+                    },
+                ]
+            }
+            Precondition::PendingSubjectLifecycleActionStillCancellableForSubject {
+                subject_id,
+                action,
+                now,
+                ..
+            } => {
+                vec![
+                    PostgresPreconditionValidationStep::PendingSubjectLifecycleActionOpenUnexpiredAndSubjectMatched {
+                        subject_id: subject_id.clone(),
+                        action: *action,
+                        now: *now,
+                    },
+                ]
+            }
         };
         Self {
             kind: storage_contract.kind(),
@@ -578,6 +614,13 @@ pub enum PostgresPreconditionLockStep {
         /// Lifecycle action.
         action: CredentialLifecycleAction,
     },
+    /// Enforce the partial unique index for open pending subject lifecycle actions.
+    UseOpenPendingSubjectLifecycleActionUniqueIndex {
+        /// Subject targeted by the pending action.
+        subject_id: SubjectId,
+        /// Subject lifecycle action.
+        action: SubjectLifecycleAction,
+    },
 }
 
 impl PostgresPreconditionLockStep {
@@ -604,6 +647,13 @@ impl PostgresPreconditionLockStep {
                 action,
             } => Self::UseOpenPendingCredentialLifecycleActionUniqueIndex {
                 target_credential_instance_id: target_credential_instance_id.clone(),
+                action: *action,
+            },
+            StorageLockRequirement::EnforceOpenPendingSubjectLifecycleActionUniqueness {
+                subject_id,
+                action,
+            } => Self::UseOpenPendingSubjectLifecycleActionUniqueIndex {
+                subject_id: subject_id.clone(),
                 action: *action,
             },
         }
@@ -706,6 +756,31 @@ pub enum PostgresPreconditionValidationStep {
         target_credential_instance_id: VerifiedProofSourceId,
         /// Required lifecycle action.
         action: CredentialLifecycleAction,
+        /// Transition time.
+        now: UnixSeconds,
+    },
+    /// Expired open subject pending actions must be closed before uniqueness check.
+    CloseExpiredOpenPendingSubjectLifecycleActionsBeforeUniquenessCheck {
+        /// Transition time.
+        now: UnixSeconds,
+    },
+    /// The partial unique index is the race-proof open subject pending-action check.
+    TreatOpenPendingSubjectLifecycleActionUniqueViolationAsPreconditionFailure,
+    /// Pending subject lifecycle action must be open, mature, unexpired, and subject-matched.
+    PendingSubjectLifecycleActionOpenMatureUnexpiredAndSubjectMatched {
+        /// Required subject.
+        subject_id: SubjectId,
+        /// Required subject lifecycle action.
+        action: SubjectLifecycleAction,
+        /// Transition time.
+        now: UnixSeconds,
+    },
+    /// Pending subject lifecycle action must be open, unexpired, and subject-matched.
+    PendingSubjectLifecycleActionOpenUnexpiredAndSubjectMatched {
+        /// Required subject.
+        subject_id: SubjectId,
+        /// Required subject lifecycle action.
+        action: SubjectLifecycleAction,
         /// Transition time.
         now: UnixSeconds,
     },
@@ -1009,6 +1084,9 @@ fn postgres_table_for_record_kind(kind: &CoreStorageRecordKind) -> PostgresAuthC
         }
         CoreStorageRecordKind::PendingCredentialLifecycleAction => {
             PostgresAuthCoreTable::PendingCredentialLifecycleAction
+        }
+        CoreStorageRecordKind::PendingSubjectLifecycleAction => {
+            PostgresAuthCoreTable::PendingSubjectLifecycleAction
         }
         CoreStorageRecordKind::AuditEvent => PostgresAuthCoreTable::AuditEvent,
         CoreStorageRecordKind::CoreDurableEffectCommand => {

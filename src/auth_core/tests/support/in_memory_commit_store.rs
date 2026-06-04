@@ -21,6 +21,8 @@ pub(super) struct InMemoryCommitStore {
     pub(super) credential_instances: BTreeMap<VerifiedProofSourceId, CredentialInstanceMetadata>,
     pub(super) pending_credential_lifecycle_actions:
         BTreeMap<PendingCredentialLifecycleActionId, PendingCredentialLifecycleActionRecord>,
+    pub(super) pending_subject_lifecycle_actions:
+        BTreeMap<PendingSubjectLifecycleActionId, PendingSubjectLifecycleActionRecord>,
     pub(super) subject_revocations: BTreeMap<SubjectId, SubjectRevocationState>,
     pub(super) audit_events: Vec<AuditEvent>,
     pub(super) method_commit_work: Vec<MethodCommitWork>,
@@ -468,6 +470,68 @@ impl InMemoryCommitStore {
                     ));
                 }
             }
+            Precondition::NoOpenPendingSubjectLifecycleActionForSubject {
+                subject_id,
+                action,
+                now,
+            } => {
+                if self
+                    .pending_subject_lifecycle_actions
+                    .values()
+                    .any(|pending_action| {
+                        pending_action.subject_id == *subject_id
+                            && pending_action.action == *action
+                            && pending_action.closed_at.is_none()
+                            && *now < pending_action.expires_at
+                    })
+                {
+                    return Err(InMemoryCommitError::PreconditionFailed(
+                        "no open pending subject lifecycle action for subject",
+                    ));
+                }
+            }
+            Precondition::PendingSubjectLifecycleActionStillExecutable {
+                pending_action_id,
+                subject_id,
+                action,
+                now,
+            } => {
+                let pending_action = self
+                    .pending_subject_lifecycle_actions
+                    .get(pending_action_id)
+                    .ok_or(InMemoryCommitError::PreconditionFailed(
+                        "pending subject lifecycle action still executable",
+                    ))?;
+                if pending_action.subject_id != *subject_id
+                    || pending_action.action != *action
+                    || !pending_action.is_executable_at(*now)
+                {
+                    return Err(InMemoryCommitError::PreconditionFailed(
+                        "pending subject lifecycle action still executable",
+                    ));
+                }
+            }
+            Precondition::PendingSubjectLifecycleActionStillCancellableForSubject {
+                pending_action_id,
+                subject_id,
+                action,
+                now,
+            } => {
+                let pending_action = self
+                    .pending_subject_lifecycle_actions
+                    .get(pending_action_id)
+                    .ok_or(InMemoryCommitError::PreconditionFailed(
+                        "pending subject lifecycle action still cancellable for subject",
+                    ))?;
+                if pending_action.subject_id != *subject_id
+                    || pending_action.action != *action
+                    || !pending_action.is_cancellable_at(*now)
+                {
+                    return Err(InMemoryCommitError::PreconditionFailed(
+                        "pending subject lifecycle action still cancellable for subject",
+                    ));
+                }
+            }
         }
         Ok(())
     }
@@ -722,6 +786,29 @@ impl InMemoryCommitStore {
                     .get_mut(&pending_action_id)
                     .ok_or(InMemoryCommitError::MutationTargetMissing(
                         "pending credential lifecycle action",
+                    ))?;
+                pending_action.closed_at = Some(closed_at);
+            }
+            Mutation::CreatePendingSubjectLifecycleAction(pending_action) => {
+                if self
+                    .pending_subject_lifecycle_actions
+                    .insert(pending_action.pending_action_id.clone(), pending_action)
+                    .is_some()
+                {
+                    return Err(InMemoryCommitError::DuplicateRecord(
+                        "pending subject lifecycle action",
+                    ));
+                }
+            }
+            Mutation::ClosePendingSubjectLifecycleAction {
+                pending_action_id,
+                closed_at,
+            } => {
+                let pending_action = self
+                    .pending_subject_lifecycle_actions
+                    .get_mut(&pending_action_id)
+                    .ok_or(InMemoryCommitError::MutationTargetMissing(
+                        "pending subject lifecycle action",
                     ))?;
                 pending_action.closed_at = Some(closed_at);
             }

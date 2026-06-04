@@ -15,6 +15,7 @@ const POSTGRES_AUTH_CORE_TABLES: &[PostgresAuthCoreTable] = &[
     PostgresAuthCoreTable::CredentialRecoveryAuthority,
     PostgresAuthCoreTable::LifecycleAuthoritySource,
     PostgresAuthCoreTable::PendingCredentialLifecycleAction,
+    PostgresAuthCoreTable::PendingSubjectLifecycleAction,
     PostgresAuthCoreTable::AuditEvent,
     PostgresAuthCoreTable::CoreDurableEffectCommand,
 ];
@@ -72,6 +73,10 @@ impl PostgresAuthCoreSchemaContract {
             | CoreStorageTarget::OpenPendingCredentialLifecycleActionForTarget { .. } => {
                 PostgresAuthCoreTable::PendingCredentialLifecycleAction
             }
+            CoreStorageTarget::PendingSubjectLifecycleAction(_)
+            | CoreStorageTarget::OpenPendingSubjectLifecycleActionForSubject { .. } => {
+                PostgresAuthCoreTable::PendingSubjectLifecycleAction
+            }
             CoreStorageTarget::AuditEvents => PostgresAuthCoreTable::AuditEvent,
             CoreStorageTarget::CoreDurableEffectCommands => {
                 PostgresAuthCoreTable::CoreDurableEffectCommand
@@ -119,6 +124,8 @@ pub enum PostgresAuthCoreTable {
     LifecycleAuthoritySource,
     /// Delayed credential lifecycle actions.
     PendingCredentialLifecycleAction,
+    /// Delayed subject lifecycle actions.
+    PendingSubjectLifecycleAction,
     /// Append-only audit event stream.
     AuditEvent,
     /// Durable core effect command outbox.
@@ -143,6 +150,7 @@ impl PostgresAuthCoreTable {
             Self::CredentialRecoveryAuthority => "auth_credential_recovery_authorities",
             Self::LifecycleAuthoritySource => "auth_lifecycle_authority_sources",
             Self::PendingCredentialLifecycleAction => "auth_credential_lifecycle_pending_actions",
+            Self::PendingSubjectLifecycleAction => "auth_subject_lifecycle_pending_actions",
             Self::AuditEvent => "auth_audit_events",
             Self::CoreDurableEffectCommand => "auth_core_durable_effect_commands",
         }
@@ -172,6 +180,9 @@ impl PostgresAuthCoreTable {
             Self::LifecycleAuthoritySource => CoreStorageRecordKind::LifecycleAuthoritySource,
             Self::PendingCredentialLifecycleAction => {
                 CoreStorageRecordKind::PendingCredentialLifecycleAction
+            }
+            Self::PendingSubjectLifecycleAction => {
+                CoreStorageRecordKind::PendingSubjectLifecycleAction
             }
             Self::AuditEvent => CoreStorageRecordKind::AuditEvent,
             Self::CoreDurableEffectCommand => CoreStorageRecordKind::CoreDurableEffectCommand,
@@ -208,7 +219,7 @@ impl PostgresAuthCoreTableContract {
                     unix_seconds_column("revoked_at", true),
                 ],
                 vec![primary_key(["session_id"])],
-                PostgresTableWritePolicy::MutableRows,
+                PostgresTableWritePolicy::Mutable,
             ),
             PostgresAuthCoreTable::SessionCredentialSecretMac => table_contract(
                 table,
@@ -219,7 +230,7 @@ impl PostgresAuthCoreTableContract {
                     unix_seconds_column("created_at", false),
                 ],
                 vec![primary_key(["session_id", "secret_version"])],
-                PostgresTableWritePolicy::InsertOnlyRows,
+                PostgresTableWritePolicy::InsertOnly,
             ),
             PostgresAuthCoreTable::TrustedDeviceCredential => table_contract(
                 table,
@@ -241,7 +252,7 @@ impl PostgresAuthCoreTableContract {
                     ),
                 ],
                 vec![primary_key(["device_credential_id"])],
-                PostgresTableWritePolicy::MutableRows,
+                PostgresTableWritePolicy::Mutable,
             ),
             PostgresAuthCoreTable::TrustedDeviceCredentialSecretMac => table_contract(
                 table,
@@ -252,7 +263,7 @@ impl PostgresAuthCoreTableContract {
                     unix_seconds_column("created_at", false),
                 ],
                 vec![primary_key(["device_credential_id", "secret_version"])],
-                PostgresTableWritePolicy::InsertOnlyRows,
+                PostgresTableWritePolicy::InsertOnly,
             ),
             PostgresAuthCoreTable::ActiveProofAttempt => table_contract(
                 table,
@@ -267,7 +278,7 @@ impl PostgresAuthCoreTableContract {
                     unix_seconds_column("closed_at", true),
                 ],
                 vec![primary_key(["attempt_id"])],
-                PostgresTableWritePolicy::MutableRows,
+                PostgresTableWritePolicy::Mutable,
             ),
             PostgresAuthCoreTable::ActiveProofContinuationSecretMac => table_contract(
                 table,
@@ -277,7 +288,7 @@ impl PostgresAuthCoreTableContract {
                     unix_seconds_column("created_at", false),
                 ],
                 vec![primary_key(["attempt_id"])],
-                PostgresTableWritePolicy::InsertOnlyRows,
+                PostgresTableWritePolicy::InsertOnly,
             ),
             PostgresAuthCoreTable::ActiveProofSatisfiedProof => table_contract(
                 table,
@@ -298,7 +309,7 @@ impl PostgresAuthCoreTableContract {
                         None,
                     ),
                 ],
-                PostgresTableWritePolicy::MutableRows,
+                PostgresTableWritePolicy::Mutable,
             ),
             PostgresAuthCoreTable::ActiveProofChallenge => table_contract(
                 table,
@@ -333,7 +344,7 @@ impl PostgresAuthCoreTableContract {
                         Some(PostgresUniquePredicate::OpenRow),
                     ),
                 ],
-                PostgresTableWritePolicy::MutableRows,
+                PostgresTableWritePolicy::Mutable,
             ),
             PostgresAuthCoreTable::ActiveProofChallengeDeliveryKey => table_contract(
                 table,
@@ -347,7 +358,7 @@ impl PostgresAuthCoreTableContract {
                     unix_seconds_column("created_at", false),
                 ],
                 vec![primary_key(["challenge_id", "delivery_idempotency_key"])],
-                PostgresTableWritePolicy::InsertOnlyRows,
+                PostgresTableWritePolicy::InsertOnly,
             ),
             PostgresAuthCoreTable::SubjectAuthState => table_contract(
                 table,
@@ -356,7 +367,7 @@ impl PostgresAuthCoreTableContract {
                     unix_seconds_column("revoke_records_created_at_or_before", false),
                 ],
                 vec![primary_key(["subject_id"])],
-                PostgresTableWritePolicy::MutableRows,
+                PostgresTableWritePolicy::Mutable,
             ),
             PostgresAuthCoreTable::CredentialInstance => table_contract(
                 table,
@@ -370,7 +381,7 @@ impl PostgresAuthCoreTableContract {
                     unix_seconds_column("updated_at", false),
                 ],
                 vec![primary_key(["credential_instance_id"])],
-                PostgresTableWritePolicy::MutableRows,
+                PostgresTableWritePolicy::Mutable,
             ),
             PostgresAuthCoreTable::CredentialRecoveryAuthority => table_contract(
                 table,
@@ -387,7 +398,7 @@ impl PostgresAuthCoreTableContract {
                     "authority_id",
                     "authority_timing",
                 ])],
-                PostgresTableWritePolicy::MutableRows,
+                PostgresTableWritePolicy::Mutable,
             ),
             PostgresAuthCoreTable::LifecycleAuthoritySource => table_contract(
                 table,
@@ -398,7 +409,7 @@ impl PostgresAuthCoreTableContract {
                     unix_seconds_column("created_at", false),
                 ],
                 vec![primary_key(["source_kind", "source_id", "authority_id"])],
-                PostgresTableWritePolicy::MutableRows,
+                PostgresTableWritePolicy::Mutable,
             ),
             PostgresAuthCoreTable::PendingCredentialLifecycleAction => table_contract(
                 table,
@@ -420,7 +431,28 @@ impl PostgresAuthCoreTableContract {
                         Some(PostgresUniquePredicate::OpenRow),
                     ),
                 ],
-                PostgresTableWritePolicy::MutableRows,
+                PostgresTableWritePolicy::Mutable,
+            ),
+            PostgresAuthCoreTable::PendingSubjectLifecycleAction => table_contract(
+                table,
+                vec![
+                    id_column("pending_action_id", false),
+                    id_column("subject_id", false),
+                    core_enum_column("subject_lifecycle_action", false),
+                    unix_seconds_column("requested_at", false),
+                    unix_seconds_column("earliest_execute_at", false),
+                    unix_seconds_column("expires_at", false),
+                    unix_seconds_column("closed_at", true),
+                ],
+                vec![
+                    primary_key(["pending_action_id"]),
+                    unique(
+                        "subject_lifecycle_open_pending_action",
+                        ["subject_id", "subject_lifecycle_action"],
+                        Some(PostgresUniquePredicate::OpenRow),
+                    ),
+                ],
+                PostgresTableWritePolicy::Mutable,
             ),
             PostgresAuthCoreTable::AuditEvent => table_contract(
                 table,
@@ -441,7 +473,7 @@ impl PostgresAuthCoreTableContract {
                     unix_seconds_column("occurred_at", false),
                 ],
                 vec![primary_key(["audit_event_id"])],
-                PostgresTableWritePolicy::AppendOnlyRows,
+                PostgresTableWritePolicy::AppendOnly,
             ),
             PostgresAuthCoreTable::CoreDurableEffectCommand => table_contract(
                 table,
@@ -466,7 +498,7 @@ impl PostgresAuthCoreTableContract {
                     unix_seconds_column("created_at", false),
                 ],
                 vec![primary_key(["effect_command_id"])],
-                PostgresTableWritePolicy::AppendOnlyRows,
+                PostgresTableWritePolicy::AppendOnly,
             ),
         }
     }
@@ -606,11 +638,11 @@ pub enum PostgresUniquePredicate {
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum PostgresTableWritePolicy {
     /// Rows may be inserted and updated through core mutations.
-    MutableRows,
+    Mutable,
     /// Rows are inserted and never updated by the core.
-    InsertOnlyRows,
+    InsertOnly,
     /// Rows are append-only and must not be updated or deleted.
-    AppendOnlyRows,
+    AppendOnly,
 }
 
 /// Mapping from credential rows to MAC-over-secret rows.

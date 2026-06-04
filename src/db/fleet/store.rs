@@ -469,10 +469,48 @@ pub(crate) async fn migrate_schema_in_current_transaction(
 ) -> Result<(), crate::db::Error> {
     validate_distinct_table_names(config)
         .map_err(|error| DbError::schema_mismatch(error.to_string()))?;
-    migrate_kv_schema_in_current_transaction(tx, &config.kv_store_config()).await?;
-    migrate_lease_schema_in_current_transaction(tx, &config.lease_store_config()).await?;
-    record_fleet_schema_version_in_current_transaction(tx, config).await?;
-    validate_schema_in_current_transaction(tx, config).await
+
+    let instance_key = fleet_schema_instance_key(config);
+    let component_schema_version = fleet_component_schema_version(&instance_key);
+    let migration_plan = plan_component_schema_migration_in_current_transaction(
+        tx,
+        &config.schema_ledger_table_name,
+        component_schema_version,
+        FLEET_SCHEMA_MIGRATION_STEPS,
+    )
+    .await?;
+
+    match migration_plan {
+        ComponentSchemaMigrationPlan::FreshInstall => {
+            migrate_kv_schema_in_current_transaction(tx, &config.kv_store_config()).await?;
+            migrate_lease_schema_in_current_transaction(tx, &config.lease_store_config()).await?;
+            record_fleet_schema_migration_completion_in_current_transaction(
+                tx,
+                config,
+                component_schema_version,
+                None,
+            )
+            .await?;
+            validate_schema_in_current_transaction(tx, config).await
+        }
+        ComponentSchemaMigrationPlan::AlreadyCurrent => {
+            migrate_kv_schema_in_current_transaction(tx, &config.kv_store_config()).await?;
+            migrate_lease_schema_in_current_transaction(tx, &config.lease_store_config()).await?;
+            validate_schema_in_current_transaction(tx, config).await
+        }
+        ComponentSchemaMigrationPlan::Upgrade { from, steps } => {
+            execute_fleet_schema_upgrade_steps_in_current_transaction(tx, config, &steps).await?;
+            validate_fleet_backing_schemas_in_current_transaction(tx, config).await?;
+            record_fleet_schema_migration_completion_in_current_transaction(
+                tx,
+                config,
+                component_schema_version,
+                Some(&from),
+            )
+            .await?;
+            validate_schema_in_current_transaction(tx, config).await
+        }
+    }
 }
 
 /// Validates that the configured Fleet schema already exists and is compatible.
@@ -495,30 +533,34 @@ async fn validate_schema_in_current_transaction(
 ) -> Result<(), DbError> {
     validate_distinct_table_names(config)
         .map_err(|error| DbError::schema_mismatch(error.to_string()))?;
+    validate_fleet_backing_schemas_in_current_transaction(tx, config).await?;
+    validate_fleet_schema_version_in_current_transaction(tx, config).await
+}
+
+async fn validate_fleet_backing_schemas_in_current_transaction(
+    tx: &mut Tx<'_>,
+    config: &StoreConfig,
+) -> Result<(), DbError> {
     KvStore::new_inner(config.kv_store_config())
         .map_err(|error| DbError::schema_mismatch(error.to_string()))?
         .validate_schema_in_current_transaction_inner(tx)
         .await?;
     LeaseStore::new(config.lease_store_config())
         .validate_schema_in_current_transaction(tx)
-        .await?;
-    validate_fleet_schema_version_in_current_transaction(tx, config).await
+        .await
 }
 
-async fn record_fleet_schema_version_in_current_transaction(
+async fn record_fleet_schema_migration_completion_in_current_transaction(
     tx: &mut Tx<'_>,
     config: &StoreConfig,
+    component_schema_version: ComponentSchemaVersion<'_>,
+    prior_recorded_version: Option<&RecordedComponentSchemaVersion>,
 ) -> Result<(), DbError> {
-    let instance_key = fleet_schema_instance_key(config);
-    record_component_schema_version_in_current_transaction(
+    record_component_schema_migration_completion_in_current_transaction(
         tx,
         &config.schema_ledger_table_name,
-        ComponentSchemaVersion {
-            component: FLEET_SCHEMA_COMPONENT,
-            instance_key: &instance_key,
-            version: FLEET_SCHEMA_VERSION,
-            fingerprint: FLEET_SCHEMA_FINGERPRINT,
-        },
+        component_schema_version,
+        prior_recorded_version,
     )
     .await
 }
@@ -531,12 +573,7 @@ async fn validate_fleet_schema_version_in_current_transaction(
     validate_component_schema_version_in_current_transaction(
         tx,
         &config.schema_ledger_table_name,
-        ComponentSchemaVersion {
-            component: FLEET_SCHEMA_COMPONENT,
-            instance_key: &instance_key,
-            version: FLEET_SCHEMA_VERSION,
-            fingerprint: FLEET_SCHEMA_FINGERPRINT,
-        },
+        fleet_component_schema_version(&instance_key),
     )
     .await
 }
@@ -551,4 +588,30 @@ fn fleet_schema_instance_key(config: &StoreConfig) -> String {
             ("fencing_counter_table", &config.fencing_counter_table_name),
         ])
     )
+}
+
+fn fleet_component_schema_version(instance_key: &str) -> ComponentSchemaVersion<'_> {
+    ComponentSchemaVersion {
+        component: FLEET_SCHEMA_COMPONENT,
+        instance_key,
+        version: FLEET_SCHEMA_VERSION,
+        fingerprint: FLEET_SCHEMA_FINGERPRINT,
+    }
+}
+
+async fn execute_fleet_schema_upgrade_steps_in_current_transaction(
+    _tx: &mut Tx<'_>,
+    _config: &StoreConfig,
+    steps: &[ComponentSchemaMigrationStep<'_>],
+) -> Result<(), DbError> {
+    debug_assert!(
+        steps.is_empty(),
+        "Fleet has no executable schema upgrade steps yet"
+    );
+    if steps.is_empty() {
+        return Ok(());
+    }
+    Err(DbError::schema_mismatch(
+        "Fleet schema upgrade steps were planned but no Fleet upgrade executor exists",
+    ))
 }

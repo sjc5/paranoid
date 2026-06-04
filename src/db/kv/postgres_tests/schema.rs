@@ -3,76 +3,70 @@ use super::*;
 #[tokio::test]
 async fn kv_migration_creates_schema_that_validation_accepts() {
     let test_database = TestDatabase::connect().await;
+    let config = unique_kv_config_with_unique_schema_ledger();
 
-    drop_test_table(&test_database.sqlx_pool, &test_database.config.table_name).await;
-    migrate_kv_schema(&test_database.paranoid_pool, &test_database.config)
+    drop_test_table(&test_database.sqlx_pool, &config.table_name).await;
+    drop_test_table(&test_database.sqlx_pool, &config.schema_ledger_table_name).await;
+    migrate_kv_schema(&test_database.paranoid_pool, &config)
         .await
         .expect("migrate");
-    migrate_kv_schema(&test_database.paranoid_pool, &test_database.config)
+    migrate_kv_schema(&test_database.paranoid_pool, &config)
         .await
         .expect("second migrate");
-    validate_kv_schema(&test_database.paranoid_pool, &test_database.config)
+    validate_kv_schema(&test_database.paranoid_pool, &config)
         .await
         .expect("validate");
     assert_eq!(
         fetch_schema_ledger_fingerprint(
             &test_database.sqlx_pool,
-            &test_database.config.schema_ledger_table_name,
+            &config.schema_ledger_table_name,
             "kv",
-            &format!("table={}", test_database.config.table_name.quoted()),
+            &format!("table={}", config.table_name.quoted()),
         )
         .await,
         Some("paranoid.kv.v1".to_owned())
     );
 
     let key_collation =
-        fetch_key_column_collation(&test_database.sqlx_pool, &test_database.config.table_name)
-            .await;
+        fetch_key_column_collation(&test_database.sqlx_pool, &config.table_name).await;
     assert!(
         matches!(key_collation.as_deref(), Some("C" | "POSIX")),
         "key column collation = {key_collation:?}"
     );
 
-    let has_text_pattern_index = fetch_has_key_text_pattern_ops_index(
-        &test_database.sqlx_pool,
-        &test_database.config.table_name,
-    )
-    .await;
+    let has_text_pattern_index =
+        fetch_has_key_text_pattern_ops_index(&test_database.sqlx_pool, &config.table_name).await;
     assert!(has_text_pattern_index);
     assert!(
-        fetch_has_expires_at_partial_index(
-            &test_database.sqlx_pool,
-            &test_database.config.table_name,
-        )
-        .await
+        fetch_has_expires_at_partial_index(&test_database.sqlx_pool, &config.table_name,).await
     );
-    assert!(
-        fetch_has_updated_at_index(&test_database.sqlx_pool, &test_database.config.table_name,)
-            .await
-    );
+    assert!(fetch_has_updated_at_index(&test_database.sqlx_pool, &config.table_name,).await);
 
-    drop_test_table(&test_database.sqlx_pool, &test_database.config.table_name).await;
+    drop_test_table(&test_database.sqlx_pool, &config.table_name).await;
+    drop_test_table(&test_database.sqlx_pool, &config.schema_ledger_table_name).await;
 }
 
 #[tokio::test]
 async fn kv_validation_rejects_missing_schema_ledger_row() {
     let test_database = TestDatabase::connect().await;
+    let config = unique_kv_config_with_unique_schema_ledger();
 
-    drop_test_table(&test_database.sqlx_pool, &test_database.config.table_name).await;
-    migrate_kv_schema(&test_database.paranoid_pool, &test_database.config)
+    drop_test_table(&test_database.sqlx_pool, &config.table_name).await;
+    drop_test_table(&test_database.sqlx_pool, &config.schema_ledger_table_name).await;
+    migrate_kv_schema(&test_database.paranoid_pool, &config)
         .await
         .expect("migrate");
 
-    let instance_key = format!("table={}", test_database.config.table_name.quoted());
+    let instance_key = format!("table={}", config.table_name.quoted());
     delete_schema_ledger_row(
         &test_database.sqlx_pool,
-        &test_database.config.schema_ledger_table_name,
+        &config.schema_ledger_table_name,
         "kv",
         &instance_key,
     )
     .await;
 
-    let err = validate_kv_schema(&test_database.paranoid_pool, &test_database.config)
+    let err = validate_kv_schema(&test_database.paranoid_pool, &config)
         .await
         .expect_err("validation should reject missing schema ledger row");
     assert!(
@@ -80,29 +74,32 @@ async fn kv_validation_rejects_missing_schema_ledger_row() {
         "error = {err:?}"
     );
 
-    drop_test_table(&test_database.sqlx_pool, &test_database.config.table_name).await;
+    drop_test_table(&test_database.sqlx_pool, &config.table_name).await;
+    drop_test_table(&test_database.sqlx_pool, &config.schema_ledger_table_name).await;
 }
 
 #[tokio::test]
 async fn kv_migration_rejects_conflicting_schema_ledger_row_without_overwriting_it() {
     let test_database = TestDatabase::connect().await;
+    let config = unique_kv_config_with_unique_schema_ledger();
 
-    drop_test_table(&test_database.sqlx_pool, &test_database.config.table_name).await;
-    migrate_kv_schema(&test_database.paranoid_pool, &test_database.config)
+    drop_test_table(&test_database.sqlx_pool, &config.table_name).await;
+    drop_test_table(&test_database.sqlx_pool, &config.schema_ledger_table_name).await;
+    migrate_kv_schema(&test_database.paranoid_pool, &config)
         .await
         .expect("migrate");
 
-    let instance_key = format!("table={}", test_database.config.table_name.quoted());
+    let instance_key = format!("table={}", config.table_name.quoted());
     overwrite_schema_ledger_fingerprint(
         &test_database.sqlx_pool,
-        &test_database.config.schema_ledger_table_name,
+        &config.schema_ledger_table_name,
         "kv",
         &instance_key,
         "not.paranoid.kv.v1",
     )
     .await;
 
-    let err = migrate_kv_schema(&test_database.paranoid_pool, &test_database.config)
+    let err = migrate_kv_schema(&test_database.paranoid_pool, &config)
         .await
         .expect_err("migration should reject conflicting schema ledger row");
     let message = err.to_string();
@@ -119,7 +116,7 @@ async fn kv_migration_rejects_conflicting_schema_ledger_row_without_overwriting_
     assert_eq!(
         fetch_schema_ledger_fingerprint(
             &test_database.sqlx_pool,
-            &test_database.config.schema_ledger_table_name,
+            &config.schema_ledger_table_name,
             "kv",
             &instance_key,
         )
@@ -127,7 +124,51 @@ async fn kv_migration_rejects_conflicting_schema_ledger_row_without_overwriting_
         Some("not.paranoid.kv.v1".to_owned())
     );
 
-    drop_test_table(&test_database.sqlx_pool, &test_database.config.table_name).await;
+    drop_test_table(&test_database.sqlx_pool, &config.table_name).await;
+    drop_test_table(&test_database.sqlx_pool, &config.schema_ledger_table_name).await;
+}
+
+#[tokio::test]
+async fn kv_migration_rejects_future_schema_ledger_row_before_current_schema_ddl() {
+    let test_database = TestDatabase::connect().await;
+    let config = unique_kv_config_with_unique_schema_ledger();
+
+    drop_test_table(&test_database.sqlx_pool, &config.table_name).await;
+    drop_test_table(&test_database.sqlx_pool, &config.schema_ledger_table_name).await;
+    migrate_kv_schema(&test_database.paranoid_pool, &config)
+        .await
+        .expect("migrate");
+
+    let instance_key = format!("table={}", config.table_name.quoted());
+    overwrite_schema_ledger_version_and_fingerprint(
+        &test_database.sqlx_pool,
+        &config.schema_ledger_table_name,
+        "kv",
+        &instance_key,
+        2,
+        "paranoid.kv.v2",
+    )
+    .await;
+    drop_test_table(&test_database.sqlx_pool, &config.table_name).await;
+
+    let err = migrate_kv_schema(&test_database.paranoid_pool, &config)
+        .await
+        .expect_err("migration should reject a future schema ledger row");
+    let message = err.to_string();
+    assert!(
+        matches!(err, DbError::SchemaMismatch { .. }),
+        "error = {err:?}"
+    );
+    assert!(
+        message.contains("newer than supported"),
+        "error message should describe the future schema version: {message}"
+    );
+    assert!(
+        !fetch_table_exists(&test_database.sqlx_pool, &config.table_name).await,
+        "migration must reject the future ledger row before recreating the current KV table"
+    );
+
+    drop_test_table(&test_database.sqlx_pool, &config.schema_ledger_table_name).await;
 }
 
 #[tokio::test]
@@ -168,10 +209,16 @@ async fn kv_migration_rejects_default_collation_schema_ledger_text_columns() {
 #[tokio::test]
 async fn kv_schema_ledger_migration_is_safe_under_concurrent_startup() {
     let test_database = TestDatabase::connect().await;
+    let schema_ledger_table_name = unique_test_table_name();
 
     let configs = (0..12)
-        .map(|_| KvStoreConfig::new(unique_test_table_name()).expect("kv config"))
+        .map(|_| {
+            let mut config = KvStoreConfig::new(unique_test_table_name()).expect("kv config");
+            config.schema_ledger_table_name = schema_ledger_table_name.clone();
+            config
+        })
         .collect::<Vec<_>>();
+    drop_test_table(&test_database.sqlx_pool, &schema_ledger_table_name).await;
     for config in &configs {
         drop_test_table(&test_database.sqlx_pool, &config.table_name).await;
     }
@@ -207,6 +254,7 @@ async fn kv_schema_ledger_migration_is_safe_under_concurrent_startup() {
         );
         drop_test_table(&test_database.sqlx_pool, &config.table_name).await;
     }
+    drop_test_table(&test_database.sqlx_pool, &schema_ledger_table_name).await;
 }
 
 async fn create_schema_ledger_with_default_collation_column(
@@ -630,4 +678,34 @@ async fn overwrite_schema_ledger_fingerprint(
         .expect("overwrite schema ledger fingerprint")
         .rows_affected();
     assert_eq!(rows, 1, "schema ledger row should exist before overwrite");
+}
+
+async fn overwrite_schema_ledger_version_and_fingerprint(
+    pool: &PgPool,
+    table_name: &PgQualifiedTableName,
+    component: &str,
+    instance_key: &str,
+    version: i32,
+    fingerprint: &str,
+) {
+    let statement = format!(
+        "UPDATE {} SET schema_version = $1, schema_fingerprint = $2 WHERE component = $3 AND instance_key = $4",
+        table_name.quoted()
+    );
+    let rows = sqlx::query(sqlx::AssertSqlSafe(statement.as_str()))
+        .bind(version)
+        .bind(fingerprint)
+        .bind(component)
+        .bind(instance_key)
+        .execute(pool)
+        .await
+        .expect("overwrite schema ledger version and fingerprint")
+        .rows_affected();
+    assert_eq!(rows, 1, "schema ledger row should exist before overwrite");
+}
+
+fn unique_kv_config_with_unique_schema_ledger() -> KvStoreConfig {
+    let mut config = KvStoreConfig::new(unique_test_table_name()).expect("kv config");
+    config.schema_ledger_table_name = unique_test_table_name();
+    config
 }

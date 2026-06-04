@@ -18,6 +18,7 @@ pub const TEST_QUEUE_PAUSE_TABLE_NAME: &str = "__paranoid_queue_pauses";
 pub(crate) const QUEUE_SCHEMA_COMPONENT: &str = "queue";
 pub(crate) const QUEUE_SCHEMA_VERSION: i32 = 1;
 pub(crate) const QUEUE_SCHEMA_FINGERPRINT: &str = "paranoid.queue.v1";
+pub(crate) const QUEUE_SCHEMA_MIGRATION_STEPS: &[ComponentSchemaMigrationStep<'static>] = &[];
 
 /// Default number of retries for newly enqueued jobs.
 pub const DEFAULT_QUEUE_MAX_RETRIES: u32 = 5;
@@ -154,10 +155,10 @@ pub(crate) const WORKER_INDEX_SUFFIX: &str = "worker";
 pub(crate) const EXECUTION_HEARTBEAT_INDEX_SUFFIX: &str = "execution_heartbeat";
 pub(crate) const CLEANUP_INDEX_SUFFIX: &str = "cleanup";
 pub(crate) const ACTIVE_DEDUPE_INDEX_SUFFIX: &str = "dedupe_active";
-pub(crate) const DEAD_LETTERED_AT_INDEX_SUFFIX: &str = "dead_lettered_at";
+pub(crate) const DEAD_LETTERED_AT_INDEX_SUFFIX: &str = QueueColumn::DeadLetteredAt.name();
 pub(crate) const TASK_DEAD_LETTERED_AT_INDEX_SUFFIX: &str = "task_dead_lettered_at";
 pub(crate) const ORIGINAL_JOB_INDEX_SUFFIX: &str = "original_job";
-pub(crate) const PAUSE_TASK_INDEX_SUFFIX: &str = "task_name";
+pub(crate) const PAUSE_TASK_INDEX_SUFFIX: &str = QueueColumn::TaskName.name();
 pub(crate) const JOB_STATUS_CONSTRAINT_SUFFIX: &str = "status_allowed";
 pub(crate) const JOB_LIFECYCLE_CONSTRAINT_SUFFIX: &str = "status_lifecycle_shape";
 pub(crate) const JOB_NUMERIC_CONSTRAINT_SUFFIX: &str = "numeric_domains";

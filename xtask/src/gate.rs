@@ -123,9 +123,11 @@ fn run_gate(options: Options) -> Result<i32, String> {
 fn gate_steps(fuzz_runs: u64) -> Vec<GateStep> {
     vec![
         make_step("feature-gate"),
+        make_step("clippy-gate"),
         make_step("tool-gate"),
         make_step("bench-gate"),
         make_step("test"),
+        make_step("test-db"),
         GateStep {
             name: "fuzz",
             command: make_command("fuzz"),
@@ -249,9 +251,17 @@ mod tests {
         let names = steps.iter().map(|step| step.name).collect::<Vec<_>>();
         assert_eq!(
             names,
-            vec!["feature-gate", "tool-gate", "bench-gate", "test", "fuzz"]
+            vec![
+                "feature-gate",
+                "clippy-gate",
+                "tool-gate",
+                "bench-gate",
+                "test",
+                "test-db",
+                "fuzz"
+            ]
         );
-        assert_eq!(steps[4].env, vec![("FUZZ_RUNS", OsString::from("9"))]);
+        assert_eq!(steps[6].env, vec![("FUZZ_RUNS", OsString::from("9"))]);
     }
 
     #[test]

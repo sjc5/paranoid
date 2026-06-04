@@ -161,7 +161,7 @@ pub enum RuntimeAdapterPipelineStage {
 }
 
 /// Fresh credential secrets materialized during one atomic commit.
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct MaterializedFreshCredentialSecrets {
     materialized: Vec<MaterializedFreshCredentialSecret>,
     targets: Vec<CoreStorageTarget>,
@@ -244,15 +244,6 @@ impl AtomicCommitSuccess {
         self,
     ) -> MaterializedFreshCredentialSecrets {
         self.materialized_fresh_credential_secrets
-    }
-}
-
-impl Default for MaterializedFreshCredentialSecrets {
-    fn default() -> Self {
-        Self {
-            materialized: Vec::new(),
-            targets: Vec::new(),
-        }
     }
 }
 

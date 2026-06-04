@@ -33,6 +33,7 @@ mod loaded_state_model;
 mod method_adapter_contract_model;
 mod outcome_model;
 mod postgres_adapter_execution_model;
+mod postgres_bootstrap;
 mod postgres_method_runtime;
 mod postgres_recovery_code_method;
 mod postgres_runtime;
@@ -72,9 +73,9 @@ pub(crate) use active_proof_model::{
     WeakProofGateVerificationRequest, WeakProofGateVerifier,
 };
 pub(crate) use challenge_cookie_model::{
-    ACTIVE_PROOF_CHALLENGE_FAST_FAIL_NONCE_BYTES, ActiveProofChallengeCookieDraft,
-    ActiveProofChallengeFastFailMac, ActiveProofChallengeFastFailNonce,
-    ActiveProofChallengeResponseSecret,
+    ACTIVE_PROOF_CHALLENGE_FAST_FAIL_NONCE_BYTES, ActiveProofChallengeCookieContext,
+    ActiveProofChallengeCookieDraft, ActiveProofChallengeFastFailMac,
+    ActiveProofChallengeFastFailNonce, ActiveProofChallengeResponseSecret,
 };
 use challenge_cookie_model::{
     online_guessing_risk_from_wire_id, online_guessing_risk_wire_id, proof_family_from_wire_id,
@@ -196,6 +197,15 @@ pub(crate) fn reduce_command(
         }
         Command::CancelNonResetPendingCredentialLifecycleAction(command) => {
             credential_lifecycle::cancel_non_reset_pending_credential_lifecycle_action(command)
+        }
+        Command::ScheduleSubjectAuthStateDeletion(command) => {
+            credential_lifecycle::schedule_subject_auth_state_deletion(command)
+        }
+        Command::ExecutePendingSubjectAuthStateDeletion(command) => {
+            credential_lifecycle::execute_pending_subject_auth_state_deletion(command)
+        }
+        Command::CancelPendingSubjectAuthStateDeletion(command) => {
+            credential_lifecycle::cancel_pending_subject_auth_state_deletion(command)
         }
     }
 }

@@ -3,9 +3,10 @@ use super::sql_state::{
     SQLSTATE_NOT_NULL_VIOLATION, SQLSTATE_SERIALIZATION_FAILURE, SQLSTATE_UNIQUE_VIOLATION,
 };
 use super::*;
+use crate::id::SortableId as UniqueTestId;
 use proptest::prelude::*;
 use secrecy::SecretString;
-use sqlx::{ConnectOptions, Execute};
+use sqlx::{ConnectOptions, Execute, Row};
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -382,6 +383,173 @@ fn pool_config_debug_does_not_expose_database_url_secret() {
     assert!(!debug_output.contains("postgres://"));
 }
 
+#[tokio::test]
+async fn component_schema_migration_chain_executes_real_physical_upgrade() {
+    let database_url = postgres_test_support::standard_test_database_url();
+    let pool = connect_write_pool_for_db_test(
+        &database_url,
+        "paranoid_component_schema_migration_upgrade_test",
+    )
+    .await;
+    let ledger_table = unique_db_test_table_name("__paranoid_test_upgrade_ledger");
+    let component_table = unique_db_test_table_name("__paranoid_test_upgrade_component");
+    let component = "test_component_upgrade";
+    let instance_key = format!("table={}", component_table.quoted());
+    let v1 = ComponentSchemaVersion {
+        component,
+        instance_key: instance_key.as_str(),
+        version: 1,
+        fingerprint: "test-v1",
+    };
+    let v2 = ComponentSchemaVersion {
+        version: 2,
+        fingerprint: "test-v2",
+        ..v1
+    };
+    let migration_steps = [ComponentSchemaMigrationStep::new(
+        schema_migration::ComponentSchemaMigrationTarget::new(1, "test-v1"),
+        schema_migration::ComponentSchemaMigrationTarget::new(2, "test-v2"),
+    )];
+
+    postgres_test_support::drop_test_table(pool.sqlx_pool(), &component_table).await;
+    postgres_test_support::drop_test_table(pool.sqlx_pool(), &ledger_table).await;
+
+    let mut install_tx = pool
+        .begin_transaction()
+        .await
+        .expect("begin install transaction");
+    assert_eq!(
+        plan_component_schema_migration_in_current_transaction(
+            &mut install_tx,
+            &ledger_table,
+            v1,
+            &[]
+        )
+        .await
+        .expect("plan fresh install"),
+        ComponentSchemaMigrationPlan::FreshInstall
+    );
+    unparameterized_simple_query(sqlx::AssertSqlSafe(format!(
+        "CREATE TABLE {} (id BYTEA PRIMARY KEY)",
+        component_table.quoted()
+    )))
+    .execute(install_tx.sqlx_transaction().as_mut())
+    .await
+    .expect("create v1 component table");
+    record_component_schema_migration_completion_in_current_transaction(
+        &mut install_tx,
+        &ledger_table,
+        v1,
+        None,
+    )
+    .await
+    .expect("record v1 completion");
+    install_tx.commit().await.expect("commit v1 install");
+
+    let mut upgrade_tx = pool
+        .begin_transaction()
+        .await
+        .expect("begin upgrade transaction");
+    let prior_recorded_version = match plan_component_schema_migration_in_current_transaction(
+        &mut upgrade_tx,
+        &ledger_table,
+        v2,
+        &migration_steps,
+    )
+    .await
+    .expect("plan upgrade")
+    {
+        ComponentSchemaMigrationPlan::Upgrade { from, steps } => {
+            assert_eq!(from.version, 1);
+            assert_eq!(from.fingerprint, "test-v1");
+            assert_eq!(steps, migration_steps);
+            from
+        }
+        other => panic!("expected upgrade plan, got {other:?}"),
+    };
+
+    unparameterized_simple_query(sqlx::AssertSqlSafe(format!(
+        "ALTER TABLE {} ADD COLUMN payload BYTEA NOT NULL DEFAULT ''::bytea",
+        component_table.quoted()
+    )))
+    .execute(upgrade_tx.sqlx_transaction().as_mut())
+    .await
+    .expect("execute physical v1 to v2 migration");
+    assert!(
+        fetch_column_exists_in_current_transaction(&mut upgrade_tx, &component_table, "payload")
+            .await
+    );
+    record_component_schema_migration_completion_in_current_transaction(
+        &mut upgrade_tx,
+        &ledger_table,
+        v2,
+        Some(&prior_recorded_version),
+    )
+    .await
+    .expect("record v2 completion");
+    upgrade_tx.commit().await.expect("commit v2 upgrade");
+
+    let mut validation_tx = pool
+        .begin_transaction()
+        .await
+        .expect("begin validation transaction");
+    validate_component_schema_version_in_current_transaction(&mut validation_tx, &ledger_table, v2)
+        .await
+        .expect("validate v2 ledger row");
+    assert!(
+        fetch_column_exists_in_current_transaction(&mut validation_tx, &component_table, "payload")
+            .await
+    );
+    validation_tx
+        .rollback()
+        .await
+        .expect("rollback validation transaction");
+}
+
 fn test_pool_config(database_url: &str) -> PoolConfig {
     PoolConfig::new(SecretString::from(database_url.to_owned()))
+}
+
+async fn connect_write_pool_for_db_test(database_url: &str, application_name: &str) -> WritePool {
+    let mut config = test_pool_config(database_url);
+    config.max_connections = 5;
+    config.application_name = Some(application_name.to_owned());
+    WritePool::connect(config)
+        .await
+        .expect("connect write pool")
+}
+
+fn unique_db_test_table_name(prefix: &str) -> PgQualifiedTableName {
+    let suffix = UniqueTestId::new()
+        .expect("new unique test id")
+        .to_text()
+        .replace('-', "_");
+    PgQualifiedTableName::unqualified(format!("{prefix}_{suffix}")).expect("test table name")
+}
+
+async fn fetch_column_exists_in_current_transaction(
+    tx: &mut WriteTx<'_>,
+    table_name: &PgQualifiedTableName,
+    column_name: &str,
+) -> bool {
+    let schema_name = table_name.schema().map(PgSchemaName::as_str);
+    let row = portable_query(
+        r#"
+        SELECT EXISTS (
+            SELECT 1
+            FROM information_schema.columns
+            WHERE table_schema = COALESCE($1, current_schema())
+              AND table_name = $2
+              AND column_name = $3
+        )
+        "#,
+    )
+    .bind(schema_name)
+    .bind(table_name.table().as_str())
+    .bind(column_name)
+    .fetch_one(tx.sqlx_transaction().as_mut())
+    .await
+    .expect("fetch column existence");
+
+    row.try_get(0).expect("decode column existence")
 }

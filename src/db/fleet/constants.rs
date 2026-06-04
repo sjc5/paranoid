@@ -18,6 +18,7 @@ pub const TEST_FLEET_FENCING_COUNTER_TABLE_NAME: &str = "__paranoid_fleet_fencin
 pub(crate) const FLEET_SCHEMA_COMPONENT: &str = "fleet";
 pub(crate) const FLEET_SCHEMA_VERSION: i32 = 1;
 pub(crate) const FLEET_SCHEMA_FINGERPRINT: &str = "paranoid.fleet.v1";
+pub(crate) const FLEET_SCHEMA_MIGRATION_STEPS: &[ComponentSchemaMigrationStep<'static>] = &[];
 
 pub(crate) const FLEET_MUTEX_COMPONENT_KEY: &str = "mutex";
 

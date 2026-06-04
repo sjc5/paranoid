@@ -16,7 +16,7 @@ ergonomics.
 
 ## Where We Are Now
 
-Auth-core readiness estimate: about 41%.
+Auth-core readiness estimate: about 42%.
 
 Auth is private WIP behind the `__auth_wip` feature. The lower-core planner, runtime-owned
 continuation/cookie shape, fast-fail challenge model, Postgres runtime slices, method
@@ -220,11 +220,12 @@ expose safe lifecycle transitions rather than low-level mutation helpers.
 - [ ] Define passkey removal/replacement policy.
 - [ ] Define OIDC-linked recovery policy.
 - [ ] Define last-strong-factor protection in core lifecycle policy.
-- [ ] Define account or subject-auth-state deletion scheduling.
-- [ ] Define deletion cancellation.
+- [x] Define lower-core account or subject-auth-state deletion scheduling.
+- [x] Define lower-core subject-auth-state deletion cancellation.
 - [x] Define credential-reset pending action records.
-- [ ] Define long-wait pending action records for deletion, second-factor reset, and
-      delayed credential replacement.
+- [x] Define long-wait pending action records for subject-auth-state deletion.
+- [ ] Define long-wait pending action records for second-factor reset and delayed
+      credential replacement scheduling.
 - [x] Define credential-reset pending-action execution preconditions.
 - [x] Define credential-reset pending-action cancellation preconditions and authenticated
       runtime facade.
@@ -239,8 +240,11 @@ expose safe lifecycle transitions rather than low-level mutation helpers.
 - [x] Add Postgres runtime facades for delayed non-reset credential-targeted action
       execution and authenticated cancellation, with method work constructed internally by
       the registered target-credential plugin.
-- [ ] Define pending-action execution preconditions for deletion and other
-      subject-targeted waits.
+- [x] Define pending-action execution preconditions for subject-auth-state deletion.
+- [x] Add Postgres runtime facades for delayed subject-auth-state deletion execution and
+      authenticated cancellation, loading subject pending-action records internally and
+      deriving cancellation authority from the current live session.
+- [ ] Define pending-action execution preconditions for other subject-targeted waits.
 - [ ] Define how second-factor reset is selected as a policy role over credential reset,
       without making it a separate credential kind.
 - [ ] Define admin/support recovery as a Paranoid-shaped verified intervention.
@@ -248,8 +252,10 @@ expose safe lifecycle transitions rather than low-level mutation helpers.
       and reset execution.
 - [x] Define lower-core durable notices for non-reset pending replacement, removal, and
       regeneration execution/cancellation.
+- [x] Define lower-core durable notices for subject-auth-state deletion scheduling,
+      execution, and cancellation.
 - [ ] Define durable notices for credential additions, mounted removals, admin
-      interventions, and deletion cancellation.
+      interventions, and mounted deletion integration.
 - [ ] Define which lifecycle mutations require immediate subject-wide revocation.
 - [ ] Define which lifecycle mutations require step-up freshness.
 - [ ] Define which lifecycle mutations require delayed execution.
@@ -302,8 +308,22 @@ This phase turns the executable model into a production Postgres subsystem.
 - [x] Route Postgres auth paths through transaction-pooler-safe query helpers.
 - [x] Store internal identifiers and secrets with byte-stable database semantics.
 - [x] Commit method-owned state atomically through registered method work.
+- [x] Add auth-specific source guards for production auth Postgres code covering portable
+      query constructors, raw pool bypasses, session-level Postgres features,
+      transaction-local `set_config`, database-owned time, and schema-version ordering.
 - [ ] Finish concrete Postgres auth schema.
 - [ ] Finish auth migration execution and validation.
+- [x] Make the core auth Postgres store derive from Paranoid's DB foundation by default:
+      DB bootstrap schema, shared schema ledger, and schema-local core table names.
+- [x] Make first-party Postgres method configs derive schema-local method table names from
+      the DB foundation schema by default.
+- [x] Build the private WIP auth bootstrap facade that runs after DB foundation bootstrap,
+      constructs the core store plus registered method plugins from one DB bootstrap
+      config, and performs auth migration or validation without application-managed table
+      choreography.
+- [x] Add end-to-end auth bootstrap tests proving the facade uses the shared DB foundation
+      schema ledger, schema-local core/method tables, transaction-pooler-safe SQL, and no
+      auth advisory-lock path.
 - [ ] Pin operation counts for hot auth paths once schema is less fluid.
 - [ ] Integrate durable effects with Paranoid queue.
 - [ ] Commit delivery commands atomically with auth transitions.
@@ -439,7 +459,3 @@ realistic fictitious application rather than only reducer internals.
 - [ ] Verify public API names match the high-level Paranoid philosophy.
 - [ ] Verify public alpha docs clearly mark remaining non-alpha features.
 - [ ] release auth in public alpha
-- [ ] Extend DB source guards to all auth Postgres code or add equivalent auth-specific
-      guards while auth remains private.
-- [ ] Rework auth WIP storage to use the same dedicated-schema bootstrap model before any
-      public auth release.

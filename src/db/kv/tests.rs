@@ -91,7 +91,8 @@ fn migration_sql_uses_c_collation_and_text_pattern_ops() {
 #[test]
 fn migration_sql_does_not_use_session_level_postgres_features() {
     let config = StoreConfig::default();
-    let queries = Queries::new(&config.table_name);
+    let catalog = KvCatalog::new(&config);
+    let queries = Queries::new(&catalog);
     let joined = [
         build_migrate_statements(&config).join("\n"),
         queries.delete_expired_keys_once,
@@ -119,9 +120,8 @@ fn migration_sql_does_not_use_session_level_postgres_features() {
 #[test]
 fn key_suffix_scan_sql_does_not_fetch_values() {
     let config = StoreConfig::default();
-    let query = Queries::new(&config.table_name)
-        .scan_keys_with_prefix
-        .to_lowercase();
+    let catalog = KvCatalog::new(&config);
+    let query = Queries::new(&catalog).scan_keys_with_prefix.to_lowercase();
 
     assert!(query.trim_start().starts_with("select key from "));
     assert!(!query.contains("value"));
@@ -132,7 +132,8 @@ fn key_suffix_scan_sql_does_not_fetch_values() {
 #[test]
 fn atomic_mutation_sql_uses_direct_locked_row_mutations() {
     let config = StoreConfig::default();
-    let queries = Queries::new(&config.table_name);
+    let catalog = KvCatalog::new(&config);
+    let queries = Queries::new(&catalog);
 
     assert!(queries.lock_key_for_atomic_mutation.contains("FOR UPDATE"));
     assert!(
@@ -193,7 +194,8 @@ fn atomic_mutation_sql_uses_direct_locked_row_mutations() {
 #[test]
 fn slot_and_batch_sql_paths_are_set_based_and_pooler_safe() {
     let config = StoreConfig::default();
-    let queries = Queries::new(&config.table_name);
+    let catalog = KvCatalog::new(&config);
+    let queries = Queries::new(&catalog);
 
     let ensure_slot_keys_exist = queries.ensure_slot_keys_exist.to_lowercase();
     assert!(
@@ -242,6 +244,14 @@ fn slot_and_batch_sql_paths_are_set_based_and_pooler_safe() {
         );
     }
 
+    assert!(
+        !queries
+            .delete_keys_with_prefix_once
+            .to_lowercase()
+            .contains("statement_timestamp"),
+        "prefix deletion query must physically delete expired and live prefix rows"
+    );
+
     let namespace_delete = queries
         .delete_namespace_keys_with_prefix_once
         .to_lowercase();
@@ -256,6 +266,10 @@ fn slot_and_batch_sql_paths_are_set_based_and_pooler_safe() {
     assert!(
         !namespace_delete.contains("skip locked"),
         "namespace deletion query should wait for locked namespace rows: {namespace_delete}"
+    );
+    assert!(
+        !namespace_delete.contains("statement_timestamp"),
+        "namespace deletion query must physically delete expired and live namespace rows: {namespace_delete}"
     );
     assert!(
         namespace_delete.contains("limit $"),

@@ -6,16 +6,20 @@ use super::fleet::{
 };
 #[cfg(test)]
 use super::test_schema_ledger_table_name;
+#[cfg(test)]
+use super::validate_component_schema_version_in_current_transaction;
 use super::{
-    ComponentSchemaVersion, DatabaseOperationKind, DatabaseOperationObserver, DbError,
-    PgIdentifier, PgQualifiedTableName, PgSqlState, Pool, Tx, WritePool, WriteTx,
+    ComponentSchemaMigrationPlan, ComponentSchemaMigrationStep, ComponentSchemaVersion,
+    DatabaseOperationKind, DatabaseOperationObserver, DbError, PgIdentifier, PgQualifiedTableName,
+    PgSqlState, Pool, RecordedComponentSchemaVersion, Tx, WritePool, WriteTx,
     duration_from_nonnegative_f64_seconds,
     finish_pool_owned_rollback_only_transaction_and_preserve_rollback_error,
     finish_pool_owned_write_transaction_and_preserve_rollback_error,
     normalize_check_constraint_expression, pg_table_name_set_could_contain_same_relation,
-    pooler_safe_query, pooler_safe_query_scalar, random_unit_f64_from_system,
-    record_component_schema_version_in_current_transaction, record_database_operation,
-    schema_instance_key_for_parts, validate_component_schema_version_in_current_transaction,
+    plan_component_schema_migration_in_current_transaction, pooler_safe_query,
+    pooler_safe_query_scalar, random_unit_f64_from_system,
+    record_component_schema_migration_completion_in_current_transaction, record_database_operation,
+    schema_instance_key_for_parts,
 };
 use crate::id;
 use serde::Serialize;

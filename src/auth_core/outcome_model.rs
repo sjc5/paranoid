@@ -99,6 +99,12 @@ pub enum Outcome {
     NonResetPendingCredentialLifecycleActionCancelled(
         NonResetPendingCredentialLifecycleActionCancellationOutcome,
     ),
+    /// A delayed subject-auth-state deletion action was scheduled.
+    SubjectAuthStateDeletionScheduled(SubjectAuthStateDeletionScheduledOutcome),
+    /// A delayed subject-auth-state deletion action was executed.
+    PendingSubjectAuthStateDeletionExecuted(PendingSubjectAuthStateDeletionExecutionOutcome),
+    /// A delayed subject-auth-state deletion action was cancelled.
+    PendingSubjectAuthStateDeletionCancelled(PendingSubjectAuthStateDeletionCancellationOutcome),
 }
 
 /// Semantic result of a revocation command.
@@ -194,6 +200,37 @@ pub struct NonResetPendingCredentialLifecycleActionCancellationOutcome {
     pub action: CredentialLifecycleAction,
     /// Pending action that was cancelled.
     pub pending_action_id: PendingCredentialLifecycleActionId,
+}
+
+/// Semantic result of scheduling delayed subject-auth-state deletion.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SubjectAuthStateDeletionScheduledOutcome {
+    /// Subject whose auth state is scheduled for deletion.
+    pub subject_id: SubjectId,
+    /// Pending action id.
+    pub pending_action_id: PendingSubjectLifecycleActionId,
+    /// Earliest execution time.
+    pub earliest_execute_at: UnixSeconds,
+    /// Expiration time.
+    pub expires_at: UnixSeconds,
+}
+
+/// Semantic result of executing delayed subject-auth-state deletion.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PendingSubjectAuthStateDeletionExecutionOutcome {
+    /// Subject whose auth state was deleted or invalidated.
+    pub subject_id: SubjectId,
+    /// Pending action consumed by this execution.
+    pub pending_action_id: PendingSubjectLifecycleActionId,
+}
+
+/// Semantic result of cancelling delayed subject-auth-state deletion.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PendingSubjectAuthStateDeletionCancellationOutcome {
+    /// Subject whose pending deletion was cancelled.
+    pub subject_id: SubjectId,
+    /// Pending action that was cancelled.
+    pub pending_action_id: PendingSubjectLifecycleActionId,
 }
 
 /// Authenticated-session details returned by the reducer.

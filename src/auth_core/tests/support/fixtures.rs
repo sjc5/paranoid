@@ -41,15 +41,18 @@ pub(super) fn active_proof_challenge_cookie_for_issue_proof(
     let mut mac = vec![17_u8; crate::crypto::MAC_OVER_SECRET_SIZE];
     mac[0] = 1;
     ActiveProofChallengeCookieDraft::new(
-        id(attempt_id),
-        id(challenge_id),
-        proof,
-        issued_at,
-        expires_at,
-        ActiveProofChallengeFastFailNonce::from_bytes(
-            &[23_u8; ACTIVE_PROOF_CHALLENGE_FAST_FAIL_NONCE_BYTES],
+        ActiveProofChallengeCookieContext::new(
+            id(attempt_id),
+            id(challenge_id),
+            proof,
+            issued_at,
+            expires_at,
+            ActiveProofChallengeFastFailNonce::from_bytes(
+                &[23_u8; ACTIVE_PROOF_CHALLENGE_FAST_FAIL_NONCE_BYTES],
+            )
+            .expect("nonce"),
         )
-        .expect("nonce"),
+        .expect("challenge cookie context"),
         ActiveProofChallengeFastFailMac::from_bytes(&mac).expect("mac"),
     )
     .expect("challenge cookie")
@@ -831,8 +834,64 @@ pub(super) fn precondition_kind_names(plan: &CommitPlan) -> Vec<&'static str> {
             Precondition::PendingCredentialLifecycleActionStillCancellableForTarget { .. } => {
                 "pending_credential_lifecycle_action_still_cancellable_for_target"
             }
+            Precondition::NoOpenPendingSubjectLifecycleActionForSubject { .. } => {
+                "no_open_pending_subject_lifecycle_action_for_subject"
+            }
+            Precondition::PendingSubjectLifecycleActionStillExecutable { .. } => {
+                "pending_subject_lifecycle_action_still_executable"
+            }
+            Precondition::PendingSubjectLifecycleActionStillCancellableForSubject { .. } => {
+                "pending_subject_lifecycle_action_still_cancellable_for_subject"
+            }
         })
         .collect()
+}
+
+pub(super) fn plan_has_no_open_pending_subject_lifecycle_action_guard(
+    plan: &CommitPlan,
+    subject_id: &SubjectId,
+    action: SubjectLifecycleAction,
+) -> bool {
+    plan.preconditions.iter().any(|precondition| {
+        matches!(
+            precondition,
+            Precondition::NoOpenPendingSubjectLifecycleActionForSubject {
+                subject_id: guarded_subject_id,
+                action: guarded_action,
+                ..
+            } if guarded_subject_id == subject_id && *guarded_action == action
+        )
+    })
+}
+
+pub(super) fn plan_has_pending_subject_lifecycle_action_executable_guard(
+    plan: &CommitPlan,
+    pending_action_id: &PendingSubjectLifecycleActionId,
+) -> bool {
+    plan.preconditions.iter().any(|precondition| {
+        matches!(
+            precondition,
+            Precondition::PendingSubjectLifecycleActionStillExecutable {
+                pending_action_id: guarded_pending_action_id,
+                ..
+            } if guarded_pending_action_id == pending_action_id
+        )
+    })
+}
+
+pub(super) fn plan_has_pending_subject_lifecycle_action_cancellable_guard(
+    plan: &CommitPlan,
+    pending_action_id: &PendingSubjectLifecycleActionId,
+) -> bool {
+    plan.preconditions.iter().any(|precondition| {
+        matches!(
+            precondition,
+            Precondition::PendingSubjectLifecycleActionStillCancellableForSubject {
+                pending_action_id: guarded_pending_action_id,
+                ..
+            } if guarded_pending_action_id == pending_action_id
+        )
+    })
 }
 
 pub(super) fn assert_state_dependent_mutations_have_commit_time_guards(
@@ -1003,6 +1062,30 @@ pub(super) fn assert_state_dependent_mutations_have_commit_time_guards(
                             pending_action_id
                         ),
                     "{plan_name}: pending credential lifecycle action closure must guard executable or cancellable state"
+                );
+            }
+            Mutation::CreatePendingSubjectLifecycleAction(pending_action) => {
+                assert!(
+                    plan_has_no_open_pending_subject_lifecycle_action_guard(
+                        plan,
+                        &pending_action.subject_id,
+                        pending_action.action,
+                    ),
+                    "{plan_name}: pending subject lifecycle action must guard open-action uniqueness"
+                );
+            }
+            Mutation::ClosePendingSubjectLifecycleAction {
+                pending_action_id, ..
+            } => {
+                assert!(
+                    plan_has_pending_subject_lifecycle_action_executable_guard(
+                        plan,
+                        pending_action_id
+                    ) || plan_has_pending_subject_lifecycle_action_cancellable_guard(
+                        plan,
+                        pending_action_id
+                    ),
+                    "{plan_name}: pending subject lifecycle action closure must guard executable or cancellable state"
                 );
             }
             Mutation::CreateActiveProofAttempt(_)

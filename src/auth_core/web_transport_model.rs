@@ -616,14 +616,17 @@ impl TryFrom<AuthActiveProofChallengeCookiePayload> for DecodedActiveProofChalle
             payload.proof_method_label,
             online_guessing_risk,
         )?;
+        let context = ActiveProofChallengeCookieContext::new(
+            ActiveProofAttemptId::from_bytes(payload.attempt_id)?,
+            ActiveProofChallengeId::from_bytes(payload.challenge_id)?,
+            proof,
+            UnixSeconds::new(payload.issued_at),
+            UnixSeconds::new(payload.expires_at),
+            ActiveProofChallengeFastFailNonce::from_bytes(&payload.nonce)?,
+        )?;
         let draft =
             ActiveProofChallengeCookieDraft::new_with_optional_response_mac_and_method_state(
-                ActiveProofAttemptId::from_bytes(payload.attempt_id)?,
-                ActiveProofChallengeId::from_bytes(payload.challenge_id)?,
-                proof,
-                UnixSeconds::new(payload.issued_at),
-                UnixSeconds::new(payload.expires_at),
-                ActiveProofChallengeFastFailNonce::from_bytes(&payload.nonce)?,
+                context,
                 payload
                     .response_mac
                     .as_deref()

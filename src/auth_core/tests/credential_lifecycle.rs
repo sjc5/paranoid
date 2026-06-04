@@ -1102,6 +1102,272 @@ fn pending_non_reset_credential_lifecycle_action_execution_rejects_wrong_contrac
     );
 }
 
+#[test]
+fn delayed_subject_auth_state_deletion_creates_subject_pending_action() {
+    let pending_action_id: PendingSubjectLifecycleActionId = id("pending-subject-deletion");
+
+    let transition = reduce_command(
+        &config(),
+        Command::ScheduleSubjectAuthStateDeletion(ScheduleSubjectAuthStateDeletion {
+            now: at(100),
+            subject_id: id("subject"),
+            pending_action: PendingSubjectLifecycleActionSchedule {
+                pending_action_id: pending_action_id.clone(),
+                earliest_execute_at: at(200),
+                expires_at: at(300),
+            },
+        }),
+        &LoadedState::default(),
+    )
+    .expect("subject deletion scheduling transition");
+
+    assert_eq!(
+        transition.outcome,
+        Outcome::SubjectAuthStateDeletionScheduled(SubjectAuthStateDeletionScheduledOutcome {
+            subject_id: id("subject"),
+            pending_action_id: pending_action_id.clone(),
+            earliest_execute_at: at(200),
+            expires_at: at(300),
+        })
+    );
+    assert_eq!(
+        precondition_kind_names(&transition.commit_plan),
+        vec!["no_open_pending_subject_lifecycle_action_for_subject"]
+    );
+    assert_eq!(
+        transition.commit_plan.mutations,
+        vec![Mutation::CreatePendingSubjectLifecycleAction(
+            PendingSubjectLifecycleActionRecord::new_open(
+                pending_action_id,
+                id("subject"),
+                SubjectLifecycleAction::DeleteSubjectAuthState,
+                at(100),
+                at(200),
+                at(300),
+            )
+            .expect("pending subject action"),
+        )]
+    );
+    assert_eq!(
+        transition.commit_plan.audit_events,
+        vec![audit(
+            AuditEventKind::SubjectAuthStateDeletionPendingActionScheduled,
+            at(100),
+        )]
+    );
+    assert_eq!(
+        transition.commit_plan.durable_effects,
+        vec![security_notice(
+            SecurityNotificationKind::SubjectAuthStateDeletionPendingActionScheduled
+        )]
+    );
+}
+
+#[test]
+fn delayed_subject_auth_state_deletion_rejects_invalid_schedule() {
+    let error = reduce_command(
+        &config(),
+        Command::ScheduleSubjectAuthStateDeletion(ScheduleSubjectAuthStateDeletion {
+            now: at(100),
+            subject_id: id("subject"),
+            pending_action: PendingSubjectLifecycleActionSchedule {
+                pending_action_id: id("pending-subject-deletion"),
+                earliest_execute_at: at(100),
+                expires_at: at(300),
+            },
+        }),
+        &LoadedState::default(),
+    )
+    .expect_err("subject deletion pending action requires future maturity");
+    assert_eq!(error, Error::InvalidSubjectLifecyclePendingActionTiming);
+}
+
+#[test]
+fn matured_subject_auth_state_deletion_closes_pending_action_and_revokes_subject_auth_state() {
+    let pending_action_id: PendingSubjectLifecycleActionId = id("pending-subject-deletion");
+
+    let transition = reduce_command(
+        &config(),
+        Command::ExecutePendingSubjectAuthStateDeletion(ExecutePendingSubjectAuthStateDeletion {
+            now: at(250),
+            pending_action: pending_subject_action(pending_action_id.clone()),
+        }),
+        &LoadedState::default(),
+    )
+    .expect("subject deletion execution transition");
+
+    assert_eq!(
+        transition.outcome,
+        Outcome::PendingSubjectAuthStateDeletionExecuted(
+            PendingSubjectAuthStateDeletionExecutionOutcome {
+                subject_id: id("subject"),
+                pending_action_id: pending_action_id.clone(),
+            },
+        )
+    );
+    assert_eq!(
+        precondition_kind_names(&transition.commit_plan),
+        vec!["pending_subject_lifecycle_action_still_executable"]
+    );
+    assert_eq!(
+        transition.commit_plan.mutations,
+        vec![
+            Mutation::ClosePendingSubjectLifecycleAction {
+                pending_action_id,
+                closed_at: at(250),
+            },
+            Mutation::RaiseSubjectAuthRevocationCutoff {
+                subject_id: id("subject"),
+                revoke_records_created_at_or_before: at(250),
+                reason: RevocationReason::SubjectAuthStateChanged,
+            },
+        ]
+    );
+    assert_eq!(
+        transition.commit_plan.audit_events,
+        vec![audit(
+            AuditEventKind::SubjectAuthStateDeletionExecuted,
+            at(250),
+        )]
+    );
+    assert_eq!(
+        transition.commit_plan.durable_effects,
+        vec![security_notice(
+            SecurityNotificationKind::SubjectAuthStateDeletionExecuted
+        )]
+    );
+}
+
+#[test]
+fn subject_auth_state_deletion_execution_rejects_unusable_pending_action() {
+    let mut early_action = pending_subject_action(id("pending-subject-deletion"));
+    let early_error = reduce_command(
+        &config(),
+        Command::ExecutePendingSubjectAuthStateDeletion(ExecutePendingSubjectAuthStateDeletion {
+            now: at(150),
+            pending_action: early_action.clone(),
+        }),
+        &LoadedState::default(),
+    )
+    .expect_err("subject deletion cannot execute before maturity");
+    assert_eq!(
+        early_error,
+        Error::PendingSubjectLifecycleActionNotExecutable
+    );
+
+    early_action.closed_at = Some(at(120));
+    let closed_error = reduce_command(
+        &config(),
+        Command::ExecutePendingSubjectAuthStateDeletion(ExecutePendingSubjectAuthStateDeletion {
+            now: at(250),
+            pending_action: early_action,
+        }),
+        &LoadedState::default(),
+    )
+    .expect_err("closed subject deletion action cannot execute");
+    assert_eq!(
+        closed_error,
+        Error::PendingSubjectLifecycleActionNotExecutable
+    );
+
+    let expired_error = reduce_command(
+        &config(),
+        Command::ExecutePendingSubjectAuthStateDeletion(ExecutePendingSubjectAuthStateDeletion {
+            now: at(300),
+            pending_action: pending_subject_action(id("pending-subject-deletion")),
+        }),
+        &LoadedState::default(),
+    )
+    .expect_err("expired subject deletion action cannot execute");
+    assert_eq!(
+        expired_error,
+        Error::PendingSubjectLifecycleActionNotExecutable
+    );
+}
+
+#[test]
+fn subject_auth_state_deletion_cancellation_closes_open_action_and_schedules_notice() {
+    let pending_action_id: PendingSubjectLifecycleActionId = id("pending-subject-deletion");
+
+    let transition = reduce_command(
+        &config(),
+        Command::CancelPendingSubjectAuthStateDeletion(CancelPendingSubjectAuthStateDeletion {
+            now: at(150),
+            pending_action: pending_subject_action(pending_action_id.clone()),
+        }),
+        &LoadedState::default(),
+    )
+    .expect("subject deletion cancellation transition");
+
+    assert_eq!(
+        transition.outcome,
+        Outcome::PendingSubjectAuthStateDeletionCancelled(
+            PendingSubjectAuthStateDeletionCancellationOutcome {
+                subject_id: id("subject"),
+                pending_action_id: pending_action_id.clone(),
+            },
+        )
+    );
+    assert_eq!(
+        precondition_kind_names(&transition.commit_plan),
+        vec!["pending_subject_lifecycle_action_still_cancellable_for_subject"]
+    );
+    assert_eq!(
+        transition.commit_plan.mutations,
+        vec![Mutation::ClosePendingSubjectLifecycleAction {
+            pending_action_id,
+            closed_at: at(150),
+        }]
+    );
+    assert_eq!(
+        transition.commit_plan.audit_events,
+        vec![audit(
+            AuditEventKind::SubjectAuthStateDeletionPendingActionCancelled,
+            at(150),
+        )]
+    );
+    assert_eq!(
+        transition.commit_plan.durable_effects,
+        vec![security_notice(
+            SecurityNotificationKind::SubjectAuthStateDeletionPendingActionCancelled
+        )]
+    );
+}
+
+#[test]
+fn subject_auth_state_deletion_cancellation_rejects_closed_or_expired_action() {
+    let mut closed_action = pending_subject_action(id("pending-subject-deletion"));
+    closed_action.closed_at = Some(at(120));
+
+    let closed_error = reduce_command(
+        &config(),
+        Command::CancelPendingSubjectAuthStateDeletion(CancelPendingSubjectAuthStateDeletion {
+            now: at(150),
+            pending_action: closed_action,
+        }),
+        &LoadedState::default(),
+    )
+    .expect_err("closed subject deletion action cannot cancel");
+    assert_eq!(
+        closed_error,
+        Error::PendingSubjectLifecycleActionNotCancellable
+    );
+
+    let expired_error = reduce_command(
+        &config(),
+        Command::CancelPendingSubjectAuthStateDeletion(CancelPendingSubjectAuthStateDeletion {
+            now: at(300),
+            pending_action: pending_subject_action(id("pending-subject-deletion")),
+        }),
+        &LoadedState::default(),
+    )
+    .expect_err("expired subject deletion action cannot cancel");
+    assert_eq!(
+        expired_error,
+        Error::PendingSubjectLifecycleActionNotCancellable
+    );
+}
+
 fn credential_reset_context<const AUTHORITY_COUNT: usize, const EVIDENCE_COUNT: usize>(
     target_credential_id: VerifiedProofSourceId,
     authorities: [CredentialRecoveryAuthority; AUTHORITY_COUNT],
@@ -1162,6 +1428,20 @@ fn pending_action(
         at(300),
     )
     .expect("pending action")
+}
+
+fn pending_subject_action(
+    pending_action_id: PendingSubjectLifecycleActionId,
+) -> PendingSubjectLifecycleActionRecord {
+    PendingSubjectLifecycleActionRecord::new_open(
+        pending_action_id,
+        id("subject"),
+        SubjectLifecycleAction::DeleteSubjectAuthState,
+        at(100),
+        at(200),
+        at(300),
+    )
+    .expect("pending subject action")
 }
 
 fn audit(kind: AuditEventKind, occurred_at: UnixSeconds) -> AuditEvent {

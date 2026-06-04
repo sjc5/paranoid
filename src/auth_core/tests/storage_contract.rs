@@ -35,6 +35,7 @@ fn core_storage_schema_contract_names_reducer_owned_record_families() {
             CoreStorageRecordKind::CredentialRecoveryAuthority,
             CoreStorageRecordKind::LifecycleAuthoritySource,
             CoreStorageRecordKind::PendingCredentialLifecycleAction,
+            CoreStorageRecordKind::PendingSubjectLifecycleAction,
             CoreStorageRecordKind::AuditEvent,
             CoreStorageRecordKind::CoreDurableEffectCommand,
         ]
@@ -60,6 +61,7 @@ fn postgres_schema_contract_names_table_families() {
             PostgresAuthCoreTable::CredentialRecoveryAuthority,
             PostgresAuthCoreTable::LifecycleAuthoritySource,
             PostgresAuthCoreTable::PendingCredentialLifecycleAction,
+            PostgresAuthCoreTable::PendingSubjectLifecycleAction,
             PostgresAuthCoreTable::AuditEvent,
             PostgresAuthCoreTable::CoreDurableEffectCommand,
         ]
@@ -79,6 +81,10 @@ fn postgres_schema_contract_names_table_families() {
     assert_eq!(
         PostgresAuthCoreTable::PendingCredentialLifecycleAction.default_suffix(),
         "auth_credential_lifecycle_pending_actions"
+    );
+    assert_eq!(
+        PostgresAuthCoreTable::PendingSubjectLifecycleAction.default_suffix(),
+        "auth_subject_lifecycle_pending_actions"
     );
 }
 
@@ -274,6 +280,15 @@ fn postgres_schema_contract_maps_storage_targets_to_table_families() {
         ),
         PostgresAuthCoreTable::PendingCredentialLifecycleAction,
     );
+    assert_eq!(
+        PostgresAuthCoreSchemaContract::table_for_storage_target(
+            &CoreStorageTarget::OpenPendingSubjectLifecycleActionForSubject {
+                subject_id: id("subject"),
+                action: SubjectLifecycleAction::DeleteSubjectAuthState,
+            }
+        ),
+        PostgresAuthCoreTable::PendingSubjectLifecycleAction,
+    );
 }
 
 #[test]
@@ -360,6 +375,28 @@ fn postgres_schema_contract_pins_uniqueness_for_open_challenges_and_child_rows()
                 |constraint| constraint.name() == "credential_lifecycle_open_pending_action"
                     && constraint.columns()
                         == ["target_credential_instance_id", "lifecycle_action"]
+                    && constraint.predicate() == Some(PostgresUniquePredicate::OpenRow)
+            )
+    );
+
+    let pending_subject_lifecycle_action_table =
+        postgres_table(PostgresAuthCoreTable::PendingSubjectLifecycleAction);
+    assert_eq!(
+        pending_subject_lifecycle_action_table
+            .uniqueness()
+            .iter()
+            .find(|constraint| constraint.name() == "primary_key")
+            .expect("pending subject action primary key")
+            .columns(),
+        &["pending_action_id"]
+    );
+    assert!(
+        pending_subject_lifecycle_action_table
+            .uniqueness()
+            .iter()
+            .any(
+                |constraint| constraint.name() == "subject_lifecycle_open_pending_action"
+                    && constraint.columns() == ["subject_id", "subject_lifecycle_action"]
                     && constraint.predicate() == Some(PostgresUniquePredicate::OpenRow)
             )
     );
@@ -602,6 +639,100 @@ fn postgres_precondition_execution_guards_credential_reset_target_and_pending_un
             }
         ]
     );
+
+    let subject_pending_guard = PostgresPreconditionExecutionContract::for_precondition(
+        &Precondition::NoOpenPendingSubjectLifecycleActionForSubject {
+            subject_id: id("subject"),
+            action: SubjectLifecycleAction::DeleteSubjectAuthState,
+            now: at(100),
+        },
+    );
+    assert_eq!(
+        subject_pending_guard.kind(),
+        CorePreconditionKind::NoOpenPendingSubjectLifecycleActionForSubject
+    );
+    assert_eq!(
+        subject_pending_guard.lock_steps(),
+        &[
+            PostgresPreconditionLockStep::UseOpenPendingSubjectLifecycleActionUniqueIndex {
+                subject_id: id("subject"),
+                action: SubjectLifecycleAction::DeleteSubjectAuthState,
+            }
+        ]
+    );
+    assert_eq!(
+        subject_pending_guard.validation_steps(),
+        &[
+            PostgresPreconditionValidationStep::CloseExpiredOpenPendingSubjectLifecycleActionsBeforeUniquenessCheck {
+                now: at(100),
+            },
+            PostgresPreconditionValidationStep::TreatOpenPendingSubjectLifecycleActionUniqueViolationAsPreconditionFailure,
+        ]
+    );
+
+    let subject_execution_guard = PostgresPreconditionExecutionContract::for_precondition(
+        &Precondition::PendingSubjectLifecycleActionStillExecutable {
+            pending_action_id: id("pending-subject-deletion"),
+            subject_id: id("subject"),
+            action: SubjectLifecycleAction::DeleteSubjectAuthState,
+            now: at(250),
+        },
+    );
+    assert_eq!(
+        subject_execution_guard.kind(),
+        CorePreconditionKind::PendingSubjectLifecycleActionStillExecutable
+    );
+    assert_eq!(
+        subject_execution_guard.lock_steps(),
+        &[PostgresPreconditionLockStep::SelectExistingRowForUpdate {
+            target: CoreStorageTarget::PendingSubjectLifecycleAction(id(
+                "pending-subject-deletion"
+            )),
+            table: PostgresAuthCoreTable::PendingSubjectLifecycleAction,
+        }]
+    );
+    assert_eq!(
+        subject_execution_guard.validation_steps(),
+        &[
+            PostgresPreconditionValidationStep::PendingSubjectLifecycleActionOpenMatureUnexpiredAndSubjectMatched {
+                subject_id: id("subject"),
+                action: SubjectLifecycleAction::DeleteSubjectAuthState,
+                now: at(250),
+            }
+        ]
+    );
+
+    let subject_cancellation_guard = PostgresPreconditionExecutionContract::for_precondition(
+        &Precondition::PendingSubjectLifecycleActionStillCancellableForSubject {
+            pending_action_id: id("pending-subject-deletion"),
+            subject_id: id("subject"),
+            action: SubjectLifecycleAction::DeleteSubjectAuthState,
+            now: at(250),
+        },
+    );
+    assert_eq!(
+        subject_cancellation_guard.kind(),
+        CorePreconditionKind::PendingSubjectLifecycleActionStillCancellableForSubject
+    );
+    assert_eq!(
+        subject_cancellation_guard.lock_steps(),
+        &[PostgresPreconditionLockStep::SelectExistingRowForUpdate {
+            target: CoreStorageTarget::PendingSubjectLifecycleAction(id(
+                "pending-subject-deletion"
+            )),
+            table: PostgresAuthCoreTable::PendingSubjectLifecycleAction,
+        }]
+    );
+    assert_eq!(
+        subject_cancellation_guard.validation_steps(),
+        &[
+            PostgresPreconditionValidationStep::PendingSubjectLifecycleActionOpenUnexpiredAndSubjectMatched {
+                subject_id: id("subject"),
+                action: SubjectLifecycleAction::DeleteSubjectAuthState,
+                now: at(250),
+            }
+        ]
+    );
 }
 
 #[test]
@@ -740,6 +871,53 @@ fn postgres_mutation_execution_distinguishes_locked_delete_and_monotonic_upsert(
         &PostgresMutationWriteStep::UpdatePreviouslyLockedRow {
             target: CoreStorageTarget::PendingCredentialLifecycleAction(id("pending-reset")),
             table: PostgresAuthCoreTable::PendingCredentialLifecycleAction,
+        }
+    );
+
+    let create_subject_pending = PostgresMutationExecutionContract::for_mutation(
+        &Mutation::CreatePendingSubjectLifecycleAction(
+            PendingSubjectLifecycleActionRecord::new_open(
+                id("pending-subject-deletion"),
+                id("subject"),
+                SubjectLifecycleAction::DeleteSubjectAuthState,
+                at(100),
+                at(200),
+                at(300),
+            )
+            .expect("pending subject action"),
+        ),
+    );
+    assert_eq!(
+        create_subject_pending.kind(),
+        CoreMutationKind::CreatePendingSubjectLifecycleAction
+    );
+    assert_eq!(
+        create_subject_pending.write_step(),
+        &PostgresMutationWriteStep::InsertUniqueRow {
+            target: CoreStorageTarget::PendingSubjectLifecycleAction(id(
+                "pending-subject-deletion"
+            )),
+            table: PostgresAuthCoreTable::PendingSubjectLifecycleAction,
+        }
+    );
+
+    let close_subject_pending = PostgresMutationExecutionContract::for_mutation(
+        &Mutation::ClosePendingSubjectLifecycleAction {
+            pending_action_id: id("pending-subject-deletion"),
+            closed_at: at(250),
+        },
+    );
+    assert_eq!(
+        close_subject_pending.kind(),
+        CoreMutationKind::ClosePendingSubjectLifecycleAction
+    );
+    assert_eq!(
+        close_subject_pending.write_step(),
+        &PostgresMutationWriteStep::UpdatePreviouslyLockedRow {
+            target: CoreStorageTarget::PendingSubjectLifecycleAction(id(
+                "pending-subject-deletion"
+            )),
+            table: PostgresAuthCoreTable::PendingSubjectLifecycleAction,
         }
     );
 }
@@ -1153,6 +1331,77 @@ fn credential_lifecycle_preconditions_lock_target_and_enforce_pending_uniqueness
         pending_cancellation_guard.validation_requirements(),
         &[StorageValidationRequirement::PendingCredentialLifecycleActionStillCancellableForTarget]
     );
+
+    let subject_pending_guard = CorePreconditionStorageContract::for_precondition(
+        &Precondition::NoOpenPendingSubjectLifecycleActionForSubject {
+            subject_id: id("subject"),
+            action: SubjectLifecycleAction::DeleteSubjectAuthState,
+            now: at(100),
+        },
+    );
+    assert_eq!(
+        subject_pending_guard.kind(),
+        CorePreconditionKind::NoOpenPendingSubjectLifecycleActionForSubject
+    );
+    assert_eq!(
+        subject_pending_guard.lock_requirements(),
+        &[
+            StorageLockRequirement::EnforceOpenPendingSubjectLifecycleActionUniqueness {
+                subject_id: id("subject"),
+                action: SubjectLifecycleAction::DeleteSubjectAuthState,
+            }
+        ]
+    );
+    assert_eq!(
+        subject_pending_guard.validation_requirements(),
+        &[StorageValidationRequirement::NoOpenPendingSubjectLifecycleActionForSubject]
+    );
+
+    let subject_execution_guard = CorePreconditionStorageContract::for_precondition(
+        &Precondition::PendingSubjectLifecycleActionStillExecutable {
+            pending_action_id: id("pending-subject-deletion"),
+            subject_id: id("subject"),
+            action: SubjectLifecycleAction::DeleteSubjectAuthState,
+            now: at(250),
+        },
+    );
+    assert_eq!(
+        subject_execution_guard.kind(),
+        CorePreconditionKind::PendingSubjectLifecycleActionStillExecutable
+    );
+    assert_eq!(
+        subject_execution_guard.lock_requirements(),
+        &[StorageLockRequirement::LockExistingRowForUpdate(
+            CoreStorageTarget::PendingSubjectLifecycleAction(id("pending-subject-deletion"))
+        )]
+    );
+    assert_eq!(
+        subject_execution_guard.validation_requirements(),
+        &[StorageValidationRequirement::PendingSubjectLifecycleActionStillExecutable]
+    );
+
+    let subject_cancellation_guard = CorePreconditionStorageContract::for_precondition(
+        &Precondition::PendingSubjectLifecycleActionStillCancellableForSubject {
+            pending_action_id: id("pending-subject-deletion"),
+            subject_id: id("subject"),
+            action: SubjectLifecycleAction::DeleteSubjectAuthState,
+            now: at(250),
+        },
+    );
+    assert_eq!(
+        subject_cancellation_guard.kind(),
+        CorePreconditionKind::PendingSubjectLifecycleActionStillCancellableForSubject
+    );
+    assert_eq!(
+        subject_cancellation_guard.lock_requirements(),
+        &[StorageLockRequirement::LockExistingRowForUpdate(
+            CoreStorageTarget::PendingSubjectLifecycleAction(id("pending-subject-deletion"))
+        )]
+    );
+    assert_eq!(
+        subject_cancellation_guard.validation_requirements(),
+        &[StorageValidationRequirement::PendingSubjectLifecycleActionStillCancellableForSubject]
+    );
 }
 
 #[test]
@@ -1333,6 +1582,45 @@ fn mutation_storage_contract_distinguishes_updates_hard_deletes_and_monotonic_up
         close_pending.write_requirement(),
         &StorageWriteRequirement::UpdateLockedRow(
             CoreStorageTarget::PendingCredentialLifecycleAction(id("pending-reset"))
+        )
+    );
+
+    let create_subject_pending =
+        CoreMutationStorageContract::for_mutation(&Mutation::CreatePendingSubjectLifecycleAction(
+            PendingSubjectLifecycleActionRecord::new_open(
+                id("pending-subject-deletion"),
+                id("subject"),
+                SubjectLifecycleAction::DeleteSubjectAuthState,
+                at(100),
+                at(200),
+                at(300),
+            )
+            .expect("pending subject action"),
+        ));
+    assert_eq!(
+        create_subject_pending.kind(),
+        CoreMutationKind::CreatePendingSubjectLifecycleAction
+    );
+    assert_eq!(
+        create_subject_pending.write_requirement(),
+        &StorageWriteRequirement::InsertUnique(CoreStorageTarget::PendingSubjectLifecycleAction(
+            id("pending-subject-deletion")
+        ))
+    );
+
+    let close_subject_pending =
+        CoreMutationStorageContract::for_mutation(&Mutation::ClosePendingSubjectLifecycleAction {
+            pending_action_id: id("pending-subject-deletion"),
+            closed_at: at(250),
+        });
+    assert_eq!(
+        close_subject_pending.kind(),
+        CoreMutationKind::ClosePendingSubjectLifecycleAction
+    );
+    assert_eq!(
+        close_subject_pending.write_requirement(),
+        &StorageWriteRequirement::UpdateLockedRow(
+            CoreStorageTarget::PendingSubjectLifecycleAction(id("pending-subject-deletion"))
         )
     );
 }

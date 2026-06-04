@@ -158,6 +158,7 @@ fn worker_database_operation_shapes(inner: Vec<OperationShape>) -> Vec<Operation
 
 fn queue_migrate_schema_in_current_transaction_shapes() -> Vec<OperationShape> {
     [
+        schema_ledger_plan_component_migration_shapes(),
         vec![
             (
                 DatabaseOperationKind::Execute,
@@ -166,8 +167,22 @@ fn queue_migrate_schema_in_current_transaction_shapes() -> Vec<OperationShape> {
             14
         ],
         queue_physical_schema_validation_shapes(),
-        schema_ledger_record_component_version_shapes(),
-        schema_ledger_validate_component_version_shapes(),
+        schema_ledger_record_component_migration_completion_shapes(),
+    ]
+    .concat()
+}
+
+fn queue_migrate_already_current_schema_in_current_transaction_shapes() -> Vec<OperationShape> {
+    [
+        schema_ledger_plan_component_migration_shapes(),
+        vec![
+            (
+                DatabaseOperationKind::Execute,
+                QUEUE_OPERATION_SCHEMA_MIGRATE_STATEMENT,
+            );
+            14
+        ],
+        queue_physical_schema_validation_shapes(),
     ]
     .concat()
 }
@@ -237,40 +252,63 @@ fn queue_constraint_probe_shapes(count: usize) -> Vec<OperationShape> {
     shapes
 }
 
-fn schema_ledger_record_component_version_shapes() -> Vec<OperationShape> {
+fn schema_ledger_plan_component_migration_shapes() -> Vec<OperationShape> {
+    [
+        schema_ledger_ensure_and_validate_shapes(),
+        vec![(
+            DatabaseOperationKind::FetchOptional,
+            SCHEMA_LEDGER_OPERATION_FETCH_COMPONENT_VERSION,
+        )],
+    ]
+    .concat()
+}
+
+fn schema_ledger_record_component_migration_completion_shapes() -> Vec<OperationShape> {
     vec![
         (
             DatabaseOperationKind::Execute,
-            SCHEMA_LEDGER_OPERATION_CREATE_SAVEPOINT,
-        ),
-        (
-            DatabaseOperationKind::Execute,
-            SCHEMA_LEDGER_OPERATION_CREATE_TABLE,
-        ),
-        (
-            DatabaseOperationKind::Execute,
-            SCHEMA_LEDGER_OPERATION_RELEASE_SAVEPOINT,
-        ),
-        (
-            DatabaseOperationKind::FetchAll,
-            SCHEMA_LEDGER_OPERATION_VALIDATE_COLUMNS,
-        ),
-        (
-            DatabaseOperationKind::FetchOne,
-            SCHEMA_LEDGER_OPERATION_VALIDATE_PRIMARY_KEY,
-        ),
-        (
-            DatabaseOperationKind::FetchAll,
-            SCHEMA_LEDGER_OPERATION_VALIDATE_CHECK_CONSTRAINTS,
-        ),
-        (
-            DatabaseOperationKind::Execute,
             SCHEMA_LEDGER_OPERATION_RECORD_COMPONENT_VERSION,
+        ),
+        (
+            DatabaseOperationKind::FetchOptional,
+            SCHEMA_LEDGER_OPERATION_FETCH_COMPONENT_VERSION,
         ),
     ]
 }
 
 fn schema_ledger_validate_component_version_shapes() -> Vec<OperationShape> {
+    [
+        schema_ledger_validate_physical_shapes(),
+        vec![(
+            DatabaseOperationKind::FetchOptional,
+            SCHEMA_LEDGER_OPERATION_FETCH_COMPONENT_VERSION,
+        )],
+    ]
+    .concat()
+}
+
+fn schema_ledger_ensure_and_validate_shapes() -> Vec<OperationShape> {
+    [
+        vec![
+            (
+                DatabaseOperationKind::Execute,
+                SCHEMA_LEDGER_OPERATION_CREATE_SAVEPOINT,
+            ),
+            (
+                DatabaseOperationKind::Execute,
+                SCHEMA_LEDGER_OPERATION_CREATE_TABLE,
+            ),
+            (
+                DatabaseOperationKind::Execute,
+                SCHEMA_LEDGER_OPERATION_RELEASE_SAVEPOINT,
+            ),
+        ],
+        schema_ledger_validate_physical_shapes(),
+    ]
+    .concat()
+}
+
+fn schema_ledger_validate_physical_shapes() -> Vec<OperationShape> {
     vec![
         (
             DatabaseOperationKind::FetchAll,
@@ -283,10 +321,6 @@ fn schema_ledger_validate_component_version_shapes() -> Vec<OperationShape> {
         (
             DatabaseOperationKind::FetchAll,
             SCHEMA_LEDGER_OPERATION_VALIDATE_CHECK_CONSTRAINTS,
-        ),
-        (
-            DatabaseOperationKind::FetchOptional,
-            SCHEMA_LEDGER_OPERATION_FETCH_COMPONENT_VERSION,
         ),
     ]
 }

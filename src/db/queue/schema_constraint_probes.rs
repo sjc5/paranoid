@@ -8,19 +8,106 @@ const QUEUE_SCHEMA_VALIDATION_PROBE_ROLLBACK_QUERY: &str =
 const QUEUE_SCHEMA_VALIDATION_PROBE_RELEASE_QUERY: &str =
     "RELEASE SAVEPOINT __paranoid_queue_schema_validation_probe";
 
+fn job_lifecycle_probe_insert_columns() -> String {
+    QueueColumn::list(&[
+        QueueColumn::Id,
+        QueueColumn::TaskName,
+        QueueColumn::Payload,
+        QueueColumn::Status,
+        QueueColumn::RunAtOrAfter,
+        QueueColumn::WorkerId,
+        QueueColumn::ClaimedByWorkerAt,
+        QueueColumn::ExecutionHeartbeatAt,
+        QueueColumn::CreatedAt,
+        QueueColumn::UpdatedAt,
+    ])
+}
+
+fn job_numeric_probe_insert_columns() -> String {
+    QueueColumn::list(&[
+        QueueColumn::Id,
+        QueueColumn::TaskName,
+        QueueColumn::Payload,
+        QueueColumn::Status,
+        QueueColumn::RunAtOrAfter,
+        QueueColumn::RetryCount,
+        QueueColumn::MaxRetries,
+        QueueColumn::TimeoutNanos,
+        QueueColumn::CreatedAt,
+        QueueColumn::UpdatedAt,
+    ])
+}
+
+fn job_text_probe_insert_columns() -> String {
+    QueueColumn::list(&[
+        QueueColumn::Id,
+        QueueColumn::TaskName,
+        QueueColumn::Payload,
+        QueueColumn::Status,
+        QueueColumn::RunAtOrAfter,
+        QueueColumn::DedupeKey,
+        QueueColumn::WorkerId,
+        QueueColumn::ClaimedByWorkerAt,
+        QueueColumn::ExecutionHeartbeatAt,
+        QueueColumn::CreatedAt,
+        QueueColumn::UpdatedAt,
+    ])
+}
+
+fn dead_letter_numeric_probe_insert_columns() -> String {
+    QueueColumn::list(&[
+        QueueColumn::Id,
+        QueueColumn::OriginalJobId,
+        QueueColumn::TaskName,
+        QueueColumn::Payload,
+        QueueColumn::LastError,
+        QueueColumn::RetryCount,
+        QueueColumn::MaxRetries,
+        QueueColumn::TimeoutNanos,
+        QueueColumn::Reason,
+        QueueColumn::DeadLetteredAt,
+        QueueColumn::CreatedAt,
+        QueueColumn::UpdatedAt,
+    ])
+}
+
+fn dead_letter_text_probe_insert_columns() -> String {
+    QueueColumn::list(&[
+        QueueColumn::Id,
+        QueueColumn::OriginalJobId,
+        QueueColumn::TaskName,
+        QueueColumn::Payload,
+        QueueColumn::LastError,
+        QueueColumn::RetryCount,
+        QueueColumn::MaxRetries,
+        QueueColumn::TimeoutNanos,
+        QueueColumn::DedupeKey,
+        QueueColumn::Reason,
+        QueueColumn::DeadLetteredAt,
+        QueueColumn::CreatedAt,
+        QueueColumn::UpdatedAt,
+    ])
+}
+
+fn pause_probe_insert_columns() -> String {
+    QueueColumn::list(&[
+        QueueColumn::Key,
+        QueueColumn::TaskName,
+        QueueColumn::PausedAt,
+        QueueColumn::UpdatedAt,
+    ])
+}
+
 pub(super) async fn validate_job_lifecycle_constraint_rejects_invalid_shape(
     tx: &mut Tx<'_>,
     config: &StoreConfig,
 ) -> Result<(), Error> {
     let invalid_id = id::SortableId::new()?;
     create_semantic_constraint_probe_savepoint(tx).await?;
+    let insert_columns = job_lifecycle_probe_insert_columns();
     let statement = format!(
         r#"
-        INSERT INTO {} (
-            id, task_name, payload, status, run_at_or_after,
-            worker_id, claimed_by_worker_at, execution_heartbeat_at,
-            created_at, updated_at
-        )
+        INSERT INTO {} ({insert_columns})
         VALUES (
             $1,
             '__paranoid_queue_invalid_lifecycle_probe',
@@ -60,9 +147,10 @@ pub(super) async fn validate_pause_key_task_constraint_rejects_invalid_shape(
     config: &StoreConfig,
 ) -> Result<(), Error> {
     create_semantic_constraint_probe_savepoint(tx).await?;
+    let insert_columns = pause_probe_insert_columns();
     let statement = format!(
         r#"
-        INSERT INTO {} (key, task_name, paused_at, updated_at)
+        INSERT INTO {} ({insert_columns})
         VALUES (
             'task:__paranoid_queue_probe_a',
             '__paranoid_queue_probe_b',
@@ -133,13 +221,10 @@ async fn validate_job_numeric_constraint_rejects_values(
 ) -> Result<(), Error> {
     let invalid_id = id::SortableId::new()?;
     create_semantic_constraint_probe_savepoint(tx).await?;
+    let insert_columns = job_numeric_probe_insert_columns();
     let statement = format!(
         r#"
-        INSERT INTO {} (
-            id, task_name, payload, status, run_at_or_after,
-            retry_count, max_retries, timeout_nanos,
-            created_at, updated_at
-        )
+        INSERT INTO {} ({insert_columns})
         VALUES (
             $1,
             '__paranoid_queue_invalid_numeric_probe',
@@ -221,13 +306,10 @@ async fn validate_dead_letter_numeric_constraint_rejects_values(
     let invalid_id = id::SortableId::new()?;
     let original_job_id = id::SortableId::new()?;
     create_semantic_constraint_probe_savepoint(tx).await?;
+    let insert_columns = dead_letter_numeric_probe_insert_columns();
     let statement = format!(
         r#"
-        INSERT INTO {} (
-            id, original_job_id, task_name, payload, last_error,
-            retry_count, max_retries, timeout_nanos, reason,
-            dead_lettered_at, created_at, updated_at
-        )
+        INSERT INTO {} ({insert_columns})
         VALUES (
             $1,
             $2,
@@ -346,13 +428,10 @@ async fn validate_job_text_constraint_rejects_values(
     } else {
         "pending"
     };
+    let insert_columns = job_text_probe_insert_columns();
     let statement = format!(
         r#"
-        INSERT INTO {} (
-            id, task_name, payload, status, run_at_or_after,
-            dedupe_key, worker_id, claimed_by_worker_at,
-            execution_heartbeat_at, created_at, updated_at
-        )
+        INSERT INTO {} ({insert_columns})
         VALUES (
             $1,
             $2,
@@ -442,13 +521,10 @@ async fn validate_dead_letter_text_constraint_rejects_values(
     let invalid_id = id::SortableId::new()?;
     let original_job_id = id::SortableId::new()?;
     create_semantic_constraint_probe_savepoint(tx).await?;
+    let insert_columns = dead_letter_text_probe_insert_columns();
     let statement = format!(
         r#"
-        INSERT INTO {} (
-            id, original_job_id, task_name, payload, last_error,
-            retry_count, max_retries, timeout_nanos, dedupe_key, reason,
-            dead_lettered_at, created_at, updated_at
-        )
+        INSERT INTO {} ({insert_columns})
         VALUES (
             $1,
             $2,
@@ -528,9 +604,10 @@ async fn validate_pause_text_constraint_rejects_values(
     invalid_shape: &'static str,
 ) -> Result<(), Error> {
     create_semantic_constraint_probe_savepoint(tx).await?;
+    let insert_columns = pause_probe_insert_columns();
     let statement = format!(
         r#"
-        INSERT INTO {} (key, task_name, paused_at, updated_at)
+        INSERT INTO {} ({insert_columns})
         VALUES ($1, $2, statement_timestamp(), statement_timestamp())
         "#,
         config.pause_table_name.quoted()

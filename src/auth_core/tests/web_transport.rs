@@ -192,16 +192,19 @@ fn auth_web_transport_round_trips_active_proof_method_challenge_state() {
         ActiveProofMethodChallengeState::try_from_bytes(b"canonical-method-state".to_vec())
             .expect("method challenge state");
     let challenge_cookie = ActiveProofChallengeCookieDraft::new_with_method_challenge_state(
-        id("attempt"),
-        id("challenge"),
-        ProofSummary::new(ProofFamily::MessageSignature, "password_derived_signature")
-            .expect("proof"),
-        at(30),
-        at(70),
-        ActiveProofChallengeFastFailNonce::from_bytes(
-            &[29_u8; ACTIVE_PROOF_CHALLENGE_FAST_FAIL_NONCE_BYTES],
+        ActiveProofChallengeCookieContext::new(
+            id("attempt"),
+            id("challenge"),
+            ProofSummary::new(ProofFamily::MessageSignature, "password_derived_signature")
+                .expect("proof"),
+            at(30),
+            at(70),
+            ActiveProofChallengeFastFailNonce::from_bytes(
+                &[29_u8; ACTIVE_PROOF_CHALLENGE_FAST_FAIL_NONCE_BYTES],
+            )
+            .expect("nonce"),
         )
-        .expect("nonce"),
+        .expect("challenge cookie context"),
         method_challenge_state.clone(),
     )
     .expect("challenge cookie");

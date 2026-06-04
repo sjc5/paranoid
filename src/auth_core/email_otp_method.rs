@@ -9,8 +9,9 @@ use sqlx::Row;
 use crate::crypto::Keyset;
 use crate::crypto::envelope::{decrypt_bytes_with_associated_data, encrypt_plaintext_bytes_as};
 use crate::db::{
-    DatabaseOperationKind, DbError, PgIdentifier, PgQualifiedTableName, PgSchemaName, Pool, Tx,
-    pooler_safe_query, pooler_safe_query_scalar, unparameterized_simple_query,
+    BootstrapConfig, DatabaseOperationKind, DbError, PgIdentifier, PgQualifiedTableName,
+    PgSchemaName, Pool, Tx, pooler_safe_query, pooler_safe_query_scalar,
+    unparameterized_simple_query,
 };
 
 use super::postgres_method_runtime::PostgresAuthMethodPlugin;
@@ -26,7 +27,7 @@ const EMAIL_OTP_QUEUE_DELIVERY_OPERATION: &str = "email_otp_queue_delivery";
 const EMAIL_OTP_RESPONSE_SECRET_CONTEXT: &[u8] = b"paranoid/auth/v1/email-otp-response-secret";
 const EMAIL_OTP_DEFAULT_SOURCE_ID_CONTEXT: &[u8] = b"paranoid/auth/v1/email-otp/default-source-id";
 const EMAIL_OTP_RESPONSE_SECRET_BYTES: usize = 16;
-const DEFAULT_EMAIL_OTP_TABLE_PREFIX: &str = "__paranoid_auth_email_otp_";
+const DEFAULT_EMAIL_OTP_TABLE_PREFIX: &str = "auth_email_otp_";
 
 pub(crate) struct PostgresEmailOtpMethodPlugin {
     config: PostgresEmailOtpMethodPluginConfig,
@@ -49,7 +50,6 @@ impl PostgresEmailOtpMethodPlugin {
         })
     }
 
-    #[cfg(test)]
     pub(crate) fn with_subject_resolver(
         mut self,
         subject_resolver: Arc<dyn PostgresEmailOtpSubjectResolver>,
@@ -849,6 +849,17 @@ impl PostgresEmailOtpMethodPluginConfig {
         Ok(config)
     }
 
+    pub(crate) fn for_db_bootstrap_config(
+        bootstrap_config: &BootstrapConfig,
+    ) -> Result<Self, PostgresEmailOtpMethodError> {
+        Self::new(
+            Some(bootstrap_config.schema_name().clone()),
+            PgIdentifier::new(DEFAULT_EMAIL_OTP_TABLE_PREFIX)
+                .map_err(DbError::from)
+                .map_err(PostgresEmailOtpMethodError::Database)?,
+        )
+    }
+
     fn table_name(&self, suffix: &'static str) -> Result<PgQualifiedTableName, DbError> {
         Ok(PgQualifiedTableName::new(
             self.schema.clone(),
@@ -870,11 +881,33 @@ impl PostgresEmailOtpMethodPluginConfig {
 
 impl Default for PostgresEmailOtpMethodPluginConfig {
     fn default() -> Self {
-        Self {
-            schema: None,
-            table_prefix: PgIdentifier::new(DEFAULT_EMAIL_OTP_TABLE_PREFIX)
-                .expect("default email otp table prefix must be a valid Postgres identifier"),
-        }
+        Self::for_db_bootstrap_config(&BootstrapConfig::default())
+            .expect("default email otp method config must derive valid bootstrap table names")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_config_uses_schema_local_bootstrap_tables() {
+        let bootstrap_config = BootstrapConfig::default();
+        let config = PostgresEmailOtpMethodPluginConfig::default();
+        let table_names = config.table_names().expect("table names");
+
+        assert_eq!(
+            table_names.challenge_table.schema(),
+            Some(bootstrap_config.schema_name())
+        );
+        assert_eq!(
+            table_names.challenge_table.table().as_str(),
+            "auth_email_otp_challenges"
+        );
+        assert_eq!(
+            table_names.delivery_command_table.table().as_str(),
+            "auth_email_otp_delivery_commands"
+        );
     }
 }
 

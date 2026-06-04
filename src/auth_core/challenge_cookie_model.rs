@@ -151,8 +151,25 @@ pub struct ActiveProofChallengeCookieDraft {
     pub method_challenge_state: Option<ActiveProofMethodChallengeState>,
 }
 
-impl ActiveProofChallengeCookieDraft {
-    /// Creates a challenge cookie draft with an already-computed fast-fail MAC.
+/// Context that all active-proof challenge cookies bind into their sealed payload.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ActiveProofChallengeCookieContext {
+    /// Attempt that owns the challenge.
+    pub attempt_id: ActiveProofAttemptId,
+    /// Challenge this cookie can complete.
+    pub challenge_id: ActiveProofChallengeId,
+    /// Proof this challenge can satisfy.
+    pub proof: ProofSummary,
+    /// Time the cookie payload was minted.
+    pub issued_at: UnixSeconds,
+    /// Last time the cookie can pass stateless fast-fail.
+    pub expires_at: UnixSeconds,
+    /// Public random nonce bound into the fast-fail MAC.
+    pub nonce: ActiveProofChallengeFastFailNonce,
+}
+
+impl ActiveProofChallengeCookieContext {
+    /// Creates the common challenge-cookie context.
     pub fn new(
         attempt_id: ActiveProofAttemptId,
         challenge_id: ActiveProofChallengeId,
@@ -160,94 +177,6 @@ impl ActiveProofChallengeCookieDraft {
         issued_at: UnixSeconds,
         expires_at: UnixSeconds,
         nonce: ActiveProofChallengeFastFailNonce,
-        response_mac: ActiveProofChallengeFastFailMac,
-    ) -> Result<Self, Error> {
-        Self::new_with_optional_response_mac_and_method_state(
-            attempt_id,
-            challenge_id,
-            proof,
-            issued_at,
-            expires_at,
-            nonce,
-            Some(response_mac),
-            None,
-        )
-    }
-
-    /// Creates a challenge cookie draft without submitted-secret fast-fail.
-    pub fn new_without_response_mac(
-        attempt_id: ActiveProofAttemptId,
-        challenge_id: ActiveProofChallengeId,
-        proof: ProofSummary,
-        issued_at: UnixSeconds,
-        expires_at: UnixSeconds,
-        nonce: ActiveProofChallengeFastFailNonce,
-    ) -> Result<Self, Error> {
-        Self::new_with_optional_response_mac_and_method_state(
-            attempt_id,
-            challenge_id,
-            proof,
-            issued_at,
-            expires_at,
-            nonce,
-            None,
-            None,
-        )
-    }
-
-    /// Creates a challenge cookie draft with method-specific sealed state.
-    pub fn new_with_method_challenge_state(
-        attempt_id: ActiveProofAttemptId,
-        challenge_id: ActiveProofChallengeId,
-        proof: ProofSummary,
-        issued_at: UnixSeconds,
-        expires_at: UnixSeconds,
-        nonce: ActiveProofChallengeFastFailNonce,
-        method_challenge_state: ActiveProofMethodChallengeState,
-    ) -> Result<Self, Error> {
-        Self::new_with_optional_response_mac_and_method_state(
-            attempt_id,
-            challenge_id,
-            proof,
-            issued_at,
-            expires_at,
-            nonce,
-            None,
-            Some(method_challenge_state),
-        )
-    }
-
-    /// Creates a challenge cookie draft with optional submitted-secret fast-fail.
-    pub fn new_with_optional_response_mac(
-        attempt_id: ActiveProofAttemptId,
-        challenge_id: ActiveProofChallengeId,
-        proof: ProofSummary,
-        issued_at: UnixSeconds,
-        expires_at: UnixSeconds,
-        nonce: ActiveProofChallengeFastFailNonce,
-        response_mac: Option<ActiveProofChallengeFastFailMac>,
-    ) -> Result<Self, Error> {
-        Self::new_with_optional_response_mac_and_method_state(
-            attempt_id,
-            challenge_id,
-            proof,
-            issued_at,
-            expires_at,
-            nonce,
-            response_mac,
-            None,
-        )
-    }
-
-    pub(crate) fn new_with_optional_response_mac_and_method_state(
-        attempt_id: ActiveProofAttemptId,
-        challenge_id: ActiveProofChallengeId,
-        proof: ProofSummary,
-        issued_at: UnixSeconds,
-        expires_at: UnixSeconds,
-        nonce: ActiveProofChallengeFastFailNonce,
-        response_mac: Option<ActiveProofChallengeFastFailMac>,
-        method_challenge_state: Option<ActiveProofMethodChallengeState>,
     ) -> Result<Self, Error> {
         proof.validate()?;
         if expires_at <= issued_at {
@@ -260,6 +189,58 @@ impl ActiveProofChallengeCookieDraft {
             issued_at,
             expires_at,
             nonce,
+        })
+    }
+}
+
+impl ActiveProofChallengeCookieDraft {
+    /// Creates a challenge cookie draft with an already-computed fast-fail MAC.
+    pub fn new(
+        context: ActiveProofChallengeCookieContext,
+        response_mac: ActiveProofChallengeFastFailMac,
+    ) -> Result<Self, Error> {
+        Self::new_with_optional_response_mac_and_method_state(context, Some(response_mac), None)
+    }
+
+    /// Creates a challenge cookie draft without submitted-secret fast-fail.
+    pub fn new_without_response_mac(
+        context: ActiveProofChallengeCookieContext,
+    ) -> Result<Self, Error> {
+        Self::new_with_optional_response_mac_and_method_state(context, None, None)
+    }
+
+    /// Creates a challenge cookie draft with method-specific sealed state.
+    pub fn new_with_method_challenge_state(
+        context: ActiveProofChallengeCookieContext,
+        method_challenge_state: ActiveProofMethodChallengeState,
+    ) -> Result<Self, Error> {
+        Self::new_with_optional_response_mac_and_method_state(
+            context,
+            None,
+            Some(method_challenge_state),
+        )
+    }
+
+    /// Creates a challenge cookie draft with optional submitted-secret fast-fail.
+    pub fn new_with_optional_response_mac(
+        context: ActiveProofChallengeCookieContext,
+        response_mac: Option<ActiveProofChallengeFastFailMac>,
+    ) -> Result<Self, Error> {
+        Self::new_with_optional_response_mac_and_method_state(context, response_mac, None)
+    }
+
+    pub(crate) fn new_with_optional_response_mac_and_method_state(
+        context: ActiveProofChallengeCookieContext,
+        response_mac: Option<ActiveProofChallengeFastFailMac>,
+        method_challenge_state: Option<ActiveProofMethodChallengeState>,
+    ) -> Result<Self, Error> {
+        Ok(Self {
+            attempt_id: context.attempt_id,
+            challenge_id: context.challenge_id,
+            proof: context.proof,
+            issued_at: context.issued_at,
+            expires_at: context.expires_at,
+            nonce: context.nonce,
             response_mac,
             method_challenge_state,
         })
@@ -268,39 +249,30 @@ impl ActiveProofChallengeCookieDraft {
     /// Creates a challenge cookie draft by MACing the response secret.
     pub fn new_with_response_secret(
         keyset: &Keyset,
-        attempt_id: ActiveProofAttemptId,
-        challenge_id: ActiveProofChallengeId,
-        proof: ProofSummary,
-        issued_at: UnixSeconds,
-        expires_at: UnixSeconds,
-        nonce: ActiveProofChallengeFastFailNonce,
+        context: ActiveProofChallengeCookieContext,
         response_secret: &ActiveProofChallengeResponseSecret,
     ) -> Result<Self, Error> {
-        let draft_without_mac = ActiveProofChallengeCookieDraftWithoutMac {
-            attempt_id,
-            challenge_id,
-            proof,
-            issued_at,
-            expires_at,
-            nonce,
+        let context_without_mac = ActiveProofChallengeCookieDraftWithoutMac {
+            attempt_id: context.attempt_id,
+            challenge_id: context.challenge_id,
+            proof: context.proof,
+            issued_at: context.issued_at,
+            expires_at: context.expires_at,
+            nonce: context.nonce,
             method_challenge_state: None,
         };
-        draft_without_mac.proof.validate()?;
-        if draft_without_mac.expires_at <= draft_without_mac.issued_at {
-            return Err(Error::ActiveProofChallengeCookieExpiresAtOrBeforeIssuedAt);
-        }
-        let context = draft_without_mac.fast_fail_mac_context()?;
+        let mac_context = context_without_mac.fast_fail_mac_context()?;
         let mac = response_secret
             .0
-            .to_mac(keyset, &context)
+            .to_mac(keyset, &mac_context)
             .map_err(|_| Error::InvalidActiveProofChallengeFastFailMac)?;
         Ok(Self {
-            attempt_id: draft_without_mac.attempt_id,
-            challenge_id: draft_without_mac.challenge_id,
-            proof: draft_without_mac.proof,
-            issued_at: draft_without_mac.issued_at,
-            expires_at: draft_without_mac.expires_at,
-            nonce: draft_without_mac.nonce,
+            attempt_id: context_without_mac.attempt_id,
+            challenge_id: context_without_mac.challenge_id,
+            proof: context_without_mac.proof,
+            issued_at: context_without_mac.issued_at,
+            expires_at: context_without_mac.expires_at,
+            nonce: context_without_mac.nonce,
             response_mac: Some(ActiveProofChallengeFastFailMac::from_mac_over_secret(mac)?),
             method_challenge_state: None,
         })

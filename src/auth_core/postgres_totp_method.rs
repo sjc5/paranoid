@@ -10,8 +10,8 @@ use crate::crypto::envelope::{decrypt_bytes_with_associated_data, encrypt_plaint
 #[cfg(test)]
 use crate::db::Pool;
 use crate::db::{
-    DatabaseOperationKind, DbError, PgIdentifier, PgQualifiedTableName, PgSchemaName, Tx,
-    pooler_safe_query, pooler_safe_query_scalar, unparameterized_simple_query,
+    BootstrapConfig, DatabaseOperationKind, DbError, PgIdentifier, PgQualifiedTableName,
+    PgSchemaName, Tx, pooler_safe_query, pooler_safe_query_scalar, unparameterized_simple_query,
 };
 
 use super::postgres_method_runtime::{
@@ -23,7 +23,7 @@ use super::*;
 
 const TOTP_METHOD_LABEL: &str = "totp";
 const TOTP_SECRET_CONTEXT: &[u8] = b"paranoid/auth/v1/totp-secret";
-const DEFAULT_TOTP_TABLE_PREFIX: &str = "__paranoid_auth_totp_";
+const DEFAULT_TOTP_TABLE_PREFIX: &str = "auth_totp_";
 
 pub(crate) trait PostgresTotpCodeVerifier: Send + Sync {
     fn verify_totp_code(
@@ -395,6 +395,17 @@ impl PostgresTotpMethodPluginConfig {
         Ok(config)
     }
 
+    pub(crate) fn for_db_bootstrap_config(
+        bootstrap_config: &BootstrapConfig,
+    ) -> Result<Self, PostgresTotpMethodError> {
+        Self::new(
+            Some(bootstrap_config.schema_name().clone()),
+            PgIdentifier::new(DEFAULT_TOTP_TABLE_PREFIX)
+                .map_err(DbError::from)
+                .map_err(PostgresTotpMethodError::Database)?,
+        )
+    }
+
     fn table_name(&self, suffix: &'static str) -> Result<PgQualifiedTableName, DbError> {
         Ok(PgQualifiedTableName::new(
             self.schema.clone(),
@@ -413,11 +424,29 @@ impl PostgresTotpMethodPluginConfig {
 
 impl Default for PostgresTotpMethodPluginConfig {
     fn default() -> Self {
-        Self {
-            schema: None,
-            table_prefix: PgIdentifier::new(DEFAULT_TOTP_TABLE_PREFIX)
-                .expect("default totp table prefix must be a valid Postgres identifier"),
-        }
+        Self::for_db_bootstrap_config(&BootstrapConfig::default())
+            .expect("default totp method config must derive valid bootstrap table names")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_config_uses_schema_local_bootstrap_tables() {
+        let bootstrap_config = BootstrapConfig::default();
+        let config = PostgresTotpMethodPluginConfig::default();
+        let table_names = config.table_names().expect("table names");
+
+        assert_eq!(
+            table_names.verifier_table.schema(),
+            Some(bootstrap_config.schema_name())
+        );
+        assert_eq!(
+            table_names.verifier_table.table().as_str(),
+            "auth_totp_verifiers"
+        );
     }
 }
 

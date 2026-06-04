@@ -372,6 +372,21 @@ impl AuthWebRuntime {
                 Error::CredentialLifecycleCancellationRequiresRuntimeLifecycleDecision,
             ));
         }
+        if matches!(command, Command::ScheduleSubjectAuthStateDeletion(_)) {
+            return Err(AuthWebRuntimeExecutionError::core(
+                Error::SubjectAuthStateDeletionSchedulingRequiresRuntimeLifecycleDecision,
+            ));
+        }
+        if matches!(command, Command::ExecutePendingSubjectAuthStateDeletion(_)) {
+            return Err(AuthWebRuntimeExecutionError::core(
+                Error::SubjectAuthStateDeletionExecutionRequiresRuntimeLifecycleDecision,
+            ));
+        }
+        if matches!(command, Command::CancelPendingSubjectAuthStateDeletion(_)) {
+            return Err(AuthWebRuntimeExecutionError::core(
+                Error::SubjectAuthStateDeletionCancellationRequiresRuntimeLifecycleDecision,
+            ));
+        }
         let decoded = self
             .web_transport
             .decode_presented_cookies_from_headers(headers)
@@ -440,13 +455,16 @@ impl AuthWebRuntime {
         );
         let challenge_cookie = ActiveProofChallengeCookieDraft::new_with_response_secret(
             self.web_transport.active_proof_challenge_fast_fail_keyset(),
-            request.attempt_id.clone(),
-            request.challenge_id.clone(),
-            proof,
-            now,
-            expires_at,
-            ActiveProofChallengeFastFailNonce::generate()
-                .map_err(AuthWebRuntimeExecutionError::core)?,
+            ActiveProofChallengeCookieContext::new(
+                request.attempt_id.clone(),
+                request.challenge_id.clone(),
+                proof,
+                now,
+                expires_at,
+                ActiveProofChallengeFastFailNonce::generate()
+                    .map_err(AuthWebRuntimeExecutionError::core)?,
+            )
+            .map_err(AuthWebRuntimeExecutionError::core)?,
             response_secret,
         )
         .map_err(AuthWebRuntimeExecutionError::core)?;

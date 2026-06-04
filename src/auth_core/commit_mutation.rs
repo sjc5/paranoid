@@ -123,6 +123,37 @@ pub enum Precondition {
         /// Transition time used to decide cancellability.
         now: UnixSeconds,
     },
+    /// No open pending subject lifecycle action may already exist for this subject/action pair.
+    NoOpenPendingSubjectLifecycleActionForSubject {
+        /// Subject targeted by the pending action.
+        subject_id: SubjectId,
+        /// Subject lifecycle action.
+        action: SubjectLifecycleAction,
+        /// Transition time used to close expired pending actions.
+        now: UnixSeconds,
+    },
+    /// Pending subject lifecycle action must still be open, mature, unexpired, and subject-matched.
+    PendingSubjectLifecycleActionStillExecutable {
+        /// Pending action to guard.
+        pending_action_id: PendingSubjectLifecycleActionId,
+        /// Subject that must own the pending action.
+        subject_id: SubjectId,
+        /// Subject lifecycle action.
+        action: SubjectLifecycleAction,
+        /// Transition time used to decide executability.
+        now: UnixSeconds,
+    },
+    /// Pending subject lifecycle action must still be open, unexpired, and subject-matched.
+    PendingSubjectLifecycleActionStillCancellableForSubject {
+        /// Pending action to guard.
+        pending_action_id: PendingSubjectLifecycleActionId,
+        /// Subject that must own the pending action.
+        subject_id: SubjectId,
+        /// Subject lifecycle action.
+        action: SubjectLifecycleAction,
+        /// Transition time used to decide cancellability.
+        now: UnixSeconds,
+    },
 }
 
 /// State mutation planned by the reducer.
@@ -284,6 +315,15 @@ pub enum Mutation {
     ClosePendingCredentialLifecycleAction {
         /// Pending action to close.
         pending_action_id: PendingCredentialLifecycleActionId,
+        /// Closure timestamp.
+        closed_at: UnixSeconds,
+    },
+    /// Create a delayed subject lifecycle action.
+    CreatePendingSubjectLifecycleAction(PendingSubjectLifecycleActionRecord),
+    /// Close a delayed subject lifecycle action after execution or cancellation.
+    ClosePendingSubjectLifecycleAction {
+        /// Pending action to close.
+        pending_action_id: PendingSubjectLifecycleActionId,
         /// Closure timestamp.
         closed_at: UnixSeconds,
     },

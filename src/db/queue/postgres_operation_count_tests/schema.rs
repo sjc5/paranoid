@@ -23,6 +23,18 @@ async fn queue_schema_setup_and_validation_emit_expected_database_operation_shap
     observer.clear();
 
     queue
+        .migrate_schema(&observed_pool)
+        .await
+        .expect("migrate already-current Queue schema");
+    assert_eq!(
+        operation_shapes_from_observer(&observer),
+        transaction_operation_shapes(
+            queue_migrate_already_current_schema_in_current_transaction_shapes()
+        )
+    );
+    observer.clear();
+
+    queue
         .validate_schema(&observed_pool)
         .await
         .expect("validate Queue schema");

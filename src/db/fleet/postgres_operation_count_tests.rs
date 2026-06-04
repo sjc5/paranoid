@@ -139,9 +139,20 @@ fn rollback_transaction_shapes<const N: usize>(inner: [OperationShape; N]) -> Ve
 
 fn fleet_migrate_schema_in_current_transaction_shapes() -> Vec<OperationShape> {
     [
+        schema_ledger_plan_component_migration_shapes(),
         kv_migrate_schema_in_current_transaction_shapes(),
         lease_migrate_schema_in_current_transaction_shapes(),
-        schema_ledger_record_component_version_shapes(),
+        schema_ledger_record_component_migration_completion_shapes(),
+        fleet_validate_schema_in_current_transaction_shapes(),
+    ]
+    .concat()
+}
+
+fn fleet_migrate_already_current_schema_in_current_transaction_shapes() -> Vec<OperationShape> {
+    [
+        schema_ledger_plan_component_migration_shapes(),
+        kv_migrate_already_current_schema_in_current_transaction_shapes(),
+        lease_migrate_schema_in_current_transaction_shapes(),
         fleet_validate_schema_in_current_transaction_shapes(),
     ]
     .concat()
@@ -158,6 +169,7 @@ fn fleet_validate_schema_in_current_transaction_shapes() -> Vec<OperationShape> 
 
 fn kv_migrate_schema_in_current_transaction_shapes() -> Vec<OperationShape> {
     [
+        schema_ledger_plan_component_migration_shapes(),
         vec![
             (
                 DatabaseOperationKind::Execute,
@@ -180,8 +192,36 @@ fn kv_migrate_schema_in_current_transaction_shapes() -> Vec<OperationShape> {
             3
         ],
         kv_physical_schema_validation_shapes(),
-        schema_ledger_record_component_version_shapes(),
-        kv_validate_schema_in_current_transaction_shapes(),
+        schema_ledger_record_component_migration_completion_shapes(),
+    ]
+    .concat()
+}
+
+fn kv_migrate_already_current_schema_in_current_transaction_shapes() -> Vec<OperationShape> {
+    [
+        schema_ledger_plan_component_migration_shapes(),
+        vec![
+            (
+                DatabaseOperationKind::Execute,
+                KV_OPERATION_SCHEMA_CREATE_TABLE,
+            ),
+            (
+                DatabaseOperationKind::FetchAll,
+                KV_OPERATION_SCHEMA_VALIDATE_COLUMNS,
+            ),
+            (
+                DatabaseOperationKind::FetchOne,
+                KV_OPERATION_SCHEMA_VALIDATE_KEY_CONFLICT_ARBITER,
+            ),
+        ],
+        vec![
+            (
+                DatabaseOperationKind::Execute,
+                KV_OPERATION_SCHEMA_CREATE_INDEX,
+            );
+            3
+        ],
+        kv_physical_schema_validation_shapes(),
     ]
     .concat()
 }
@@ -270,40 +310,63 @@ fn lease_validate_schema_in_current_transaction_shapes() -> Vec<OperationShape> 
     ]
 }
 
-fn schema_ledger_record_component_version_shapes() -> Vec<OperationShape> {
+fn schema_ledger_plan_component_migration_shapes() -> Vec<OperationShape> {
+    [
+        schema_ledger_ensure_and_validate_shapes(),
+        vec![(
+            DatabaseOperationKind::FetchOptional,
+            SCHEMA_LEDGER_OPERATION_FETCH_COMPONENT_VERSION,
+        )],
+    ]
+    .concat()
+}
+
+fn schema_ledger_record_component_migration_completion_shapes() -> Vec<OperationShape> {
     vec![
         (
             DatabaseOperationKind::Execute,
-            SCHEMA_LEDGER_OPERATION_CREATE_SAVEPOINT,
-        ),
-        (
-            DatabaseOperationKind::Execute,
-            SCHEMA_LEDGER_OPERATION_CREATE_TABLE,
-        ),
-        (
-            DatabaseOperationKind::Execute,
-            SCHEMA_LEDGER_OPERATION_RELEASE_SAVEPOINT,
-        ),
-        (
-            DatabaseOperationKind::FetchAll,
-            SCHEMA_LEDGER_OPERATION_VALIDATE_COLUMNS,
-        ),
-        (
-            DatabaseOperationKind::FetchOne,
-            SCHEMA_LEDGER_OPERATION_VALIDATE_PRIMARY_KEY,
-        ),
-        (
-            DatabaseOperationKind::FetchAll,
-            SCHEMA_LEDGER_OPERATION_VALIDATE_CHECK_CONSTRAINTS,
-        ),
-        (
-            DatabaseOperationKind::Execute,
             SCHEMA_LEDGER_OPERATION_RECORD_COMPONENT_VERSION,
+        ),
+        (
+            DatabaseOperationKind::FetchOptional,
+            SCHEMA_LEDGER_OPERATION_FETCH_COMPONENT_VERSION,
         ),
     ]
 }
 
 fn schema_ledger_validate_component_version_shapes() -> Vec<OperationShape> {
+    [
+        schema_ledger_validate_physical_shapes(),
+        vec![(
+            DatabaseOperationKind::FetchOptional,
+            SCHEMA_LEDGER_OPERATION_FETCH_COMPONENT_VERSION,
+        )],
+    ]
+    .concat()
+}
+
+fn schema_ledger_ensure_and_validate_shapes() -> Vec<OperationShape> {
+    [
+        vec![
+            (
+                DatabaseOperationKind::Execute,
+                SCHEMA_LEDGER_OPERATION_CREATE_SAVEPOINT,
+            ),
+            (
+                DatabaseOperationKind::Execute,
+                SCHEMA_LEDGER_OPERATION_CREATE_TABLE,
+            ),
+            (
+                DatabaseOperationKind::Execute,
+                SCHEMA_LEDGER_OPERATION_RELEASE_SAVEPOINT,
+            ),
+        ],
+        schema_ledger_validate_physical_shapes(),
+    ]
+    .concat()
+}
+
+fn schema_ledger_validate_physical_shapes() -> Vec<OperationShape> {
     vec![
         (
             DatabaseOperationKind::FetchAll,
@@ -316,10 +379,6 @@ fn schema_ledger_validate_component_version_shapes() -> Vec<OperationShape> {
         (
             DatabaseOperationKind::FetchAll,
             SCHEMA_LEDGER_OPERATION_VALIDATE_CHECK_CONSTRAINTS,
-        ),
-        (
-            DatabaseOperationKind::FetchOptional,
-            SCHEMA_LEDGER_OPERATION_FETCH_COMPONENT_VERSION,
         ),
     ]
 }

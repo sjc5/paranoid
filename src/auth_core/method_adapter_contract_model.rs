@@ -45,14 +45,12 @@ impl MethodAdapterContract {
                 Error::ProofMethodCannotUseChallengeBoundConfiguredSecretFastFail { family },
             );
         }
-        let mut pre_state_load =
-            vec![MethodPreStateLoadResponsibility::VerifyEncryptedChallengeCookie];
+        let mut pre_state_load = vec![MethodPreStateLoadResponsibility::EncryptedChallengeCookie];
         if method.uses_weak_attempt_failure_budget() {
-            pre_state_load
-                .push(MethodPreStateLoadResponsibility::VerifyWeakProofGateBeforeStateLoad);
+            pre_state_load.push(MethodPreStateLoadResponsibility::WeakProofGateBeforeStateLoad);
         }
         pre_state_load.push(
-            MethodPreStateLoadResponsibility::VerifyChallengeBoundConfiguredSecretFastFailBloomFilter,
+            MethodPreStateLoadResponsibility::ChallengeBoundConfiguredSecretFastFailBloomFilter,
         );
         Ok(Self {
             ownership: ownership_for_family(family),
@@ -155,19 +153,19 @@ pub enum MethodCoreDerivedResponsibility {
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum MethodPreStateLoadResponsibility {
     /// Verify an encrypted challenge cookie before accepting submitted proof material.
-    VerifyEncryptedChallengeCookie,
+    EncryptedChallengeCookie,
     /// Verify the stateless fast-fail MAC carried inside the encrypted challenge cookie.
-    VerifyStatelessFastFailMacFromEncryptedChallengeCookie,
+    StatelessFastFailMacFromEncryptedChallengeCookie,
     /// Verify weak-proof gate before any stateful weak-proof check.
-    VerifyWeakProofGateBeforeStateLoad,
+    WeakProofGateBeforeStateLoad,
     /// Verify the configured-secret Bloom filter carried inside the encrypted challenge cookie.
-    VerifyChallengeBoundConfiguredSecretFastFailBloomFilter,
+    ChallengeBoundConfiguredSecretFastFailBloomFilter,
     /// Verify message signature over a core-bound challenge before emitting a verified proof.
-    VerifyBoundMessageSignature,
+    BoundMessageSignature,
     /// Verify origin-bound authenticator assertion before emitting a verified proof.
-    VerifyOriginBoundPublicKeyAssertion,
+    OriginBoundPublicKeyAssertion,
     /// Verify trusted issuer assertion before emitting a verified proof.
-    VerifyFederatedIdentityAssertion,
+    FederatedIdentityAssertion,
 }
 
 /// Method work that requires loaded core state.
@@ -194,45 +192,41 @@ impl MethodVerificationContract {
             ProofFamily::OutOfBandCode => Self {
                 completion_input: MethodCompletionInputKind::SubmittedSecretResponse,
                 verified_proof_identity:
-                    MethodVerifiedProofIdentitySource::CoreDerivesFromEncryptedChallengeCookie,
-                subject_binding: MethodVerifiedProofSubjectBinding::MethodMayResolveSubject,
+                    MethodVerifiedProofIdentitySource::EncryptedChallengeCookie,
+                subject_binding: MethodVerifiedProofSubjectBinding::MethodMayResolve,
             },
             ProofFamily::MessageSignature => Self {
                 completion_input: MethodCompletionInputKind::BoundMessageSignatureAssertion,
                 verified_proof_identity:
-                    MethodVerifiedProofIdentitySource::CoreDerivesFromEncryptedChallengeCookie,
-                subject_binding: MethodVerifiedProofSubjectBinding::MethodMayResolveSubject,
+                    MethodVerifiedProofIdentitySource::EncryptedChallengeCookie,
+                subject_binding: MethodVerifiedProofSubjectBinding::MethodMayResolve,
             },
             ProofFamily::OriginBoundPublicKey => Self {
                 completion_input: MethodCompletionInputKind::OriginBoundPublicKeyAssertion,
                 verified_proof_identity:
-                    MethodVerifiedProofIdentitySource::CoreDerivesFromEncryptedChallengeCookie,
-                subject_binding: MethodVerifiedProofSubjectBinding::MethodMayResolveSubject,
+                    MethodVerifiedProofIdentitySource::EncryptedChallengeCookie,
+                subject_binding: MethodVerifiedProofSubjectBinding::MethodMayResolve,
             },
             ProofFamily::FederatedIdentityAssertion => Self {
                 completion_input: MethodCompletionInputKind::FederatedIdentityAssertion,
                 verified_proof_identity:
-                    MethodVerifiedProofIdentitySource::CoreDerivesFromEncryptedChallengeCookie,
-                subject_binding: MethodVerifiedProofSubjectBinding::MethodMayResolveSubject,
+                    MethodVerifiedProofIdentitySource::EncryptedChallengeCookie,
+                subject_binding: MethodVerifiedProofSubjectBinding::MethodMayResolve,
             },
             ProofFamily::SharedSecretOtp => Self {
                 completion_input: MethodCompletionInputKind::ConfiguredSecretProof,
-                verified_proof_identity:
-                    MethodVerifiedProofIdentitySource::CoreDerivesFromMethodDeclaration,
-                subject_binding: MethodVerifiedProofSubjectBinding::MustUseKnownAttemptSubject,
+                verified_proof_identity: MethodVerifiedProofIdentitySource::MethodDeclaration,
+                subject_binding: MethodVerifiedProofSubjectBinding::KnownAttemptSubject,
             },
             ProofFamily::RecoveryCode => Self {
                 completion_input: MethodCompletionInputKind::RecoveryCredential,
-                verified_proof_identity:
-                    MethodVerifiedProofIdentitySource::CoreDerivesFromMethodDeclaration,
-                subject_binding: MethodVerifiedProofSubjectBinding::MustUseKnownAttemptSubject,
+                verified_proof_identity: MethodVerifiedProofIdentitySource::MethodDeclaration,
+                subject_binding: MethodVerifiedProofSubjectBinding::KnownAttemptSubject,
             },
             ProofFamily::TrustedDevice => Self {
                 completion_input: MethodCompletionInputKind::PassiveTrustedDeviceCredential,
-                verified_proof_identity:
-                    MethodVerifiedProofIdentitySource::CoreDerivesFromTrustedDeviceCredential,
-                subject_binding:
-                    MethodVerifiedProofSubjectBinding::CoreUsesTrustedDeviceCredentialSubject,
+                verified_proof_identity: MethodVerifiedProofIdentitySource::TrustedDeviceCredential,
+                subject_binding: MethodVerifiedProofSubjectBinding::TrustedDeviceCredentialSubject,
             },
         }
     }
@@ -276,22 +270,22 @@ pub enum MethodCompletionInputKind {
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum MethodVerifiedProofIdentitySource {
     /// Runtime derives proof identity from an encrypted challenge cookie.
-    CoreDerivesFromEncryptedChallengeCookie,
+    EncryptedChallengeCookie,
     /// Runtime derives proof identity from the method declaration.
-    CoreDerivesFromMethodDeclaration,
+    MethodDeclaration,
     /// Core derives proof identity from a trusted-device credential record.
-    CoreDerivesFromTrustedDeviceCredential,
+    TrustedDeviceCredential,
 }
 
 /// How method verification may affect subject binding.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum MethodVerifiedProofSubjectBinding {
     /// Method verification may resolve a subject from recipient, verifier, or assertion state.
-    MethodMayResolveSubject,
+    MethodMayResolve,
     /// The proof may only apply to a subject the attempt already knows.
-    MustUseKnownAttemptSubject,
+    KnownAttemptSubject,
     /// Core uses the trusted-device credential's stored subject.
-    CoreUsesTrustedDeviceCredentialSubject,
+    TrustedDeviceCredentialSubject,
 }
 
 /// Challenge-cookie contract for a method.
@@ -675,26 +669,26 @@ fn pre_state_load_responsibilities_for_method(
 ) -> Vec<MethodPreStateLoadResponsibility> {
     let mut responsibilities = match method.family() {
         ProofFamily::OutOfBandCode => vec![
-            MethodPreStateLoadResponsibility::VerifyEncryptedChallengeCookie,
-            MethodPreStateLoadResponsibility::VerifyStatelessFastFailMacFromEncryptedChallengeCookie,
+            MethodPreStateLoadResponsibility::EncryptedChallengeCookie,
+            MethodPreStateLoadResponsibility::StatelessFastFailMacFromEncryptedChallengeCookie,
         ],
         ProofFamily::MessageSignature => vec![
-            MethodPreStateLoadResponsibility::VerifyEncryptedChallengeCookie,
-            MethodPreStateLoadResponsibility::VerifyBoundMessageSignature,
+            MethodPreStateLoadResponsibility::EncryptedChallengeCookie,
+            MethodPreStateLoadResponsibility::BoundMessageSignature,
         ],
         ProofFamily::OriginBoundPublicKey => vec![
-            MethodPreStateLoadResponsibility::VerifyEncryptedChallengeCookie,
-            MethodPreStateLoadResponsibility::VerifyOriginBoundPublicKeyAssertion,
+            MethodPreStateLoadResponsibility::EncryptedChallengeCookie,
+            MethodPreStateLoadResponsibility::OriginBoundPublicKeyAssertion,
         ],
         ProofFamily::FederatedIdentityAssertion => vec![
-            MethodPreStateLoadResponsibility::VerifyEncryptedChallengeCookie,
-            MethodPreStateLoadResponsibility::VerifyFederatedIdentityAssertion,
+            MethodPreStateLoadResponsibility::EncryptedChallengeCookie,
+            MethodPreStateLoadResponsibility::FederatedIdentityAssertion,
         ],
         ProofFamily::SharedSecretOtp | ProofFamily::RecoveryCode => Vec::new(),
         ProofFamily::TrustedDevice => Vec::new(),
     };
     if method.uses_weak_attempt_failure_budget() {
-        responsibilities.push(MethodPreStateLoadResponsibility::VerifyWeakProofGateBeforeStateLoad);
+        responsibilities.push(MethodPreStateLoadResponsibility::WeakProofGateBeforeStateLoad);
     }
     responsibilities
 }

@@ -6,9 +6,10 @@ use std::sync::Arc;
 
 use crate::crypto::{Keyset, MacOverSecret, SecretBytes};
 use crate::db::{
-    ComponentSchemaVersion, DatabaseOperationKind, DbError, PgIdentifier, PgQualifiedTableName,
-    PgSchemaName, Pool, Tx, pooler_safe_query, pooler_safe_query_as, pooler_safe_query_scalar,
-    record_component_schema_version_in_current_transaction, unparameterized_simple_query,
+    BootstrapConfig, ComponentSchemaVersion, DatabaseOperationKind, DbError, PgIdentifier,
+    PgQualifiedTableName, PgSchemaName, Pool, Tx, pooler_safe_query, pooler_safe_query_as,
+    pooler_safe_query_scalar, record_component_schema_version_in_current_transaction,
+    schema_instance_key_for_parts, unparameterized_simple_query,
     validate_component_schema_version_in_current_transaction,
 };
 
@@ -18,7 +19,7 @@ use super::*;
 const AUTH_SCHEMA_COMPONENT: &str = "auth_core";
 const AUTH_SCHEMA_VERSION: i32 = 1;
 const AUTH_SCHEMA_FINGERPRINT: &str = "auth-core-postgres-v1";
-const DEFAULT_AUTH_TABLE_PREFIX: &str = "__paranoid_";
+const DEFAULT_SCHEMA_LOCAL_AUTH_INDEX_PREFIX: &str = "auth_";
 const AUTH_SCHEMA_LEDGER_TABLE_SUFFIX: &str = "schema_ledger";
 const AUTH_CREDENTIAL_SECRET_BYTES: usize = 32;
 const SESSION_SECRET_MAC_CONTEXT_PREFIX: &[u8] = b"paranoid/auth/v1/session-secret";
@@ -31,7 +32,8 @@ const DURABLE_EFFECT_KIND_NOTIFY_SECURITY_EVENT: i32 = 2;
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct PostgresAuthStoreConfig {
     schema: Option<PgSchemaName>,
-    table_prefix: PgIdentifier,
+    table_prefix: Option<PgIdentifier>,
+    schema_ledger_table_name: PgQualifiedTableName,
 }
 
 impl PostgresAuthStoreConfig {
@@ -39,9 +41,35 @@ impl PostgresAuthStoreConfig {
         schema: Option<PgSchemaName>,
         table_prefix: PgIdentifier,
     ) -> Result<Self, PostgresAuthStoreError> {
+        let schema_ledger_table_name =
+            legacy_schema_ledger_table_name(schema.clone(), &table_prefix)?;
+        let config = Self::with_optional_table_prefix_and_schema_ledger_table_name(
+            schema,
+            Some(table_prefix),
+            schema_ledger_table_name,
+        )?;
+        Ok(config)
+    }
+
+    pub(crate) fn for_db_bootstrap_config(
+        bootstrap_config: &BootstrapConfig,
+    ) -> Result<Self, PostgresAuthStoreError> {
+        Self::with_optional_table_prefix_and_schema_ledger_table_name(
+            Some(bootstrap_config.schema_name().clone()),
+            None,
+            bootstrap_config.table_names().schema_ledger,
+        )
+    }
+
+    fn with_optional_table_prefix_and_schema_ledger_table_name(
+        schema: Option<PgSchemaName>,
+        table_prefix: Option<PgIdentifier>,
+        schema_ledger_table_name: PgQualifiedTableName,
+    ) -> Result<Self, PostgresAuthStoreError> {
         let config = Self {
             schema,
             table_prefix,
+            schema_ledger_table_name,
         };
         config.table_names()?;
         Ok(config)
@@ -53,7 +81,7 @@ impl PostgresAuthStoreConfig {
     ) -> Result<PgQualifiedTableName, PostgresAuthStoreError> {
         let table_name = PgIdentifier::new(format!(
             "{}{}",
-            self.table_prefix.as_str(),
+            self.table_prefix.as_ref().map_or("", PgIdentifier::as_str),
             table.default_suffix()
         ))
         .map_err(DbError::from)?;
@@ -67,23 +95,33 @@ impl PostgresAuthStoreConfig {
     pub(super) fn schema_ledger_table_name(
         &self,
     ) -> Result<PgQualifiedTableName, PostgresAuthStoreError> {
-        let table_name = PgIdentifier::new(format!(
-            "{}{}",
-            self.table_prefix.as_str(),
-            AUTH_SCHEMA_LEDGER_TABLE_SUFFIX
-        ))
-        .map_err(DbError::from)?;
-        Ok(PgQualifiedTableName::new(self.schema.clone(), table_name))
+        Ok(self.schema_ledger_table_name.clone())
     }
+
+    fn index_name_prefix(&self) -> &str {
+        self.table_prefix
+            .as_ref()
+            .map_or(DEFAULT_SCHEMA_LOCAL_AUTH_INDEX_PREFIX, PgIdentifier::as_str)
+    }
+}
+
+fn legacy_schema_ledger_table_name(
+    schema: Option<PgSchemaName>,
+    table_prefix: &PgIdentifier,
+) -> Result<PgQualifiedTableName, PostgresAuthStoreError> {
+    let table_name = PgIdentifier::new(format!(
+        "{}{}",
+        table_prefix.as_str(),
+        AUTH_SCHEMA_LEDGER_TABLE_SUFFIX
+    ))
+    .map_err(DbError::from)?;
+    Ok(PgQualifiedTableName::new(schema, table_name))
 }
 
 impl Default for PostgresAuthStoreConfig {
     fn default() -> Self {
-        Self {
-            schema: None,
-            table_prefix: PgIdentifier::new(DEFAULT_AUTH_TABLE_PREFIX)
-                .expect("default auth table prefix must be a valid Postgres identifier"),
-        }
+        Self::for_db_bootstrap_config(&BootstrapConfig::default())
+            .expect("default auth store config must derive valid bootstrap table names")
     }
 }
 
@@ -542,6 +580,27 @@ impl PostgresAuthStore {
         .await
     }
 
+    pub(crate) async fn load_pending_subject_auth_state_deletion_for_execution_in_current_transaction(
+        &self,
+        tx: &mut Tx<'_>,
+        pending_action_id: &PendingSubjectLifecycleActionId,
+    ) -> Result<Option<PendingSubjectLifecycleActionRecord>, PostgresAuthStoreError> {
+        let table_names = self.config.table_names()?;
+        load_pending_subject_lifecycle_action(tx, &table_names, pending_action_id).await
+    }
+
+    pub(crate) async fn load_pending_subject_auth_state_deletion_for_cancellation_in_current_transaction(
+        &self,
+        tx: &mut Tx<'_>,
+        pending_action_id: &PendingSubjectLifecycleActionId,
+    ) -> Result<Option<PendingSubjectLifecycleActionRecord>, PostgresAuthStoreError> {
+        self.load_pending_subject_auth_state_deletion_for_execution_in_current_transaction(
+            tx,
+            pending_action_id,
+        )
+        .await
+    }
+
     #[cfg(test)]
     pub(crate) async fn store_credential_lifecycle_metadata_for_test(
         &self,
@@ -600,6 +659,29 @@ impl PostgresAuthStore {
         .await;
         finish_auth_store_transaction(
             "auth_core.store_pending_credential_lifecycle_actions_for_test",
+            tx,
+            result,
+        )
+        .await
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn store_pending_subject_lifecycle_actions_for_test(
+        &self,
+        pool: &Pool,
+        records: &[PendingSubjectLifecycleActionRecord],
+    ) -> Result<(), PostgresAuthStoreError> {
+        let mut tx = pool.begin_transaction().await?;
+        let table_names = self.config.table_names()?;
+        let result = async {
+            for record in records {
+                insert_pending_subject_lifecycle_action(&mut tx, &table_names, record).await?;
+            }
+            Ok(())
+        }
+        .await;
+        finish_auth_store_transaction(
+            "auth_core.store_pending_subject_lifecycle_actions_for_test",
             tx,
             result,
         )
@@ -790,6 +872,7 @@ impl From<DbError> for PostgresAuthStoreError {
 #[derive(Clone, Debug)]
 struct AuthCoreTableNames {
     by_table: BTreeMap<PostgresAuthCoreTable, PgQualifiedTableName>,
+    index_name_prefix: String,
 }
 
 impl AuthCoreTableNames {
@@ -798,7 +881,10 @@ impl AuthCoreTableNames {
         for table in PostgresAuthCoreSchemaContract::table_kinds() {
             by_table.insert(*table, config.table_name(*table)?);
         }
-        Ok(Self { by_table })
+        Ok(Self {
+            by_table,
+            index_name_prefix: config.index_name_prefix().to_owned(),
+        })
     }
 
     fn get(&self, table: PostgresAuthCoreTable) -> &PgQualifiedTableName {
@@ -993,7 +1079,7 @@ fn build_create_unique_index_statement(
 ) -> Result<String, PostgresAuthStoreError> {
     let index_name = PgIdentifier::new(format!(
         "{}{}_{}",
-        DEFAULT_AUTH_TABLE_PREFIX,
+        table_names.index_name_prefix,
         auth_table_number(contract.table()),
         uniqueness.name()
     ))
@@ -1255,26 +1341,26 @@ impl PostgresAuthStore {
             revoked_at: row.9.map(unix_seconds_from_i64).transpose()?,
         };
         let match_kind = match presented_secrets.session() {
-            Some(secret) => classify_presented_secret(
-                &self.credential_secret_keyset,
-                &CoreStorageTarget::SessionCredentialSecret {
+            Some(secret) => classify_presented_secret(PresentedSecretClassificationInput {
+                keyset: &self.credential_secret_keyset,
+                current_target: CoreStorageTarget::SessionCredentialSecret {
                     session_id: record.session_id.clone(),
                     secret_version: record.current_secret_version,
                 },
-                row.10.as_deref(),
-                secret.secret(),
-                record.current_secret_version,
-                &CoreStorageTarget::SessionCredentialSecret {
+                current_mac_bytes: row.10.as_deref(),
+                secret: secret.secret(),
+                current_version: record.current_secret_version,
+                previous_target: CoreStorageTarget::SessionCredentialSecret {
                     session_id: record.session_id.clone(),
                     secret_version: record
                         .previous_secret_version
                         .unwrap_or(record.current_secret_version),
                 },
-                row.11.as_deref(),
-                record.previous_secret_version,
-                record.previous_secret_accept_until,
+                previous_mac_bytes: row.11.as_deref(),
+                previous_version: record.previous_secret_version,
+                previous_secret_accept_until: record.previous_secret_accept_until,
                 now,
-            )?,
+            })?,
             None => StoredSecretMatch::Unknown,
         };
         loaded.session_record = Some(record);
@@ -1368,26 +1454,26 @@ impl PostgresAuthStore {
             display_label: row.9,
         };
         let match_kind = match presented_secrets.trusted_device() {
-            Some(secret) => classify_presented_secret(
-                &self.credential_secret_keyset,
-                &CoreStorageTarget::TrustedDeviceCredentialSecret {
+            Some(secret) => classify_presented_secret(PresentedSecretClassificationInput {
+                keyset: &self.credential_secret_keyset,
+                current_target: CoreStorageTarget::TrustedDeviceCredentialSecret {
                     device_credential_id: record.device_credential_id.clone(),
                     secret_version: record.current_secret_version,
                 },
-                row.10.as_deref(),
-                secret.secret(),
-                record.current_secret_version,
-                &CoreStorageTarget::TrustedDeviceCredentialSecret {
+                current_mac_bytes: row.10.as_deref(),
+                secret: secret.secret(),
+                current_version: record.current_secret_version,
+                previous_target: CoreStorageTarget::TrustedDeviceCredentialSecret {
                     device_credential_id: record.device_credential_id.clone(),
                     secret_version: record
                         .previous_secret_version
                         .unwrap_or(record.current_secret_version),
                 },
-                row.11.as_deref(),
-                record.previous_secret_version,
-                record.previous_secret_accept_until,
+                previous_mac_bytes: row.11.as_deref(),
+                previous_version: record.previous_secret_version,
+                previous_secret_accept_until: record.previous_secret_accept_until,
                 now,
-            )?,
+            })?,
             None => StoredSecretMatch::Unknown,
         };
         loaded.trusted_device_record = Some(record);
@@ -1767,6 +1853,91 @@ async fn load_pending_credential_lifecycle_action(
                     target_credential_instance_id,
                 )?,
                 action: credential_lifecycle_action_from_i32(action)?,
+                requested_at: unix_seconds_from_i64(requested_at)?,
+                earliest_execute_at: unix_seconds_from_i64(earliest_execute_at)?,
+                expires_at: unix_seconds_from_i64(expires_at)?,
+                closed_at: closed_at.map(unix_seconds_from_i64).transpose()?,
+            })
+        },
+    )
+    .transpose()
+}
+
+async fn insert_pending_subject_lifecycle_action(
+    tx: &mut Tx<'_>,
+    table_names: &AuthCoreTableNames,
+    record: &PendingSubjectLifecycleActionRecord,
+) -> Result<(), PostgresAuthStoreError> {
+    let statement = format!(
+        r#"
+        INSERT INTO {} (
+            pending_action_id,
+            subject_id,
+            subject_lifecycle_action,
+            requested_at,
+            earliest_execute_at,
+            expires_at,
+            closed_at
+        )
+        VALUES ($1,$2,$3,$4,$5,$6,$7)
+        "#,
+        table_names
+            .get(PostgresAuthCoreTable::PendingSubjectLifecycleAction)
+            .quoted()
+    );
+    tx.record_database_operation(
+        DatabaseOperationKind::Execute,
+        "auth_core.mutation.create_pending_subject_lifecycle_action",
+        Some(statement.as_str()),
+    );
+    pooler_safe_query(sqlx::AssertSqlSafe(statement.as_str()))
+        .bind(record.pending_action_id.as_bytes())
+        .bind(record.subject_id.as_bytes())
+        .bind(i32_from_subject_lifecycle_action(record.action))
+        .bind(i64_from_unix_seconds(record.requested_at)?)
+        .bind(i64_from_unix_seconds(record.earliest_execute_at)?)
+        .bind(i64_from_unix_seconds(record.expires_at)?)
+        .bind(optional_i64_from_unix_seconds(record.closed_at)?)
+        .execute(tx.sqlx_transaction().as_mut())
+        .await
+        .map_err(DbError::query)?;
+    Ok(())
+}
+
+async fn load_pending_subject_lifecycle_action(
+    tx: &mut Tx<'_>,
+    table_names: &AuthCoreTableNames,
+    pending_action_id: &PendingSubjectLifecycleActionId,
+) -> Result<Option<PendingSubjectLifecycleActionRecord>, PostgresAuthStoreError> {
+    let statement = format!(
+        r#"
+        SELECT subject_id, subject_lifecycle_action,
+               requested_at, earliest_execute_at, expires_at, closed_at
+        FROM {}
+        WHERE pending_action_id = $1
+        "#,
+        table_names
+            .get(PostgresAuthCoreTable::PendingSubjectLifecycleAction)
+            .quoted()
+    );
+    tx.record_database_operation(
+        DatabaseOperationKind::FetchOptional,
+        "auth_core.load.pending_subject_lifecycle_action",
+        Some(statement.as_str()),
+    );
+    let row = pooler_safe_query_as::<(Vec<u8>, i32, i64, i64, i64, Option<i64>)>(
+        sqlx::AssertSqlSafe(statement.as_str()),
+    )
+    .bind(pending_action_id.as_bytes())
+    .fetch_optional(tx.sqlx_transaction().as_mut())
+    .await
+    .map_err(DbError::query)?;
+    row.map(
+        |(subject_id, action, requested_at, earliest_execute_at, expires_at, closed_at)| {
+            Ok(PendingSubjectLifecycleActionRecord {
+                pending_action_id: pending_action_id.clone(),
+                subject_id: SubjectId::from_bytes(subject_id)?,
+                action: subject_lifecycle_action_from_i32(action)?,
                 requested_at: unix_seconds_from_i64(requested_at)?,
                 earliest_execute_at: unix_seconds_from_i64(earliest_execute_at)?,
                 expires_at: unix_seconds_from_i64(expires_at)?,
@@ -2605,6 +2776,148 @@ async fn enforce_precondition(
                 ));
             }
         }
+        Precondition::NoOpenPendingSubjectLifecycleActionForSubject {
+            subject_id,
+            action,
+            now,
+        } => {
+            let close_statement = format!(
+                r#"
+                UPDATE {}
+                SET closed_at = $3
+                WHERE subject_id = $1
+                  AND subject_lifecycle_action = $2
+                  AND closed_at IS NULL
+                  AND expires_at <= $3
+                "#,
+                table_names
+                    .get(PostgresAuthCoreTable::PendingSubjectLifecycleAction)
+                    .quoted()
+            );
+            tx.record_database_operation(
+                DatabaseOperationKind::Execute,
+                "auth_core.precondition.close_expired_pending_subject_lifecycle_actions",
+                Some(close_statement.as_str()),
+            );
+            pooler_safe_query(sqlx::AssertSqlSafe(close_statement.as_str()))
+                .bind(subject_id.as_bytes())
+                .bind(i32_from_subject_lifecycle_action(*action))
+                .bind(i64_from_unix_seconds(*now)?)
+                .execute(tx.sqlx_transaction().as_mut())
+                .await
+                .map_err(DbError::query)?;
+
+            let open_statement = format!(
+                r#"
+                SELECT 1
+                FROM {}
+                WHERE subject_id = $1
+                  AND subject_lifecycle_action = $2
+                  AND closed_at IS NULL
+                FOR UPDATE
+                "#,
+                table_names
+                    .get(PostgresAuthCoreTable::PendingSubjectLifecycleAction)
+                    .quoted()
+            );
+            let found = fetch_exists_for_update(
+                tx,
+                "auth_core.precondition.no_open_pending_subject_lifecycle_action",
+                &open_statement,
+                |query| {
+                    Ok(query
+                        .bind(subject_id.as_bytes())
+                        .bind(i32_from_subject_lifecycle_action(*action)))
+                },
+            )
+            .await?;
+            if found {
+                return Err(PostgresAuthStoreError::PreconditionFailed(
+                    "pending subject lifecycle action already exists",
+                ));
+            }
+        }
+        Precondition::PendingSubjectLifecycleActionStillExecutable {
+            pending_action_id,
+            subject_id,
+            action,
+            now,
+        } => {
+            let statement = format!(
+                r#"
+                SELECT 1
+                FROM {}
+                WHERE pending_action_id = $1
+                  AND subject_id = $2
+                  AND subject_lifecycle_action = $3
+                  AND closed_at IS NULL
+                  AND earliest_execute_at <= $4
+                  AND $4 < expires_at
+                FOR UPDATE
+                "#,
+                table_names
+                    .get(PostgresAuthCoreTable::PendingSubjectLifecycleAction)
+                    .quoted()
+            );
+            let found = fetch_exists_for_update(
+                tx,
+                "auth_core.precondition.pending_subject_lifecycle_action_still_executable",
+                &statement,
+                |query| {
+                    Ok(query
+                        .bind(pending_action_id.as_bytes())
+                        .bind(subject_id.as_bytes())
+                        .bind(i32_from_subject_lifecycle_action(*action))
+                        .bind(i64_from_unix_seconds(*now)?))
+                },
+            )
+            .await?;
+            if !found {
+                return Err(PostgresAuthStoreError::PreconditionFailed(
+                    "pending subject lifecycle action is not executable",
+                ));
+            }
+        }
+        Precondition::PendingSubjectLifecycleActionStillCancellableForSubject {
+            pending_action_id,
+            subject_id,
+            action,
+            now,
+        } => {
+            let statement = format!(
+                r#"
+                SELECT 1
+                FROM {}
+                WHERE pending_action_id = $1
+                  AND subject_id = $2
+                  AND subject_lifecycle_action = $3
+                  AND closed_at IS NULL
+                  AND $4 < expires_at
+                FOR UPDATE
+                "#,
+                table_names
+                    .get(PostgresAuthCoreTable::PendingSubjectLifecycleAction)
+                    .quoted()
+            );
+            let found = fetch_exists_for_update(
+                tx,
+                "auth_core.precondition.pending_subject_lifecycle_action_still_cancellable_for_subject",
+                &statement,
+                |query| {
+                    Ok(query
+                        .bind(pending_action_id.as_bytes())
+                        .bind(subject_id.as_bytes())
+                        .bind(i32_from_subject_lifecycle_action(*action))
+                        .bind(i64_from_unix_seconds(*now)?))
+                },
+            )
+            .await?;
+            if !found {
+                return Err(PostgresAuthStoreError::PreconditionFailed(
+                    "pending subject lifecycle action is not cancellable for subject",
+                ));
+            }
+        }
     }
     Ok(())
 }
@@ -3051,6 +3364,31 @@ async fn apply_mutation(
             execute_one_row_update(
                 tx,
                 "auth_core.mutation.close_pending_credential_lifecycle_action",
+                &statement,
+                |query| {
+                    Ok(query
+                        .bind(pending_action_id.as_bytes())
+                        .bind(i64_from_unix_seconds(*closed_at)?))
+                },
+            )
+            .await
+        }
+        Mutation::CreatePendingSubjectLifecycleAction(record) => {
+            insert_pending_subject_lifecycle_action(tx, table_names, record).await
+        }
+        Mutation::ClosePendingSubjectLifecycleAction {
+            pending_action_id,
+            closed_at,
+        } => {
+            let statement = format!(
+                r#"UPDATE {} SET closed_at = $2 WHERE pending_action_id = $1"#,
+                table_names
+                    .get(PostgresAuthCoreTable::PendingSubjectLifecycleAction)
+                    .quoted()
+            );
+            execute_one_row_update(
+                tx,
+                "auth_core.mutation.close_pending_subject_lifecycle_action",
                 &statement,
                 |query| {
                     Ok(query
@@ -3788,41 +4126,49 @@ where
     Ok(())
 }
 
-fn classify_presented_secret(
-    keyset: &Keyset,
-    current_target: &CoreStorageTarget,
-    current_mac_bytes: Option<&[u8]>,
-    secret: &AuthCredentialSecret,
+struct PresentedSecretClassificationInput<'a> {
+    keyset: &'a Keyset,
+    current_target: CoreStorageTarget,
+    current_mac_bytes: Option<&'a [u8]>,
+    secret: &'a AuthCredentialSecret,
     current_version: SecretVersion,
-    previous_target: &CoreStorageTarget,
-    previous_mac_bytes: Option<&[u8]>,
+    previous_target: CoreStorageTarget,
+    previous_mac_bytes: Option<&'a [u8]>,
     previous_version: Option<SecretVersion>,
     previous_secret_accept_until: Option<UnixSeconds>,
     now: UnixSeconds,
+}
+
+fn classify_presented_secret(
+    input: PresentedSecretClassificationInput<'_>,
 ) -> Result<StoredSecretMatch, PostgresAuthStoreError> {
-    if let Some(current_mac) = current_mac_bytes {
+    if let Some(current_mac) = input.current_mac_bytes {
         let current_mac = MacOverSecret::try_from(current_mac)
             .map_err(|_| PostgresAuthStoreError::InvalidStoredData("malformed current MAC"))?;
         if current_mac.verify(
-            keyset,
-            secret.expose_secret(),
-            &credential_secret_mac_context(current_target),
+            input.keyset,
+            input.secret.expose_secret(),
+            &credential_secret_mac_context(&input.current_target),
         ) {
             return Ok(StoredSecretMatch::Current);
         }
     }
-    if previous_version.is_some()
-        && let Some(previous_mac) = previous_mac_bytes
+    if input.previous_version.is_some()
+        && let Some(previous_mac) = input.previous_mac_bytes
     {
         let previous_mac = MacOverSecret::try_from(previous_mac)
             .map_err(|_| PostgresAuthStoreError::InvalidStoredData("malformed previous MAC"))?;
         if previous_mac.verify(
-            keyset,
-            secret.expose_secret(),
-            &credential_secret_mac_context(previous_target),
+            input.keyset,
+            input.secret.expose_secret(),
+            &credential_secret_mac_context(&input.previous_target),
         ) {
-            if previous_version.is_some_and(|version| version != current_version)
-                && previous_secret_accept_until.is_some_and(|accept_until| now < accept_until)
+            if input
+                .previous_version
+                .is_some_and(|version| version != input.current_version)
+                && input
+                    .previous_secret_accept_until
+                    .is_some_and(|accept_until| input.now < accept_until)
             {
                 return Ok(StoredSecretMatch::PreviousWithinGrace);
             }
@@ -3866,11 +4212,16 @@ fn append_context_bytes(context: &mut Vec<u8>, bytes: &[u8]) {
 }
 
 pub(super) fn schema_instance_key(config: &PostgresAuthStoreConfig) -> String {
-    let schema = config.schema.as_ref().map_or("", PgSchemaName::as_str);
-    format!(
-        "schema={schema};table_prefix={}",
-        config.table_prefix.as_str()
-    )
+    let schema_ledger_table_name = config
+        .schema_ledger_table_name()
+        .expect("validated auth store config must produce schema ledger table name");
+    let session_table_name = config
+        .table_name(PostgresAuthCoreTable::Session)
+        .expect("validated auth store config must produce session table name");
+    schema_instance_key_for_parts([
+        ("schema_ledger", &schema_ledger_table_name),
+        ("session_table", &session_table_name),
+    ])
 }
 
 fn auth_table_number(table: PostgresAuthCoreTable) -> u8 {
@@ -3889,8 +4240,9 @@ fn auth_table_number(table: PostgresAuthCoreTable) -> u8 {
         PostgresAuthCoreTable::CredentialRecoveryAuthority => 12,
         PostgresAuthCoreTable::LifecycleAuthoritySource => 13,
         PostgresAuthCoreTable::PendingCredentialLifecycleAction => 14,
-        PostgresAuthCoreTable::AuditEvent => 15,
-        PostgresAuthCoreTable::CoreDurableEffectCommand => 16,
+        PostgresAuthCoreTable::PendingSubjectLifecycleAction => 15,
+        PostgresAuthCoreTable::AuditEvent => 16,
+        PostgresAuthCoreTable::CoreDurableEffectCommand => 17,
     }
 }
 
@@ -4058,6 +4410,23 @@ pub(super) fn i32_from_credential_lifecycle_action(value: CredentialLifecycleAct
     }
 }
 
+pub(super) fn subject_lifecycle_action_from_i32(
+    value: i32,
+) -> Result<SubjectLifecycleAction, PostgresAuthStoreError> {
+    match value {
+        1 => Ok(SubjectLifecycleAction::DeleteSubjectAuthState),
+        _ => Err(PostgresAuthStoreError::InvalidStoredData(
+            "invalid subject lifecycle action",
+        )),
+    }
+}
+
+pub(super) fn i32_from_subject_lifecycle_action(value: SubjectLifecycleAction) -> i32 {
+    match value {
+        SubjectLifecycleAction::DeleteSubjectAuthState => 1,
+    }
+}
+
 pub(super) fn recovery_authority_timing_from_i32(
     value: i32,
 ) -> Result<RecoveryAuthorityTiming, PostgresAuthStoreError> {
@@ -4172,6 +4541,9 @@ fn i32_from_audit_event_kind(value: AuditEventKind) -> i32 {
         AuditEventKind::CredentialRemovalPendingActionCancelled => 27,
         AuditEventKind::CredentialRegenerationExecuted => 28,
         AuditEventKind::CredentialRegenerationPendingActionCancelled => 29,
+        AuditEventKind::SubjectAuthStateDeletionPendingActionScheduled => 30,
+        AuditEventKind::SubjectAuthStateDeletionExecuted => 31,
+        AuditEventKind::SubjectAuthStateDeletionPendingActionCancelled => 32,
     }
 }
 
@@ -4188,6 +4560,9 @@ pub(super) fn i32_from_security_notification_kind(value: SecurityNotificationKin
         SecurityNotificationKind::CredentialRemovalPendingActionCancelled => 9,
         SecurityNotificationKind::CredentialRegenerationExecuted => 10,
         SecurityNotificationKind::CredentialRegenerationPendingActionCancelled => 11,
+        SecurityNotificationKind::SubjectAuthStateDeletionPendingActionScheduled => 12,
+        SecurityNotificationKind::SubjectAuthStateDeletionExecuted => 13,
+        SecurityNotificationKind::SubjectAuthStateDeletionPendingActionCancelled => 14,
     }
 }
 

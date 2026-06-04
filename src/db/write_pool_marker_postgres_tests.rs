@@ -243,9 +243,10 @@ async fn assert_cron_handle_fails_with_insufficient_privilege(
     label: &str,
     handle: crate::fleet::CronRunHandle<TestTaskError>,
 ) {
-    let result = tokio::time::timeout(Duration::from_secs(2), handle.wait())
-        .await
-        .unwrap_or_else(|_| panic!("{label} did not finish after privilege failure"));
+    let result = match tokio::time::timeout(Duration::from_secs(2), handle.wait()).await {
+        Ok(result) => result,
+        Err(_) => panic!("{label} did not finish after privilege failure"),
+    };
     let error = result.expect_err("cron handle unexpectedly succeeded");
     assert!(
         cron_handle_error_is_insufficient_privilege(&error),
@@ -257,9 +258,10 @@ async fn assert_subscription_handle_fails_with_insufficient_privilege(
     label: &str,
     handle: crate::fleet::SubscriptionRunHandle<TestTaskError>,
 ) {
-    let result = tokio::time::timeout(Duration::from_secs(2), handle.wait())
-        .await
-        .unwrap_or_else(|_| panic!("{label} did not finish after privilege failure"));
+    let result = match tokio::time::timeout(Duration::from_secs(2), handle.wait()).await {
+        Ok(result) => result,
+        Err(_) => panic!("{label} did not finish after privilege failure"),
+    };
     let error = result.expect_err("subscription handle unexpectedly succeeded");
     assert!(
         subscription_handle_error_is_insufficient_privilege(&error),
@@ -288,10 +290,10 @@ fn db_error_is_insufficient_privilege(error: &DbError) -> bool {
 fn error_chain_has_insufficient_privilege(error: &(dyn StdError + 'static)) -> bool {
     let mut current = Some(error);
     while let Some(error) = current {
-        if let Some(db_error) = error.downcast_ref::<DbError>() {
-            if db_error_is_insufficient_privilege(db_error) {
-                return true;
-            }
+        if let Some(db_error) = error.downcast_ref::<DbError>()
+            && db_error_is_insufficient_privilege(db_error)
+        {
+            return true;
         }
         current = error.source();
     }

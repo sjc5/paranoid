@@ -13,6 +13,7 @@ const CORE_STORAGE_RECORD_KINDS: &[CoreStorageRecordKind] = &[
     CoreStorageRecordKind::CredentialRecoveryAuthority,
     CoreStorageRecordKind::LifecycleAuthoritySource,
     CoreStorageRecordKind::PendingCredentialLifecycleAction,
+    CoreStorageRecordKind::PendingSubjectLifecycleAction,
     CoreStorageRecordKind::AuditEvent,
     CoreStorageRecordKind::CoreDurableEffectCommand,
 ];
@@ -55,6 +56,8 @@ pub enum CoreStorageRecordKind {
     LifecycleAuthoritySource,
     /// Delayed credential lifecycle action.
     PendingCredentialLifecycleAction,
+    /// Delayed subject lifecycle action.
+    PendingSubjectLifecycleAction,
     /// Immutable audit event.
     AuditEvent,
     /// Durable command to deliver a core-owned external effect after commit.
@@ -321,6 +324,46 @@ impl CorePreconditionStorageContract {
                     StorageValidationRequirement::PendingCredentialLifecycleActionStillCancellableForTarget,
                 ],
             },
+            Precondition::NoOpenPendingSubjectLifecycleActionForSubject {
+                subject_id,
+                action,
+                ..
+            } => Self {
+                kind: CorePreconditionKind::NoOpenPendingSubjectLifecycleActionForSubject,
+                lock_requirements: vec![
+                    StorageLockRequirement::EnforceOpenPendingSubjectLifecycleActionUniqueness {
+                        subject_id: subject_id.clone(),
+                        action: *action,
+                    },
+                ],
+                validation_requirements: vec![
+                    StorageValidationRequirement::NoOpenPendingSubjectLifecycleActionForSubject,
+                ],
+            },
+            Precondition::PendingSubjectLifecycleActionStillExecutable {
+                pending_action_id,
+                ..
+            } => Self {
+                kind: CorePreconditionKind::PendingSubjectLifecycleActionStillExecutable,
+                lock_requirements: vec![StorageLockRequirement::LockExistingRowForUpdate(
+                    CoreStorageTarget::PendingSubjectLifecycleAction(pending_action_id.clone()),
+                )],
+                validation_requirements: vec![
+                    StorageValidationRequirement::PendingSubjectLifecycleActionStillExecutable,
+                ],
+            },
+            Precondition::PendingSubjectLifecycleActionStillCancellableForSubject {
+                pending_action_id,
+                ..
+            } => Self {
+                kind: CorePreconditionKind::PendingSubjectLifecycleActionStillCancellableForSubject,
+                lock_requirements: vec![StorageLockRequirement::LockExistingRowForUpdate(
+                    CoreStorageTarget::PendingSubjectLifecycleAction(pending_action_id.clone()),
+                )],
+                validation_requirements: vec![
+                    StorageValidationRequirement::PendingSubjectLifecycleActionStillCancellableForSubject,
+                ],
+            },
         }
     }
 
@@ -504,6 +547,22 @@ impl CoreMutationStorageContract {
                     CoreStorageTarget::PendingCredentialLifecycleAction(pending_action_id.clone()),
                 ),
             },
+            Mutation::CreatePendingSubjectLifecycleAction(record) => Self {
+                kind: CoreMutationKind::CreatePendingSubjectLifecycleAction,
+                write_requirement: StorageWriteRequirement::InsertUnique(
+                    CoreStorageTarget::PendingSubjectLifecycleAction(
+                        record.pending_action_id.clone(),
+                    ),
+                ),
+            },
+            Mutation::ClosePendingSubjectLifecycleAction {
+                pending_action_id, ..
+            } => Self {
+                kind: CoreMutationKind::ClosePendingSubjectLifecycleAction,
+                write_requirement: StorageWriteRequirement::UpdateLockedRow(
+                    CoreStorageTarget::PendingSubjectLifecycleAction(pending_action_id.clone()),
+                ),
+            },
         }
     }
 
@@ -589,6 +648,12 @@ pub enum CorePreconditionKind {
     PendingCredentialLifecycleActionStillExecutable,
     /// Pending credential lifecycle action is still open, unexpired, and target-matched.
     PendingCredentialLifecycleActionStillCancellableForTarget,
+    /// No open pending subject lifecycle action exists for the subject/action pair.
+    NoOpenPendingSubjectLifecycleActionForSubject,
+    /// Pending subject lifecycle action is still open, mature, unexpired, and subject-matched.
+    PendingSubjectLifecycleActionStillExecutable,
+    /// Pending subject lifecycle action is still open, unexpired, and subject-matched.
+    PendingSubjectLifecycleActionStillCancellableForSubject,
 }
 
 /// Core mutation kind.
@@ -634,6 +699,10 @@ pub enum CoreMutationKind {
     SetCredentialLifecycleState,
     /// Close a delayed credential lifecycle action.
     ClosePendingCredentialLifecycleAction,
+    /// Create a delayed subject lifecycle action.
+    CreatePendingSubjectLifecycleAction,
+    /// Close a delayed subject lifecycle action.
+    ClosePendingSubjectLifecycleAction,
 }
 
 /// Concrete storage target.
@@ -690,12 +759,21 @@ pub enum CoreStorageTarget {
     },
     /// One delayed credential lifecycle action.
     PendingCredentialLifecycleAction(PendingCredentialLifecycleActionId),
+    /// One delayed subject lifecycle action.
+    PendingSubjectLifecycleAction(PendingSubjectLifecycleActionId),
     /// Open pending credential lifecycle actions for one target/action pair.
     OpenPendingCredentialLifecycleActionForTarget {
         /// Target credential instance.
         target_credential_instance_id: VerifiedProofSourceId,
         /// Lifecycle action.
         action: CredentialLifecycleAction,
+    },
+    /// Open pending subject lifecycle actions for one subject/action pair.
+    OpenPendingSubjectLifecycleActionForSubject {
+        /// Subject targeted by the pending action.
+        subject_id: SubjectId,
+        /// Subject lifecycle action.
+        action: SubjectLifecycleAction,
     },
     /// Open out-of-band challenge dedupe key.
     OpenOutOfBandChallengeDedupeKey(OutOfBandChallengeDedupeKey),
@@ -735,6 +813,10 @@ impl CoreStorageTarget {
             Self::PendingCredentialLifecycleAction(_)
             | Self::OpenPendingCredentialLifecycleActionForTarget { .. } => {
                 CoreStorageRecordKind::PendingCredentialLifecycleAction
+            }
+            Self::PendingSubjectLifecycleAction(_)
+            | Self::OpenPendingSubjectLifecycleActionForSubject { .. } => {
+                CoreStorageRecordKind::PendingSubjectLifecycleAction
             }
             Self::AuditEvents => CoreStorageRecordKind::AuditEvent,
             Self::CoreDurableEffectCommands => CoreStorageRecordKind::CoreDurableEffectCommand,
@@ -779,6 +861,13 @@ pub enum StorageLockRequirement {
         /// Lifecycle action.
         action: CredentialLifecycleAction,
     },
+    /// Enforce one open pending action for one subject/action pair.
+    EnforceOpenPendingSubjectLifecycleActionUniqueness {
+        /// Subject targeted by the pending action.
+        subject_id: SubjectId,
+        /// Subject lifecycle action.
+        action: SubjectLifecycleAction,
+    },
 }
 
 /// Value-level validation the adapter must perform while holding required locks.
@@ -810,6 +899,12 @@ pub enum StorageValidationRequirement {
     PendingCredentialLifecycleActionStillExecutable,
     /// Pending credential lifecycle action is still open, unexpired, and target-matched.
     PendingCredentialLifecycleActionStillCancellableForTarget,
+    /// No open pending subject lifecycle action exists for the subject/action pair.
+    NoOpenPendingSubjectLifecycleActionForSubject,
+    /// Pending subject lifecycle action is still open, mature, unexpired, and subject-matched.
+    PendingSubjectLifecycleActionStillExecutable,
+    /// Pending subject lifecycle action is still open, unexpired, and subject-matched.
+    PendingSubjectLifecycleActionStillCancellableForSubject,
 }
 
 /// Required storage write behavior.

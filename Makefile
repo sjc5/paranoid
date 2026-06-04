@@ -83,6 +83,10 @@ feature-all:
 	@RUSTDOCFLAGS="-D warnings" cargo doc --all-features --no-deps
 	@cargo test --all-features --doc
 
+# Runs clippy across every target and feature with warnings denied.
+clippy-gate:
+	@cargo clippy --all-targets --all-features -- -D warnings
+
 # Runs unit tests for the maintainer xtask crate.
 tool-gate:
 	@cargo test --manifest-path xtask/Cargo.toml

@@ -1,11 +1,13 @@
 use super::{
-    ComponentSchemaVersion, DatabaseOperationKind, DatabaseOperationObserver, DbError,
-    PgQualifiedTableName, Pool, Tx, WritePool, WriteTx,
+    ComponentSchemaMigrationPlan, ComponentSchemaMigrationStep, ComponentSchemaVersion,
+    DatabaseOperationKind, DatabaseOperationObserver, DbError, PgQualifiedTableName, Pool,
+    RecordedComponentSchemaVersion, Tx, WritePool, WriteTx,
     finish_pool_owned_rollback_only_transaction_and_preserve_rollback_error,
     finish_pool_owned_write_transaction_and_preserve_rollback_error,
     normalize_check_constraint_expression, pg_table_name_set_could_contain_same_relation,
-    pooler_safe_query, pooler_safe_query_as, pooler_safe_query_scalar,
-    record_component_schema_version_in_current_transaction, record_database_operation,
+    plan_component_schema_migration_in_current_transaction, pooler_safe_query,
+    pooler_safe_query_as, pooler_safe_query_scalar,
+    record_component_schema_migration_completion_in_current_transaction, record_database_operation,
     schema_instance_key_for_parts, validate_component_schema_version_in_current_transaction,
 };
 #[cfg(test)]
@@ -23,10 +25,6 @@ use std::fmt;
 use std::marker::PhantomData;
 use std::sync::Arc;
 use std::time::Duration;
-
-/// Test-only unqualified KV backing table name.
-#[cfg(test)]
-pub const TEST_KV_TABLE_NAME: &str = "__paranoid_kv_store";
 
 /// Separator used when composing persisted KV keys from key parts.
 pub const KV_KEY_SEPARATOR: &str = "::";
@@ -58,13 +56,10 @@ pub const MAX_KV_SET_MULTI_ENTRIES: usize = 10_000;
 /// Maximum number of candidate keys accepted by one slot acquisition.
 pub const MAX_KV_ACQUIRE_SLOT_CANDIDATES: usize = 10_000;
 
-const INDEX_KIND: &str = "idx";
-const EXPIRES_AT_INDEX_SUFFIX: &str = "expires_at";
-const KEY_PATTERN_INDEX_SUFFIX: &str = "key_pattern";
-const UPDATED_AT_INDEX_SUFFIX: &str = "updated_at";
 const KV_SCHEMA_COMPONENT: &str = "kv";
 const KV_SCHEMA_VERSION: i32 = 1;
 const KV_SCHEMA_FINGERPRINT: &str = "paranoid.kv.v1";
+const KV_SCHEMA_MIGRATION_STEPS: &[ComponentSchemaMigrationStep<'static>] = &[];
 pub(crate) const KV_OPERATION_SET_BYTES: &str = "kv.set_bytes";
 pub(crate) const KV_OPERATION_SET_BYTES_RETURNING_DATABASE_TIMESTAMP: &str =
     "kv.set_bytes_returning_database_timestamp";
@@ -128,10 +123,6 @@ pub(crate) const KV_OPERATION_SCHEMA_VALIDATE_UPDATED_AT_INDEX: &str =
 pub(crate) const KV_OPERATION_SCHEMA_MIGRATE: &str = "kv.schema.migrate";
 #[cfg(test)]
 pub(crate) const KV_OPERATION_SCHEMA_VALIDATE: &str = "kv.schema.validate";
-
-const CREATE_KV_TABLE_TEMPLATE_PREFIX: &str = "CREATE TABLE IF NOT EXISTS ";
-const NOT_EXPIRED_FILTER: &str = "(expires_at IS NULL OR expires_at > statement_timestamp())";
-const EXPIRED_FILTER: &str = "(expires_at IS NOT NULL AND expires_at <= statement_timestamp())";
 
 /// Errors returned by the Postgres-backed KV primitive.
 #[derive(Debug, thiserror::Error)]
@@ -644,14 +635,6 @@ struct Queries {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-struct RequiredColumn {
-    name: &'static str,
-    data_type: &'static str,
-    not_null: bool,
-    allowed_collations: &'static [&'static str],
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
 struct ActualColumn {
     name: String,
     data_type: String,
@@ -678,6 +661,7 @@ struct PreparedSlotCandidateKeys {
     key_to_suffix: HashMap<String, String>,
 }
 
+mod catalog;
 mod item;
 mod item_atomic;
 mod item_lifecycle;
@@ -695,6 +679,7 @@ mod store_execution_atomic;
 mod store_execution_maintenance;
 mod validation;
 
+use catalog::*;
 #[cfg(test)]
 use schema::build_migrate_statements;
 #[cfg(test)]

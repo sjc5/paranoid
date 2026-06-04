@@ -279,6 +279,170 @@ pub(super) fn cancel_non_reset_pending_credential_lifecycle_action(
     ))
 }
 
+pub(super) fn schedule_subject_auth_state_deletion(
+    command: ScheduleSubjectAuthStateDeletion,
+) -> Result<Transition, Error> {
+    let action = SubjectLifecycleAction::DeleteSubjectAuthState;
+    let pending_record = PendingSubjectLifecycleActionRecord::new_open(
+        command.pending_action.pending_action_id.clone(),
+        command.subject_id.clone(),
+        action,
+        command.now,
+        command.pending_action.earliest_execute_at,
+        command.pending_action.expires_at,
+    )?;
+
+    let mut plan = CommitPlan::default();
+    plan.preconditions.push(
+        Precondition::NoOpenPendingSubjectLifecycleActionForSubject {
+            subject_id: command.subject_id.clone(),
+            action,
+            now: command.now,
+        },
+    );
+    plan.mutations
+        .push(Mutation::CreatePendingSubjectLifecycleAction(
+            pending_record.clone(),
+        ));
+    plan.audit_events.push(audit_event(
+        AuditEventKind::SubjectAuthStateDeletionPendingActionScheduled,
+        command.now,
+        Some(command.subject_id.clone()),
+        None,
+        None,
+    ));
+    plan.durable_effects
+        .push(DurableEffectCommand::NotifySecurityEvent(
+            SecurityNotificationCommand {
+                kind: SecurityNotificationKind::SubjectAuthStateDeletionPendingActionScheduled,
+                subject_id: command.subject_id.clone(),
+            },
+        ));
+
+    Ok(transition(
+        Outcome::SubjectAuthStateDeletionScheduled(SubjectAuthStateDeletionScheduledOutcome {
+            subject_id: command.subject_id,
+            pending_action_id: pending_record.pending_action_id,
+            earliest_execute_at: pending_record.earliest_execute_at,
+            expires_at: pending_record.expires_at,
+        }),
+        plan,
+    ))
+}
+
+pub(super) fn execute_pending_subject_auth_state_deletion(
+    command: ExecutePendingSubjectAuthStateDeletion,
+) -> Result<Transition, Error> {
+    let pending_action = command.pending_action;
+    let action = SubjectLifecycleAction::DeleteSubjectAuthState;
+    let contract = action.pending_subject_action_contract();
+    if contract.execution() != PendingLifecycleActionExecution::CoreSubjectAuthState {
+        return Err(Error::LoadedStateContradiction(
+            "subject deletion action must execute through subject-auth-state mutation",
+        ));
+    }
+    if !pending_action.matches_subject_action(&pending_action.subject_id, action)
+        || !pending_action.is_executable_at(command.now)
+    {
+        return Err(Error::PendingSubjectLifecycleActionNotExecutable);
+    }
+
+    let mut plan = CommitPlan::default();
+    plan.preconditions
+        .push(Precondition::PendingSubjectLifecycleActionStillExecutable {
+            pending_action_id: pending_action.pending_action_id.clone(),
+            subject_id: pending_action.subject_id.clone(),
+            action,
+            now: command.now,
+        });
+    plan.mutations
+        .push(Mutation::ClosePendingSubjectLifecycleAction {
+            pending_action_id: pending_action.pending_action_id.clone(),
+            closed_at: command.now,
+        });
+    plan.mutations
+        .push(Mutation::RaiseSubjectAuthRevocationCutoff {
+            subject_id: pending_action.subject_id.clone(),
+            revoke_records_created_at_or_before: command.now,
+            reason: RevocationReason::SubjectAuthStateChanged,
+        });
+    plan.audit_events.push(audit_event(
+        AuditEventKind::SubjectAuthStateDeletionExecuted,
+        command.now,
+        Some(pending_action.subject_id.clone()),
+        None,
+        None,
+    ));
+    plan.durable_effects
+        .push(DurableEffectCommand::NotifySecurityEvent(
+            SecurityNotificationCommand {
+                kind: SecurityNotificationKind::SubjectAuthStateDeletionExecuted,
+                subject_id: pending_action.subject_id.clone(),
+            },
+        ));
+
+    Ok(transition(
+        Outcome::PendingSubjectAuthStateDeletionExecuted(
+            PendingSubjectAuthStateDeletionExecutionOutcome {
+                subject_id: pending_action.subject_id,
+                pending_action_id: pending_action.pending_action_id,
+            },
+        ),
+        plan,
+    ))
+}
+
+pub(super) fn cancel_pending_subject_auth_state_deletion(
+    command: CancelPendingSubjectAuthStateDeletion,
+) -> Result<Transition, Error> {
+    let pending_action = command.pending_action;
+    let action = SubjectLifecycleAction::DeleteSubjectAuthState;
+    if !pending_action.matches_subject_action(&pending_action.subject_id, action)
+        || !pending_action.is_cancellable_at(command.now)
+    {
+        return Err(Error::PendingSubjectLifecycleActionNotCancellable);
+    }
+
+    let mut plan = CommitPlan::default();
+    plan.preconditions.push(
+        Precondition::PendingSubjectLifecycleActionStillCancellableForSubject {
+            pending_action_id: pending_action.pending_action_id.clone(),
+            subject_id: pending_action.subject_id.clone(),
+            action,
+            now: command.now,
+        },
+    );
+    plan.mutations
+        .push(Mutation::ClosePendingSubjectLifecycleAction {
+            pending_action_id: pending_action.pending_action_id.clone(),
+            closed_at: command.now,
+        });
+    plan.audit_events.push(audit_event(
+        AuditEventKind::SubjectAuthStateDeletionPendingActionCancelled,
+        command.now,
+        Some(pending_action.subject_id.clone()),
+        None,
+        None,
+    ));
+    plan.durable_effects
+        .push(DurableEffectCommand::NotifySecurityEvent(
+            SecurityNotificationCommand {
+                kind: SecurityNotificationKind::SubjectAuthStateDeletionPendingActionCancelled,
+                subject_id: pending_action.subject_id.clone(),
+            },
+        ));
+
+    Ok(transition(
+        Outcome::PendingSubjectAuthStateDeletionCancelled(
+            PendingSubjectAuthStateDeletionCancellationOutcome {
+                subject_id: pending_action.subject_id,
+                pending_action_id: pending_action.pending_action_id,
+            },
+        ),
+        plan,
+    ))
+}
+
 fn target_and_pending_action_for_reset_execution(
     now: UnixSeconds,
     authority: &CredentialResetExecutionAuthority,
@@ -346,7 +510,7 @@ fn validate_non_reset_pending_action_method_work(
     target: &CredentialInstanceMetadata,
 ) -> Result<(), Error> {
     match contract.execution() {
-        PendingLifecycleActionExecution::MethodOwnedCredentialMutation => {
+        PendingLifecycleActionExecution::MethodOwnedCredential => {
             if method_commit_work.is_empty() {
                 return Err(Error::CredentialLifecycleExecutionMissingMethodCommitWork);
             }
@@ -358,12 +522,12 @@ fn validate_non_reset_pending_action_method_work(
                 }
             }
         }
-        PendingLifecycleActionExecution::CoreCredentialStateMutation => {
+        PendingLifecycleActionExecution::CoreCredentialState => {
             if !method_commit_work.is_empty() {
                 return Err(Error::CredentialLifecycleExecutionUnexpectedMethodCommitWork);
             }
         }
-        PendingLifecycleActionExecution::CoreSubjectAuthStateMutation => {
+        PendingLifecycleActionExecution::CoreSubjectAuthState => {
             return Err(Error::LoadedStateContradiction(
                 "credential-targeted command cannot execute subject-targeted pending action",
             ));

@@ -198,7 +198,7 @@ impl CredentialLifecycleAction {
         match self {
             Self::Reset => Some(PendingLifecycleActionContract {
                 target: PendingLifecycleActionTarget::CredentialInstance,
-                execution: PendingLifecycleActionExecution::MethodOwnedCredentialMutation,
+                execution: PendingLifecycleActionExecution::MethodOwnedCredential,
                 credential_state_after_execution:
                     PendingCredentialStateAfterExecution::PreserveCurrentState,
                 cancellation: PendingLifecycleActionCancellation::ExplicitWhileUnexpiredWithNotice,
@@ -207,7 +207,7 @@ impl CredentialLifecycleAction {
             }),
             Self::Replace => Some(PendingLifecycleActionContract {
                 target: PendingLifecycleActionTarget::CredentialInstance,
-                execution: PendingLifecycleActionExecution::MethodOwnedCredentialMutation,
+                execution: PendingLifecycleActionExecution::MethodOwnedCredential,
                 credential_state_after_execution:
                     PendingCredentialStateAfterExecution::MarkTargetSuperseded,
                 cancellation: PendingLifecycleActionCancellation::ExplicitWhileUnexpiredWithNotice,
@@ -216,7 +216,7 @@ impl CredentialLifecycleAction {
             }),
             Self::Remove => Some(PendingLifecycleActionContract {
                 target: PendingLifecycleActionTarget::CredentialInstance,
-                execution: PendingLifecycleActionExecution::CoreCredentialStateMutation,
+                execution: PendingLifecycleActionExecution::CoreCredentialState,
                 credential_state_after_execution:
                     PendingCredentialStateAfterExecution::MarkTargetRevoked,
                 cancellation: PendingLifecycleActionCancellation::ExplicitWhileUnexpiredWithNotice,
@@ -225,7 +225,7 @@ impl CredentialLifecycleAction {
             }),
             Self::Regenerate => Some(PendingLifecycleActionContract {
                 target: PendingLifecycleActionTarget::CredentialInstance,
-                execution: PendingLifecycleActionExecution::MethodOwnedCredentialMutation,
+                execution: PendingLifecycleActionExecution::MethodOwnedCredential,
                 credential_state_after_execution:
                     PendingCredentialStateAfterExecution::PreserveCurrentState,
                 cancellation: PendingLifecycleActionCancellation::ExplicitWhileUnexpiredWithNotice,
@@ -250,7 +250,7 @@ impl SubjectLifecycleAction {
         match self {
             Self::DeleteSubjectAuthState => PendingLifecycleActionContract {
                 target: PendingLifecycleActionTarget::SubjectAuthState,
-                execution: PendingLifecycleActionExecution::CoreSubjectAuthStateMutation,
+                execution: PendingLifecycleActionExecution::CoreSubjectAuthState,
                 credential_state_after_execution:
                     PendingCredentialStateAfterExecution::NoCredentialTarget,
                 cancellation: PendingLifecycleActionCancellation::ExplicitWhileUnexpiredWithNotice,
@@ -323,11 +323,11 @@ pub enum PendingLifecycleActionTarget {
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum PendingLifecycleActionExecution {
     /// The action must commit method-owned verifier, secret, or credential-set work.
-    MethodOwnedCredentialMutation,
+    MethodOwnedCredential,
     /// The action is primarily a core credential lifecycle-state mutation.
-    CoreCredentialStateMutation,
+    CoreCredentialState,
     /// The action mutates subject-level auth state rather than one credential instance.
-    CoreSubjectAuthStateMutation,
+    CoreSubjectAuthState,
 }
 
 /// Credential-state result of executing a delayed lifecycle action.
@@ -828,6 +828,74 @@ impl PendingCredentialLifecycleActionRecord {
         self.subject_id == *target.subject_id()
             && self.target_credential_instance_id == *target.credential_instance_id()
             && self.action == action
+    }
+}
+
+/// Delayed subject-lifecycle action row owned by the auth core.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PendingSubjectLifecycleActionRecord {
+    /// Pending action id.
+    pub pending_action_id: PendingSubjectLifecycleActionId,
+    /// Subject whose auth state the action will mutate when executed.
+    pub subject_id: SubjectId,
+    /// Subject lifecycle action to execute later.
+    pub action: SubjectLifecycleAction,
+    /// Time the pending action was requested.
+    pub requested_at: UnixSeconds,
+    /// Earliest time the pending action may execute.
+    pub earliest_execute_at: UnixSeconds,
+    /// Last time the pending action remains executable.
+    pub expires_at: UnixSeconds,
+    /// Closure timestamp, if this pending action is no longer open.
+    pub closed_at: Option<UnixSeconds>,
+}
+
+impl PendingSubjectLifecycleActionRecord {
+    /// Creates an open delayed subject-lifecycle action.
+    pub fn new_open(
+        pending_action_id: PendingSubjectLifecycleActionId,
+        subject_id: SubjectId,
+        action: SubjectLifecycleAction,
+        requested_at: UnixSeconds,
+        earliest_execute_at: UnixSeconds,
+        expires_at: UnixSeconds,
+    ) -> Result<Self, Error> {
+        if earliest_execute_at <= requested_at || expires_at <= earliest_execute_at {
+            return Err(Error::InvalidSubjectLifecyclePendingActionTiming);
+        }
+        Ok(Self {
+            pending_action_id,
+            subject_id,
+            action,
+            requested_at,
+            earliest_execute_at,
+            expires_at,
+            closed_at: None,
+        })
+    }
+
+    /// Returns whether this pending action is open and executable at `now`.
+    pub fn is_executable_at(&self, now: UnixSeconds) -> bool {
+        self.closed_at.is_none() && self.earliest_execute_at <= now && now < self.expires_at
+    }
+
+    /// Returns whether this pending action is open and unexpired at `now`.
+    pub fn is_cancellable_at(&self, now: UnixSeconds) -> bool {
+        self.closed_at.is_none() && now < self.expires_at
+    }
+
+    /// Returns whether this pending action has not yet been closed.
+    pub fn is_open(&self) -> bool {
+        self.closed_at.is_none()
+    }
+
+    /// Returns whether this pending action targets the supplied subject/action.
+    pub fn matches_subject_action(
+        &self,
+        subject_id: &SubjectId,
+        action: SubjectLifecycleAction,
+    ) -> bool {
+        self.subject_id == *subject_id && self.action == action
     }
 }
 

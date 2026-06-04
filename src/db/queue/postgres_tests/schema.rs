@@ -52,6 +52,73 @@ async fn queue_migration_creates_schema_that_validation_accepts() {
     drop_queue_test_tables(&test_database.sqlx_pool, &test_database.config).await;
 }
 
+#[tokio::test]
+async fn queue_migration_rejects_future_schema_ledger_row_before_current_schema_ddl() {
+    let test_database = TestDatabase::connect().await;
+
+    let mut config = unique_test_config();
+    config.schema_ledger_table_name = PgQualifiedTableName::unqualified(format!(
+        "__queue_test_schema_ledger_{}",
+        crate::queue::JobId::new()
+            .expect("new job id")
+            .to_string()
+            .replace('-', "_")
+    ))
+    .expect("schema ledger table");
+    drop_queue_test_tables(&test_database.sqlx_pool, &config).await;
+    drop_test_table(&test_database.sqlx_pool, &config.schema_ledger_table_name).await;
+    migrate_schema(&test_database.paranoid_pool, &config)
+        .await
+        .expect("migrate queue schema");
+
+    let instance_key = format!(
+        "jobs_table={};dead_letter_table={};pause_table={}",
+        config.table_name.quoted(),
+        config.dead_letter_table_name.quoted(),
+        config.pause_table_name.quoted()
+    );
+    overwrite_schema_ledger_version_and_fingerprint(
+        &test_database.sqlx_pool,
+        &config.schema_ledger_table_name,
+        "queue",
+        &instance_key,
+        2,
+        "paranoid.queue.v2",
+    )
+    .await;
+    drop_queue_test_tables(&test_database.sqlx_pool, &config).await;
+
+    let err = migrate_schema(&test_database.paranoid_pool, &config)
+        .await
+        .expect_err("migration should reject a future Queue schema ledger row");
+    let message = err.to_string();
+    assert!(
+        matches!(
+            err,
+            Error::Database(crate::db::Error::SchemaMismatch { .. })
+        ),
+        "error = {err:?}"
+    );
+    assert!(
+        message.contains("newer than supported"),
+        "error message should describe the future schema version: {message}"
+    );
+    assert!(
+        !fetch_table_exists(&test_database.sqlx_pool, &config.table_name).await,
+        "migration must reject the future ledger row before recreating the current Queue jobs table"
+    );
+    assert!(
+        !fetch_table_exists(&test_database.sqlx_pool, &config.dead_letter_table_name).await,
+        "migration must reject the future ledger row before recreating the current Queue dead-letter table"
+    );
+    assert!(
+        !fetch_table_exists(&test_database.sqlx_pool, &config.pause_table_name).await,
+        "migration must reject the future ledger row before recreating the current Queue pause table"
+    );
+
+    drop_test_table(&test_database.sqlx_pool, &config.schema_ledger_table_name).await;
+}
+
 async fn fetch_schema_ledger_fingerprint(
     pool: &PgPool,
     table_name: &PgQualifiedTableName,
@@ -68,6 +135,30 @@ async fn fetch_schema_ledger_fingerprint(
         .fetch_optional(pool)
         .await
         .expect("fetch schema ledger fingerprint")
+}
+
+async fn overwrite_schema_ledger_version_and_fingerprint(
+    pool: &PgPool,
+    table_name: &PgQualifiedTableName,
+    component: &str,
+    instance_key: &str,
+    version: i32,
+    fingerprint: &str,
+) {
+    let statement = format!(
+        "UPDATE {} SET schema_version = $1, schema_fingerprint = $2 WHERE component = $3 AND instance_key = $4",
+        table_name.quoted()
+    );
+    let rows = sqlx::query(sqlx::AssertSqlSafe(statement.as_str()))
+        .bind(version)
+        .bind(fingerprint)
+        .bind(component)
+        .bind(instance_key)
+        .execute(pool)
+        .await
+        .expect("overwrite schema ledger version and fingerprint")
+        .rows_affected();
+    assert_eq!(rows, 1, "schema ledger row should exist before overwrite");
 }
 
 #[tokio::test]

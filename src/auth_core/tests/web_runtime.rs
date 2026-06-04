@@ -280,15 +280,18 @@ fn challenge_response_secret(value: &[u8]) -> ActiveProofChallengeResponseSecret
 fn runtime_active_proof_challenge_cookie() -> ActiveProofChallengeCookieDraft {
     ActiveProofChallengeCookieDraft::new_with_response_secret(
         &test_keyset("tests.auth.web.runtime.fast-fail.v1"),
-        id("attempt"),
-        id("challenge"),
-        ProofSummary::new(ProofFamily::OutOfBandCode, "email_otp").expect("proof"),
-        at(30),
-        at(70),
-        ActiveProofChallengeFastFailNonce::from_bytes(
-            &[41_u8; ACTIVE_PROOF_CHALLENGE_FAST_FAIL_NONCE_BYTES],
+        ActiveProofChallengeCookieContext::new(
+            id("attempt"),
+            id("challenge"),
+            ProofSummary::new(ProofFamily::OutOfBandCode, "email_otp").expect("proof"),
+            at(30),
+            at(70),
+            ActiveProofChallengeFastFailNonce::from_bytes(
+                &[41_u8; ACTIVE_PROOF_CHALLENGE_FAST_FAIL_NONCE_BYTES],
+            )
+            .expect("nonce"),
         )
-        .expect("nonce"),
+        .expect("challenge cookie context"),
         &challenge_response_secret(b"123456"),
     )
     .expect("challenge cookie")
@@ -653,6 +656,15 @@ fn web_runtime_rejects_direct_credential_lifecycle_commands() {
         at(300),
     )
     .expect("pending replacement");
+    let pending_subject_deletion = PendingSubjectLifecycleActionRecord::new_open(
+        id("pending-subject-deletion"),
+        id("subject"),
+        SubjectLifecycleAction::DeleteSubjectAuthState,
+        at(100),
+        at(200),
+        at(300),
+    )
+    .expect("pending subject deletion");
 
     let cases = [
         (
@@ -712,6 +724,34 @@ fn web_runtime_rejects_direct_credential_lifecycle_commands() {
                 },
             ),
             Error::CredentialLifecycleCancellationRequiresRuntimeLifecycleDecision,
+        ),
+        (
+            Command::ScheduleSubjectAuthStateDeletion(ScheduleSubjectAuthStateDeletion {
+                now: at(150),
+                subject_id: id("subject"),
+                pending_action: PendingSubjectLifecycleActionSchedule {
+                    pending_action_id: id("pending-subject-deletion"),
+                    earliest_execute_at: at(200),
+                    expires_at: at(300),
+                },
+            }),
+            Error::SubjectAuthStateDeletionSchedulingRequiresRuntimeLifecycleDecision,
+        ),
+        (
+            Command::ExecutePendingSubjectAuthStateDeletion(
+                ExecutePendingSubjectAuthStateDeletion {
+                    now: at(250),
+                    pending_action: pending_subject_deletion.clone(),
+                },
+            ),
+            Error::SubjectAuthStateDeletionExecutionRequiresRuntimeLifecycleDecision,
+        ),
+        (
+            Command::CancelPendingSubjectAuthStateDeletion(CancelPendingSubjectAuthStateDeletion {
+                now: at(150),
+                pending_action: pending_subject_deletion,
+            }),
+            Error::SubjectAuthStateDeletionCancellationRequiresRuntimeLifecycleDecision,
         ),
     ];
 
@@ -1056,15 +1096,18 @@ fn web_runtime_rejects_expired_out_of_band_cookie_before_weak_gate() {
         runtime
             .web_transport()
             .active_proof_challenge_fast_fail_keyset(),
-        id("attempt"),
-        id("challenge"),
-        ProofSummary::new(ProofFamily::OutOfBandCode, "email_otp").expect("proof"),
-        at(30),
-        at(35),
-        ActiveProofChallengeFastFailNonce::from_bytes(
-            &[42_u8; ACTIVE_PROOF_CHALLENGE_FAST_FAIL_NONCE_BYTES],
+        ActiveProofChallengeCookieContext::new(
+            id("attempt"),
+            id("challenge"),
+            ProofSummary::new(ProofFamily::OutOfBandCode, "email_otp").expect("proof"),
+            at(30),
+            at(35),
+            ActiveProofChallengeFastFailNonce::from_bytes(
+                &[42_u8; ACTIVE_PROOF_CHALLENGE_FAST_FAIL_NONCE_BYTES],
+            )
+            .expect("nonce"),
         )
-        .expect("nonce"),
+        .expect("challenge cookie context"),
         &challenge_response_secret(b"123456"),
     )
     .expect("expired challenge cookie");
@@ -1099,15 +1142,18 @@ fn web_runtime_rejects_expired_out_of_band_cookie_before_weak_gate() {
 fn web_runtime_rejects_out_of_band_cookie_without_response_mac_before_weak_gate() {
     let runtime = auth_web_runtime();
     let challenge_cookie = ActiveProofChallengeCookieDraft::new_without_response_mac(
-        id("attempt"),
-        id("challenge"),
-        ProofSummary::new(ProofFamily::OutOfBandCode, "email_otp").expect("proof"),
-        at(30),
-        at(70),
-        ActiveProofChallengeFastFailNonce::from_bytes(
-            &[43_u8; ACTIVE_PROOF_CHALLENGE_FAST_FAIL_NONCE_BYTES],
+        ActiveProofChallengeCookieContext::new(
+            id("attempt"),
+            id("challenge"),
+            ProofSummary::new(ProofFamily::OutOfBandCode, "email_otp").expect("proof"),
+            at(30),
+            at(70),
+            ActiveProofChallengeFastFailNonce::from_bytes(
+                &[43_u8; ACTIVE_PROOF_CHALLENGE_FAST_FAIL_NONCE_BYTES],
+            )
+            .expect("nonce"),
         )
-        .expect("nonce"),
+        .expect("challenge cookie context"),
     )
     .expect("out-of-band challenge cookie without response MAC");
     let headers =

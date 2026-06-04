@@ -40,6 +40,7 @@ mod revocation;
 mod safe_read_and_request_resolution;
 mod session_and_device_lifecycle;
 mod session_secret_resolution;
+mod source_guards;
 mod step_up_request_resolution;
 mod storage_contract;
 mod weak_active_proof_failure_guards;
