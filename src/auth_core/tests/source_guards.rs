@@ -136,18 +136,33 @@ fn auth_postgres_sql_uses_statement_timestamp_for_database_owned_time() {
 #[test]
 fn auth_schema_migration_records_version_only_after_physical_validation() {
     let source = read_crate_source_file("src/auth_core/postgres_store.rs");
+    assert!(
+        !source.contains("record_component_schema_version_in_current_transaction("),
+        "Auth schema migration must use the public-shaped component schema API instead of the private schema-ledger recorder"
+    );
     let body = rust_function_body_by_name(&source, "migrate_schema_in_current_transaction");
     assert_source_order(
         body,
         "validate_physical_schema_in_current_transaction(tx, &table_names).await?",
-        "record_component_schema_version_in_current_transaction(",
-        "Auth migration must physically validate the migrated schema before recording its schema version",
+        "migrate_auth_component_schema_in_current_transaction(tx, &self.config, &table_names)",
+        "Auth migration must physically validate the migrated schema before invoking the component schema ledger migration",
     );
     assert_source_order(
         body,
-        "record_component_schema_version_in_current_transaction(",
-        "validate_auth_schema_ledger_in_current_transaction(tx, &self.config).await?",
-        "Auth migration must revalidate the recorded schema version before commit",
+        ".validate_schema_in_current_transaction(tx)",
+        "migrate_auth_component_schema_in_current_transaction(tx, &self.config, &table_names)",
+        "Auth migration must validate registered method schemas before recording the auth component schema version",
+    );
+
+    let component_body = rust_function_body_by_name(
+        &source,
+        "migrate_auth_component_schema_in_current_transaction",
+    );
+    assert_source_order(
+        component_body,
+        "migrate_component_schema_in_current_transaction(",
+        "validate_auth_component_schema_in_current_transaction_with_table_names(",
+        "Auth migration must revalidate the component schema after the public component schema helper records the ledger row",
     );
 }
 

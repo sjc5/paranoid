@@ -96,6 +96,71 @@ impl Command {
             Self::CancelPendingSubjectAuthStateDeletion(command) => command.now,
         }
     }
+
+    pub(crate) fn direct_web_runtime_rejection(&self) -> Option<Error> {
+        match self {
+            Self::ResolveRequest(_) => {
+                Some(Error::RequestResolutionRequiresRuntimeFreshIdGeneration)
+            }
+            Self::StartActiveProofAttempt(_)
+            | Self::StartActiveProofAttemptForCurrentSession(_)
+            | Self::StartActiveProofAttemptForCurrentTrustedDevice(_) => {
+                Some(Error::ActiveProofAttemptStartRequiresRuntimeFreshIdGeneration)
+            }
+            Self::IssueActiveProofMethodChallenge(_) => {
+                Some(Error::ActiveProofMethodChallengeIssueRequiresRuntimeMethodDispatch)
+            }
+            Self::IssueOutOfBandChallenge(_) => {
+                Some(Error::OutOfBandChallengeIssueRequiresRuntimeCookieConstruction)
+            }
+            Self::ResendOutOfBandChallenge(_) => {
+                Some(Error::OutOfBandChallengeResendRequiresRuntimeMethodDispatch)
+            }
+            Self::CompleteActiveProofChallenge(_) => {
+                Some(Error::ActiveProofCompletionRequiresRuntimeMethodDispatch)
+            }
+            Self::RecordActiveProofFailure(_) => {
+                Some(Error::ActiveProofFailureRequiresRuntimeMethodDispatch)
+            }
+            Self::CompleteFullAuthentication(_) => {
+                Some(Error::FullAuthenticationCompletionRequiresRuntimeFreshIdGeneration)
+            }
+            Self::CompleteStepUp(_) => {
+                Some(Error::StepUpCompletionRequiresRuntimeAttemptContinuation)
+            }
+            Self::CompleteTrustedDeviceRevivalWithActiveProof(_) => {
+                Some(Error::TrustedDeviceRevivalCompletionRequiresRuntimeFreshIdGeneration)
+            }
+            Self::PlanCredentialReset(_) => {
+                Some(Error::CredentialResetPlanningRequiresRuntimeLifecycleDecision)
+            }
+            Self::ExecuteCredentialReset(_) => {
+                Some(Error::CredentialResetExecutionRequiresRuntimeMethodDispatch)
+            }
+            Self::CancelPendingCredentialReset(_) => {
+                Some(Error::CredentialResetCancellationRequiresRuntimeLifecycleDecision)
+            }
+            Self::ExecuteNonResetPendingCredentialLifecycleAction(_) => {
+                Some(Error::CredentialLifecycleExecutionRequiresRuntimeMethodDispatch)
+            }
+            Self::CancelNonResetPendingCredentialLifecycleAction(_) => {
+                Some(Error::CredentialLifecycleCancellationRequiresRuntimeLifecycleDecision)
+            }
+            Self::ScheduleSubjectAuthStateDeletion(_) => {
+                Some(Error::SubjectAuthStateDeletionSchedulingRequiresRuntimeLifecycleDecision)
+            }
+            Self::ExecutePendingSubjectAuthStateDeletion(_) => {
+                Some(Error::SubjectAuthStateDeletionExecutionRequiresRuntimeLifecycleDecision)
+            }
+            Self::CancelPendingSubjectAuthStateDeletion(_) => {
+                Some(Error::SubjectAuthStateDeletionCancellationRequiresRuntimeLifecycleDecision)
+            }
+            Self::LogoutCurrentSession(_)
+            | Self::RevokeSession(_)
+            | Self::RevokeTrustedDevice(_)
+            | Self::RevokeSubjectAuthState(_) => None,
+        }
+    }
 }
 
 /// Request-resolution command.

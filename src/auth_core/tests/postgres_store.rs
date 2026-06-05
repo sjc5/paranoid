@@ -3,7 +3,7 @@ use super::*;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::db::{
-    BootstrapConfig, PgIdentifier, PgSchemaName, Pool, PoolConfig, pooler_safe_query,
+    BootstrapConfig, PgIdentifier, PgSchemaName, Pool, PoolConfig, WritePool, pooler_safe_query,
     pooler_safe_query_scalar, unparameterized_simple_query,
 };
 use secrecy::SecretString;
@@ -221,6 +221,9 @@ async fn postgres_store_migrates_and_validates_schema_when_database_is_available
         })
         .expect("auth Postgres store test requires TEST_DSN or PARANOID_TEST_DATABASE_URL");
 
+    let write_pool = WritePool::connect(PoolConfig::new(SecretString::from(database_url.clone())))
+        .await
+        .expect("connect write test database");
     let pool = Pool::connect(PoolConfig::new(SecretString::from(database_url)))
         .await
         .expect("connect test database");
@@ -243,7 +246,7 @@ async fn postgres_store_migrates_and_validates_schema_when_database_is_available
     );
 
     store
-        .migrate_schema(&pool)
+        .migrate_schema(&write_pool)
         .await
         .expect("migrate auth schema");
     store
@@ -298,6 +301,9 @@ async fn postgres_store_loads_persisted_recovery_authority_policy_when_database_
         })
         .expect("auth Postgres store test requires TEST_DSN or PARANOID_TEST_DATABASE_URL");
 
+    let write_pool = WritePool::connect(PoolConfig::new(SecretString::from(database_url.clone())))
+        .await
+        .expect("connect write test database");
     let pool = Pool::connect(PoolConfig::new(SecretString::from(database_url)))
         .await
         .expect("connect test database");
@@ -319,7 +325,7 @@ async fn postgres_store_loads_persisted_recovery_authority_policy_when_database_
         test_keyset("tests.auth.postgres-store.lifecycle-policy.v1"),
     );
     store
-        .migrate_schema(&pool)
+        .migrate_schema(&write_pool)
         .await
         .expect("migrate auth schema");
 
@@ -850,6 +856,9 @@ async fn migrated_auth_store_for_test(
                 .filter(|value| !value.trim().is_empty())
         })
         .expect("auth Postgres store test requires TEST_DSN or PARANOID_TEST_DATABASE_URL");
+    let write_pool = WritePool::connect(PoolConfig::new(SecretString::from(database_url.clone())))
+        .await
+        .expect("connect write test database");
     let pool = Pool::connect(PoolConfig::new(SecretString::from(database_url)))
         .await
         .expect("connect test database");
@@ -870,7 +879,7 @@ async fn migrated_auth_store_for_test(
         test_keyset(purpose),
     );
     store
-        .migrate_schema(&pool)
+        .migrate_schema(&write_pool)
         .await
         .expect("migrate auth schema");
     (pool, schema, store_config, store)

@@ -39,6 +39,7 @@ feature-gate:
 	@$(MAKE) --no-print-directory feature-local-env-vault
 	@$(MAKE) --no-print-directory feature-web
 	@$(MAKE) --no-print-directory feature-db
+	@$(MAKE) --no-print-directory feature-db-test-harness
 	@$(MAKE) --no-print-directory feature-all
 	@$(MAKE) --no-print-directory playground-local-env-vault
 
@@ -67,6 +68,13 @@ feature-db:
 	@cargo test --no-default-features --features db --lib --no-run
 	@RUSTDOCFLAGS="-D warnings" cargo doc --no-default-features --features db --no-deps
 	@cargo test --no-default-features --features db --doc
+
+# Checks the public DB test harness feature without running unrelated DB tests outside the harness.
+feature-db-test-harness:
+	@cargo check --no-default-features --features db-test-harness --tests
+	@cargo test --no-default-features --features db-test-harness db::testing
+	@RUSTDOCFLAGS="-D warnings" cargo doc --no-default-features --features db-test-harness --no-deps
+	@cargo test --no-default-features --features db-test-harness --doc
 
 # Checks the web feature surface, including the web integration test.
 feature-web:

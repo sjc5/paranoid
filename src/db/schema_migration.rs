@@ -1,19 +1,22 @@
 use super::{ComponentSchemaVersion, DbError};
 
+/// Version and fingerprint previously recorded for one component schema instance.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct RecordedComponentSchemaVersion {
     pub(crate) version: i32,
     pub(crate) fingerprint: String,
 }
 
+/// One version/fingerprint endpoint in a component schema migration chain.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct ComponentSchemaMigrationTarget<'a> {
+pub struct ComponentSchemaMigrationTarget<'a> {
     pub(crate) version: i32,
     pub(crate) fingerprint: &'a str,
 }
 
+/// One supported component schema migration step.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct ComponentSchemaMigrationStep<'a> {
+pub struct ComponentSchemaMigrationStep<'a> {
     pub(crate) from: ComponentSchemaMigrationTarget<'a>,
     pub(crate) to: ComponentSchemaMigrationTarget<'a>,
 }
@@ -29,21 +32,49 @@ pub(crate) enum ComponentSchemaMigrationPlan<'a> {
 }
 
 impl<'a> ComponentSchemaMigrationTarget<'a> {
-    pub(crate) const fn new(version: i32, fingerprint: &'a str) -> Self {
+    /// Creates a migration target.
+    ///
+    /// The version must be positive and the fingerprint must be non-empty; those
+    /// invariants are validated when a schema is planned, migrated, or
+    /// validated.
+    pub const fn new(version: i32, fingerprint: &'a str) -> Self {
         Self {
             version,
             fingerprint,
         }
     }
+
+    /// Returns the schema version for this target.
+    pub const fn version(&self) -> i32 {
+        self.version
+    }
+
+    /// Returns the schema fingerprint for this target.
+    pub const fn fingerprint(&self) -> &'a str {
+        self.fingerprint
+    }
 }
 
 impl<'a> ComponentSchemaMigrationStep<'a> {
-    #[cfg(test)]
-    pub(crate) const fn new(
+    /// Creates a supported migration edge from one target to another.
+    ///
+    /// The step must advance to a larger version; that invariant is validated
+    /// when a schema is planned, migrated, or validated.
+    pub const fn new(
         from: ComponentSchemaMigrationTarget<'a>,
         to: ComponentSchemaMigrationTarget<'a>,
     ) -> Self {
         Self { from, to }
+    }
+
+    /// Returns the source target for this migration step.
+    pub const fn from(&self) -> ComponentSchemaMigrationTarget<'a> {
+        self.from
+    }
+
+    /// Returns the destination target for this migration step.
+    pub const fn to(&self) -> ComponentSchemaMigrationTarget<'a> {
+        self.to
     }
 }
 

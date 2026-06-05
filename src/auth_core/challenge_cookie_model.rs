@@ -149,6 +149,8 @@ pub struct ActiveProofChallengeCookieDraft {
     pub response_mac: Option<ActiveProofChallengeFastFailMac>,
     /// Method-specific state sealed inside the encrypted challenge cookie.
     pub method_challenge_state: Option<ActiveProofMethodChallengeState>,
+    /// Whether this cookie must prove a stateless rejection gate before authoritative state loading.
+    requires_stateless_fast_fail: bool,
 }
 
 /// Context that all active-proof challenge cookies bind into their sealed payload.
@@ -214,10 +216,24 @@ impl ActiveProofChallengeCookieDraft {
         context: ActiveProofChallengeCookieContext,
         method_challenge_state: ActiveProofMethodChallengeState,
     ) -> Result<Self, Error> {
-        Self::new_with_optional_response_mac_and_method_state(
+        Self::new_with_optional_response_mac_and_method_state_with_fast_fail_requirement(
             context,
             None,
             Some(method_challenge_state),
+            false,
+        )
+    }
+
+    /// Creates a method-state challenge cookie that must pass a stateless method-owned rejection gate.
+    pub fn new_with_method_challenge_state_requiring_stateless_fast_fail(
+        context: ActiveProofChallengeCookieContext,
+        method_challenge_state: ActiveProofMethodChallengeState,
+    ) -> Result<Self, Error> {
+        Self::new_with_optional_response_mac_and_method_state_with_fast_fail_requirement(
+            context,
+            None,
+            Some(method_challenge_state),
+            true,
         )
     }
 
@@ -234,6 +250,34 @@ impl ActiveProofChallengeCookieDraft {
         response_mac: Option<ActiveProofChallengeFastFailMac>,
         method_challenge_state: Option<ActiveProofMethodChallengeState>,
     ) -> Result<Self, Error> {
+        let requires_stateless_fast_fail = response_mac.is_some();
+        Self::new_with_optional_response_mac_and_method_state_with_fast_fail_requirement(
+            context,
+            response_mac,
+            method_challenge_state,
+            requires_stateless_fast_fail,
+        )
+    }
+
+    pub(crate) fn new_with_optional_response_mac_and_method_state_with_fast_fail_requirement(
+        context: ActiveProofChallengeCookieContext,
+        response_mac: Option<ActiveProofChallengeFastFailMac>,
+        method_challenge_state: Option<ActiveProofMethodChallengeState>,
+        requires_stateless_fast_fail: bool,
+    ) -> Result<Self, Error> {
+        if response_mac.is_some() && !requires_stateless_fast_fail {
+            return Err(Error::LoadedStateContradiction(
+                "response-MAC challenge cookie must require stateless fast-fail",
+            ));
+        }
+        if requires_stateless_fast_fail
+            && response_mac.is_none()
+            && method_challenge_state.is_none()
+        {
+            return Err(Error::LoadedStateContradiction(
+                "stateless-fast-fail challenge cookie has no verifier material",
+            ));
+        }
         Ok(Self {
             attempt_id: context.attempt_id,
             challenge_id: context.challenge_id,
@@ -243,6 +287,7 @@ impl ActiveProofChallengeCookieDraft {
             nonce: context.nonce,
             response_mac,
             method_challenge_state,
+            requires_stateless_fast_fail,
         })
     }
 
@@ -275,6 +320,7 @@ impl ActiveProofChallengeCookieDraft {
             nonce: context_without_mac.nonce,
             response_mac: Some(ActiveProofChallengeFastFailMac::from_mac_over_secret(mac)?),
             method_challenge_state: None,
+            requires_stateless_fast_fail: true,
         })
     }
 
@@ -391,7 +437,7 @@ impl ActiveProofChallengeCookieDraft {
     }
 
     pub(crate) fn requires_stateless_fast_fail(&self) -> bool {
-        self.response_mac.is_some()
+        self.requires_stateless_fast_fail
     }
 
     fn fast_fail_mac_context(&self) -> Result<Vec<u8>, Error> {

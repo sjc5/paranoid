@@ -26,7 +26,19 @@
 //!
 //! Use [`unparameterized_simple_query`] for unparameterized DDL or
 //! administration statements that must run through Postgres simple-query
-//! protocol.
+//! protocol. Use [`AuditedSql`] for generated SQL text after validating and
+//! quoting every dynamic identifier.
+//!
+//! For app-owned or crate-owned table families that want Paranoid's schema
+//! version ledger and loud drift detection, use
+//! [`migrate_component_schema_in_current_transaction`] and
+//! [`validate_component_schema_in_current_transaction`]. Component schemas use
+//! validated [`PgQualifiedTableName`] values, so ledger tables and component
+//! tables may live in any Postgres schema.
+//!
+//! For crates and applications that want the same isolated Postgres plus
+//! transaction-mode PgBouncer test substrate Paranoid uses internally, enable
+//! the `db-test-harness` feature and use `paranoid::db::testing`.
 //!
 //! ```rust,no_run
 //! # #[cfg(feature = "db")]
@@ -52,6 +64,7 @@
 //! ```
 
 mod bootstrap;
+mod component_schema;
 mod error;
 pub(crate) mod fleet;
 mod identifier;
@@ -67,6 +80,8 @@ mod schema;
 mod schema_ledger;
 mod schema_migration;
 mod sql_state;
+#[cfg(feature = "db-test-harness")]
+pub mod testing;
 mod time;
 
 pub use bootstrap::{
@@ -76,6 +91,12 @@ pub use bootstrap::{
     BOOTSTRAP_QUEUE_PAUSE_TABLE_NAME, BOOTSTRAP_SCHEMA_LEDGER_TABLE_NAME, BootstrapConfig,
     BootstrapError, BootstrapStores, BootstrapTableNames, DEFAULT_BOOTSTRAP_SCHEMA_NAME,
 };
+pub use component_schema::{
+    ComponentSchema, ComponentSchemaMigration, ComponentSchemaMigrationOutcome,
+    ComponentSchemaStatement, ComponentSchemaValidationCheck,
+    migrate_component_schema_in_current_transaction,
+    validate_component_schema_in_current_transaction,
+};
 pub use error::Error;
 pub use identifier::{
     InvalidPgIdentifier, MAX_PG_IDENTIFIER_BYTES, PgIdentifier, PgQualifiedTableName, PgSchemaName,
@@ -83,8 +104,11 @@ pub use identifier::{
 };
 pub use pool::{Pool, PoolConfig, SslMode, Tx, WritePool, WriteTx};
 pub use portable_query::{
-    portable_query, portable_query_as, portable_query_scalar, unparameterized_simple_query,
+    AuditedSql, portable_query, portable_query_as, portable_query_scalar,
+    unparameterized_simple_query,
 };
+pub use schema_ledger::{ComponentSchemaVersion, component_schema_instance_key_for_tables};
+pub use schema_migration::{ComponentSchemaMigrationStep, ComponentSchemaMigrationTarget};
 pub use sql_state::PgSqlState;
 
 pub(crate) use error::Error as DbError;
@@ -100,13 +124,6 @@ pub(crate) use portable_query::{
     portable_query_scalar as pooler_safe_query_scalar,
 };
 pub(crate) use schema::normalize_check_constraint_expression;
-#[cfg(feature = "__auth_wip")]
-pub(crate) use schema_ledger::record_component_schema_version_in_current_transaction;
-pub(crate) use schema_ledger::{
-    ComponentSchemaVersion, plan_component_schema_migration_in_current_transaction,
-    record_component_schema_migration_completion_in_current_transaction,
-    schema_instance_key_for_parts, validate_component_schema_version_in_current_transaction,
-};
 #[cfg(test)]
 pub(crate) use schema_ledger::{
     SCHEMA_LEDGER_OPERATION_CREATE_SAVEPOINT, SCHEMA_LEDGER_OPERATION_CREATE_TABLE,
@@ -116,9 +133,14 @@ pub(crate) use schema_ledger::{
     SCHEMA_LEDGER_OPERATION_VALIDATE_PRIMARY_KEY, test_schema_ledger_config,
     test_schema_ledger_table_name,
 };
+pub(crate) use schema_ledger::{
+    plan_component_schema_migration_in_current_transaction,
+    record_component_schema_migration_completion_in_current_transaction,
+    schema_instance_key_for_parts, validate_component_schema_version,
+    validate_component_schema_version_in_current_transaction,
+};
 pub(crate) use schema_migration::{
-    ComponentSchemaMigrationPlan, ComponentSchemaMigrationStep, RecordedComponentSchemaVersion,
-    plan_component_schema_migration,
+    ComponentSchemaMigrationPlan, RecordedComponentSchemaVersion, plan_component_schema_migration,
 };
 pub(crate) use sql_state::{
     SQLSTATE_ADMIN_SHUTDOWN, SQLSTATE_CANNOT_CONNECT_NOW, SQLSTATE_CRASH_SHUTDOWN,

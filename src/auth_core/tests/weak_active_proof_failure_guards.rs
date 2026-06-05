@@ -8,6 +8,7 @@ fn weak_active_proof_failure_requires_weak_proof_gate() {
             Command::RecordActiveProofFailure(RecordActiveProofFailure {
                 now: at(40),
                 attempt_id: id("attempt"),
+                challenge_id: None,
                 method: proof_method(proof_family),
                 weak_proof_gate: WeakProofGateStatus::NotRequired,
             }),
@@ -26,6 +27,7 @@ fn non_online_guessable_message_signature_failure_does_not_consume_weak_budget()
         Command::RecordActiveProofFailure(RecordActiveProofFailure {
             now: at(40),
             attempt_id: id("attempt"),
+            challenge_id: None,
             method: proof_method_matching(
                 &ProofSummary::new(ProofFamily::MessageSignature, "ssh_signature").expect("proof"),
             ),
@@ -53,6 +55,7 @@ fn weak_active_proof_failure_increments_attempt_budget_before_limit() {
             Command::RecordActiveProofFailure(RecordActiveProofFailure {
                 now: at(40),
                 attempt_id: id("attempt"),
+                challenge_id: None,
                 method: proof_method(proof_family),
                 weak_proof_gate: verified_proof_of_work_gate(),
             }),
@@ -101,6 +104,7 @@ fn weak_active_proof_failures_hard_delete_attempt_at_budget() {
             Command::RecordActiveProofFailure(RecordActiveProofFailure {
                 now: at(40),
                 attempt_id: id("attempt"),
+                challenge_id: None,
                 method: proof_method(proof_family),
                 weak_proof_gate: verified_proof_of_work_gate(),
             }),

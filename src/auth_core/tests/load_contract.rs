@@ -230,6 +230,7 @@ fn active_proof_load_contract_names_attempt_only_for_stateless_failure_and_issue
             Command::RecordActiveProofFailure(RecordActiveProofFailure {
                 now: at(40),
                 attempt_id: id("attempt"),
+                challenge_id: None,
                 method: proof_method(ProofFamily::SharedSecretOtp),
                 weak_proof_gate: verified_proof_of_work_gate(),
             }),

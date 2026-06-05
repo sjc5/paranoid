@@ -44,5 +44,6 @@ mod source_guards;
 mod step_up_request_resolution;
 mod storage_contract;
 mod weak_active_proof_failure_guards;
+mod weak_proof_gate;
 mod web_runtime;
 mod web_transport;

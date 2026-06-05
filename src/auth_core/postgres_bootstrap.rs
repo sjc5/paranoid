@@ -2,7 +2,7 @@ use std::fmt;
 use std::sync::Arc;
 
 use crate::crypto::Keyset;
-use crate::db::{BootstrapConfig, Pool};
+use crate::db::{BootstrapConfig, Pool, WritePool};
 
 use super::email_otp_method::{
     PostgresEmailOtpMethodError, PostgresEmailOtpMethodPlugin, PostgresEmailOtpMethodPluginConfig,
@@ -10,6 +10,10 @@ use super::email_otp_method::{
 };
 use super::postgres_method_runtime::{
     PostgresAuthMethodPlugin, PostgresAuthMethodRegistry, PostgresAuthMethodRegistryError,
+};
+use super::postgres_password_derived_signature_method::{
+    PostgresPasswordDerivedSignatureMethodError, PostgresPasswordDerivedSignatureMethodPlugin,
+    PostgresPasswordDerivedSignatureMethodPluginConfig,
 };
 use super::postgres_recovery_code_method::{
     PostgresRecoveryCodeMethodError, PostgresRecoveryCodeMethodPlugin,
@@ -19,7 +23,7 @@ use super::postgres_runtime::PostgresAuthWebRuntime;
 use super::postgres_store::{PostgresAuthStore, PostgresAuthStoreConfig, PostgresAuthStoreError};
 use super::postgres_totp_method::{
     PostgresTotpCodeVerifier, PostgresTotpMethodError, PostgresTotpMethodPlugin,
-    PostgresTotpMethodPluginConfig,
+    PostgresTotpMethodPluginConfig, StandardTotpCodeVerifier,
 };
 use super::{AuthWebRuntime, WeakProofGateVerifier};
 
@@ -72,6 +76,13 @@ impl PostgresAuthBootstrap {
         Ok(self)
     }
 
+    pub(crate) fn with_standard_totp_method(
+        self,
+        secret_keyset: Keyset,
+    ) -> Result<Self, PostgresAuthBootstrapError> {
+        self.with_totp_method(secret_keyset, StandardTotpCodeVerifier::default())
+    }
+
     pub(crate) fn with_recovery_code_method(
         mut self,
         secret_keyset: Keyset,
@@ -81,6 +92,18 @@ impl PostgresAuthBootstrap {
                 &self.db_bootstrap_config,
             )?,
             secret_keyset,
+        )?;
+        self.method_plugins.push(Arc::new(plugin));
+        Ok(self)
+    }
+
+    pub(crate) fn with_password_derived_signature_method(
+        mut self,
+    ) -> Result<Self, PostgresAuthBootstrapError> {
+        let plugin = PostgresPasswordDerivedSignatureMethodPlugin::new(
+            PostgresPasswordDerivedSignatureMethodPluginConfig::for_db_bootstrap_config(
+                &self.db_bootstrap_config,
+            )?,
         )?;
         self.method_plugins.push(Arc::new(plugin));
         Ok(self)
@@ -110,7 +133,7 @@ impl PostgresAuthBootstrap {
 
     pub(crate) async fn migrate_schema_after_db_bootstrap(
         self,
-        pool: &Pool,
+        pool: &WritePool,
     ) -> Result<PostgresAuthStore, PostgresAuthBootstrapError> {
         let store = self.into_store_for_already_bootstrapped_db_foundation()?;
         store.migrate_schema(pool).await?;
@@ -129,12 +152,13 @@ impl PostgresAuthBootstrap {
 
     pub(crate) async fn migrate_schema_and_build_web_runtime_after_db_bootstrap(
         self,
+        write_pool: &WritePool,
         pool: Pool,
         runtime: AuthWebRuntime,
         weak_proof_gate_verifier: Arc<dyn WeakProofGateVerifier + Send + Sync>,
     ) -> Result<PostgresAuthWebRuntime, PostgresAuthBootstrapError> {
         let store = self.into_store_for_already_bootstrapped_db_foundation()?;
-        store.migrate_schema(&pool).await?;
+        store.migrate_schema(write_pool).await?;
         Ok(PostgresAuthWebRuntime::new(
             runtime,
             pool,
@@ -148,6 +172,7 @@ impl PostgresAuthBootstrap {
 pub(crate) enum PostgresAuthBootstrapError {
     EmailOtp(PostgresEmailOtpMethodError),
     MethodRegistry(PostgresAuthMethodRegistryError),
+    PasswordDerivedSignature(PostgresPasswordDerivedSignatureMethodError),
     RecoveryCode(PostgresRecoveryCodeMethodError),
     Store(PostgresAuthStoreError),
     Totp(PostgresTotpMethodError),
@@ -158,6 +183,7 @@ impl fmt::Display for PostgresAuthBootstrapError {
         match self {
             Self::EmailOtp(error) => write!(f, "{error}"),
             Self::MethodRegistry(error) => write!(f, "{error}"),
+            Self::PasswordDerivedSignature(error) => write!(f, "{error}"),
             Self::RecoveryCode(error) => write!(f, "{error}"),
             Self::Store(error) => write!(f, "{error}"),
             Self::Totp(error) => write!(f, "{error}"),
@@ -170,6 +196,7 @@ impl std::error::Error for PostgresAuthBootstrapError {
         match self {
             Self::EmailOtp(error) => Some(error),
             Self::MethodRegistry(error) => Some(error),
+            Self::PasswordDerivedSignature(error) => Some(error),
             Self::RecoveryCode(error) => Some(error),
             Self::Store(error) => Some(error),
             Self::Totp(error) => Some(error),
@@ -186,6 +213,12 @@ impl From<PostgresEmailOtpMethodError> for PostgresAuthBootstrapError {
 impl From<PostgresAuthMethodRegistryError> for PostgresAuthBootstrapError {
     fn from(error: PostgresAuthMethodRegistryError) -> Self {
         Self::MethodRegistry(error)
+    }
+}
+
+impl From<PostgresPasswordDerivedSignatureMethodError> for PostgresAuthBootstrapError {
+    fn from(error: PostgresPasswordDerivedSignatureMethodError) -> Self {
+        Self::PasswordDerivedSignature(error)
     }
 }
 

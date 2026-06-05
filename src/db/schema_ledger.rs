@@ -1,6 +1,6 @@
 use super::{
     ComponentSchemaMigrationPlan, ComponentSchemaMigrationStep, DatabaseOperationKind, DbError,
-    PgQualifiedTableName, PgSqlState, RecordedComponentSchemaVersion, Tx,
+    PgIdentifier, PgQualifiedTableName, PgSqlState, RecordedComponentSchemaVersion, Tx,
     normalize_check_constraint_expression, plan_component_schema_migration, pooler_safe_query,
     pooler_safe_query_as, pooler_safe_query_scalar, sql_state_from_sqlx_error,
 };
@@ -53,12 +53,20 @@ pub(crate) struct SchemaLedgerConfig {
     pub(crate) table_name: PgQualifiedTableName,
 }
 
+/// Current schema version identity for one component schema instance.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct ComponentSchemaVersion<'a> {
-    pub(crate) component: &'a str,
-    pub(crate) instance_key: &'a str,
-    pub(crate) version: i32,
-    pub(crate) fingerprint: &'a str,
+pub struct ComponentSchemaVersion<'a> {
+    /// Stable component name, such as `paranoid.kv` or an app-owned component id.
+    pub component: &'a str,
+    /// Stable instance key for the concrete physical schema instance.
+    ///
+    /// Use [`component_schema_instance_key_for_tables`](crate::db::component_schema_instance_key_for_tables)
+    /// when the instance is defined by one or more table names.
+    pub instance_key: &'a str,
+    /// Current supported schema version.
+    pub version: i32,
+    /// Fingerprint of the canonical schema shape for this version.
+    pub fingerprint: &'a str,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -274,35 +282,6 @@ pub(crate) fn test_schema_ledger_config() -> SchemaLedgerConfig {
     SchemaLedgerConfig::new(test_schema_ledger_table_name())
 }
 
-#[cfg(feature = "__auth_wip")]
-pub(crate) async fn record_component_schema_version_in_current_transaction(
-    tx: &mut Tx<'_>,
-    table_name: &PgQualifiedTableName,
-    component_schema_version: ComponentSchemaVersion<'_>,
-) -> Result<(), DbError> {
-    validate_component_schema_version(component_schema_version)?;
-    execute_schema_ledger_migration_in_current_transaction(tx, table_name).await?;
-    let catalog = SchemaLedgerCatalog::new(table_name);
-
-    let statement = catalog.record_component_version_statement();
-
-    tx.record_database_operation(
-        DatabaseOperationKind::Execute,
-        SCHEMA_LEDGER_OPERATION_RECORD_COMPONENT_VERSION,
-        Some(statement.as_str()),
-    );
-    pooler_safe_query(sqlx::AssertSqlSafe(statement.as_str()))
-        .bind(component_schema_version.component)
-        .bind(component_schema_version.instance_key)
-        .bind(component_schema_version.version)
-        .bind(component_schema_version.fingerprint)
-        .execute(tx.inner.as_mut())
-        .await
-        .map_err(DbError::query)?;
-
-    Ok(())
-}
-
 pub(crate) async fn plan_component_schema_migration_in_current_transaction<'a>(
     tx: &mut Tx<'_>,
     table_name: &PgQualifiedTableName,
@@ -462,6 +441,22 @@ async fn fetch_component_schema_version_row_in_current_transaction(
             fingerprint,
         }),
     )
+}
+
+/// Builds a stable schema instance key from labeled qualified table names.
+///
+/// Labels are validated Postgres identifiers. The returned key includes quoted
+/// schema and table names, so schemas with the same table names remain
+/// distinct.
+pub fn component_schema_instance_key_for_tables<'a, I>(parts: I) -> String
+where
+    I: IntoIterator<Item = (&'a PgIdentifier, &'a PgQualifiedTableName)>,
+{
+    parts
+        .into_iter()
+        .map(|(label, table_name)| format!("{}={}", label.as_str(), table_name.quoted()))
+        .collect::<Vec<_>>()
+        .join(";")
 }
 
 pub(crate) fn schema_instance_key_for_parts<'a, I>(parts: I) -> String
@@ -757,7 +752,7 @@ fn build_create_schema_ledger_table_statement(table_name: &PgQualifiedTableName)
     SchemaLedgerCatalog::new(table_name).create_table_statement()
 }
 
-fn validate_component_schema_version(
+pub(crate) fn validate_component_schema_version(
     component_schema_version: ComponentSchemaVersion<'_>,
 ) -> Result<(), DbError> {
     validate_bounded_nonempty_schema_ledger_text(

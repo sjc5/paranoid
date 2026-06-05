@@ -172,6 +172,38 @@ fn headers_with_session_cookie(transport: &AuthWebTransport) -> HeaderMap {
     headers
 }
 
+fn headers_with_trusted_device_cookie(transport: &AuthWebTransport) -> HeaderMap {
+    let effects = MaterializedResponseEffects::from_vec(vec![
+        MaterializedResponseEffect::IssueTrustedDeviceCookie(
+            MaterializedTrustedDeviceCookieResponse::new(
+                trusted_device_cookie(500, 1_000),
+                AuthCredentialSecret::try_from(b"current-trusted-device".as_slice())
+                    .expect("credential secret"),
+            ),
+        ),
+    ]);
+    let set_cookie_headers = transport
+        .render_set_cookie_headers(at(0), effects)
+        .expect("initial trusted-device cookie");
+    let trusted_device_cookie_pair = set_cookie_headers
+        .as_slice()
+        .iter()
+        .find_map(|header| {
+            header
+                .as_str()
+                .split(';')
+                .next()
+                .filter(|pair| pair.starts_with("__Host-__paranoid_auth_trusted_device="))
+        })
+        .expect("trusted-device cookie pair");
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        COOKIE,
+        HeaderValue::from_str(trusted_device_cookie_pair).expect("cookie header"),
+    );
+    headers
+}
+
 fn refreshed_session_targets() -> Vec<(CoreStorageTarget, &'static [u8])> {
     vec![(
         CoreStorageTarget::SessionCredentialSecret {
@@ -249,6 +281,15 @@ fn headers_from_cookie_pairs(cookie_pairs: &[&str]) -> HeaderMap {
     headers
 }
 
+fn undecodable_auth_cookie_headers() -> HeaderMap {
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        COOKIE,
+        HeaderValue::from_static("__Host-__paranoid_auth_session=not-an-envelope"),
+    );
+    headers
+}
+
 fn resend_out_of_band_challenge_command() -> Command {
     Command::ResendOutOfBandChallenge(ResendOutOfBandChallenge {
         now: at(40),
@@ -275,6 +316,30 @@ fn complete_out_of_band_challenge_response_with_secret(
 
 fn challenge_response_secret(value: &[u8]) -> ActiveProofChallengeResponseSecret {
     ActiveProofChallengeResponseSecret::try_from(value).expect("challenge response secret")
+}
+
+fn issue_active_proof_method_challenge_command() -> Command {
+    let proof = ProofSummary::new(ProofFamily::MessageSignature, "ssh_signature").expect("proof");
+    Command::IssueActiveProofMethodChallenge(IssueActiveProofMethodChallenge {
+        now: at(40),
+        attempt_id: id("attempt"),
+        challenge_id: id("challenge"),
+        method: ProofMethodDeclaration::new(ProofFamily::MessageSignature, "ssh_signature")
+            .expect("method"),
+        challenge_issue_kind: ActiveProofMethodChallengeIssueKind::NormalActiveMethod,
+        challenge_cookie: active_proof_challenge_cookie_for_issue_proof(
+            "attempt",
+            "challenge",
+            proof,
+            at(30),
+            at(70),
+        ),
+        method_challenge: ActiveProofMethodChallengePresentation::try_from_bytes(
+            b"sign this".as_slice(),
+        )
+        .expect("method challenge"),
+        method_commit_work: Vec::new(),
+    })
 }
 
 fn runtime_active_proof_challenge_cookie() -> ActiveProofChallengeCookieDraft {
@@ -330,6 +395,99 @@ fn headers_with_active_proof_challenge_cookie_draft(
         HeaderValue::from_str(challenge_cookie_pair).expect("cookie header"),
     );
     headers
+}
+
+#[test]
+fn web_runtime_rejects_runtime_owned_direct_commands_before_cookie_decode() {
+    let proof = ProofSummary::new(ProofFamily::MessageSignature, "ssh_signature").expect("proof");
+    let cases = vec![
+        (
+            Command::ResolveRequest(ResolveRequest {
+                now: at(40),
+                request_kind: RequestKind::StateChanging,
+                fresh_session_id: Some(id("caller-session")),
+            }),
+            Error::RequestResolutionRequiresRuntimeFreshIdGeneration,
+        ),
+        (
+            Command::StartActiveProofAttemptForCurrentSession(
+                StartActiveProofAttemptForCurrentSession {
+                    now: at(40),
+                    attempt_id: id("caller-attempt-session"),
+                    proof_use: ProofUse::SatisfyStepUp,
+                },
+            ),
+            Error::ActiveProofAttemptStartRequiresRuntimeFreshIdGeneration,
+        ),
+        (
+            Command::StartActiveProofAttemptForCurrentTrustedDevice(
+                StartActiveProofAttemptForCurrentTrustedDevice {
+                    now: at(40),
+                    attempt_id: id("caller-attempt-device"),
+                    proof_use: ProofUse::ReviveTrustedDeviceWithActiveProof,
+                },
+            ),
+            Error::ActiveProofAttemptStartRequiresRuntimeFreshIdGeneration,
+        ),
+        (
+            issue_active_proof_method_challenge_command(),
+            Error::ActiveProofMethodChallengeIssueRequiresRuntimeMethodDispatch,
+        ),
+        (
+            Command::CompleteActiveProofChallenge(CompleteActiveProofChallenge {
+                now: at(40),
+                attempt_id: id("caller-attempt-complete"),
+                challenge_id: Some(id("caller-challenge")),
+                verified_proof: VerifiedActiveProof::from_summary(proof, Some(id("subject")))
+                    .expect("verified proof"),
+                stateless_fast_fail: StatelessFastFailStatus::NotRequired,
+                weak_proof_gate: WeakProofGateStatus::NotRequired,
+                method_commit_work: Vec::new(),
+            }),
+            Error::ActiveProofCompletionRequiresRuntimeMethodDispatch,
+        ),
+        (
+            Command::CompleteFullAuthentication(CompleteFullAuthentication {
+                now: at(40),
+                attempt_id: id("caller-attempt-full-auth"),
+                fresh_session_id: id("caller-session"),
+                trust_device: None,
+            }),
+            Error::FullAuthenticationCompletionRequiresRuntimeFreshIdGeneration,
+        ),
+        (
+            Command::CompleteStepUp(CompleteStepUp {
+                now: at(40),
+                attempt_id: id("caller-attempt-step-up"),
+            }),
+            Error::StepUpCompletionRequiresRuntimeAttemptContinuation,
+        ),
+        (
+            Command::CompleteTrustedDeviceRevivalWithActiveProof(
+                CompleteTrustedDeviceRevivalWithActiveProof {
+                    now: at(40),
+                    attempt_id: id("caller-attempt-device-revival"),
+                    fresh_session_id: id("caller-session"),
+                },
+            ),
+            Error::TrustedDeviceRevivalCompletionRequiresRuntimeFreshIdGeneration,
+        ),
+    ];
+
+    for (command, expected_error) in cases {
+        let runtime = auth_web_runtime();
+        let mut adapter = RuntimeTestAdapter::new(LoadedState::default());
+        let error = runtime
+            .execute_from_headers(&undecodable_auth_cookie_headers(), command, &mut adapter)
+            .expect_err("runtime-owned command must reject before cookie decode");
+
+        assert!(matches!(
+            error,
+            AuthWebRuntimeExecutionError::Core(actual_error) if actual_error == expected_error
+        ));
+        assert_eq!(adapter.load_calls, 0);
+        assert_eq!(adapter.commit_calls, 0);
+    }
 }
 
 #[test]
@@ -520,6 +678,98 @@ fn web_runtime_resolves_missing_auth_without_loading_state() {
     assert!(adapter.seen_loaded_state_contract.is_none());
     assert!(adapter.seen_prepared_storage_boundary_contract.is_none());
     assert!(adapter.seen_planned_storage_boundary_contract.is_none());
+}
+
+#[test]
+fn web_runtime_session_cookie_without_authoritative_session_record_cannot_authenticate() {
+    let runtime = auth_web_runtime();
+    let headers = headers_with_session_cookie(runtime.web_transport());
+    let mut adapter = RuntimeTestAdapter::new(LoadedState {
+        session_cookie: Some(session_cookie(100)),
+        ..LoadedState::default()
+    });
+
+    let error = runtime
+        .execute_request_resolution_from_headers(
+            &headers,
+            ResolveRequestInput {
+                now: at(50),
+                request_kind: RequestKind::StateChanging,
+            },
+            &mut adapter,
+        )
+        .expect_err("session cookie alone must not authenticate");
+
+    assert!(matches!(
+        error,
+        AuthWebRuntimeExecutionError::Core(Error::LoadedStateDoesNotSatisfyLoadContract(
+            "required session record is missing"
+        ))
+    ));
+    assert_eq!(adapter.load_calls, 1);
+    assert_eq!(adapter.commit_calls, 0);
+}
+
+#[test]
+fn web_runtime_trusted_device_cookie_without_authoritative_device_record_cannot_revive_session() {
+    let runtime = auth_web_runtime();
+    let headers = headers_with_trusted_device_cookie(runtime.web_transport());
+    let mut adapter = RuntimeTestAdapter::new(LoadedState {
+        trusted_device_cookie: Some(trusted_device_cookie(500, 1_000)),
+        ..LoadedState::default()
+    });
+
+    let error = runtime
+        .execute_request_resolution_from_headers(
+            &headers,
+            ResolveRequestInput {
+                now: at(50),
+                request_kind: RequestKind::StateChanging,
+            },
+            &mut adapter,
+        )
+        .expect_err("trusted-device cookie alone must not revive a session");
+
+    assert!(matches!(
+        error,
+        AuthWebRuntimeExecutionError::Core(Error::LoadedStateDoesNotSatisfyLoadContract(
+            "required trusted-device record is missing"
+        ))
+    ));
+    assert_eq!(adapter.load_calls, 1);
+    assert_eq!(adapter.commit_calls, 0);
+}
+
+#[test]
+fn web_runtime_active_proof_continuation_cookie_without_attempt_cannot_complete_authentication() {
+    let runtime = auth_web_runtime();
+    let continuation_headers = active_proof_continuation_headers(
+        &runtime,
+        id("attempt"),
+        ProofUse::ContributeToFullAuthentication,
+        at(140),
+    );
+    let mut adapter = RuntimeTestAdapter::new(LoadedState::default());
+
+    let error = runtime
+        .execute_full_authentication_completion_from_headers(
+            &continuation_headers,
+            CompleteFullAuthenticationInput {
+                now: at(40),
+                trust_device: None,
+            },
+            &mut adapter,
+        )
+        .expect_err("continuation cookie alone must not complete authentication");
+
+    assert!(matches!(
+        error,
+        AuthWebRuntimeExecutionError::Core(Error::LoadedStateDoesNotSatisfyLoadContract(
+            "required active-proof attempt is missing"
+        ))
+    ));
+    assert_eq!(adapter.load_calls, 1);
+    assert_eq!(adapter.commit_calls, 0);
 }
 
 #[test]
@@ -968,6 +1218,7 @@ fn web_runtime_rejects_direct_active_proof_failure_command() {
             Command::RecordActiveProofFailure(RecordActiveProofFailure {
                 now: at(40),
                 attempt_id: id("attempt"),
+                challenge_id: None,
                 method: proof_method(ProofFamily::SharedSecretOtp),
                 weak_proof_gate: verified_proof_of_work_gate(),
             }),
@@ -1009,6 +1260,34 @@ fn web_runtime_rejects_direct_out_of_band_resend_command() {
 }
 
 #[test]
+fn web_runtime_verified_out_of_band_challenge_cookie_without_authoritative_challenge_cannot_complete_proof()
+ {
+    let runtime = auth_web_runtime();
+    let headers = headers_with_active_proof_challenge_cookie(runtime.web_transport());
+    let mut adapter = RuntimeTestAdapter::new(loaded_attempt_state(
+        ProofUse::ContributeToFullAuthentication,
+    ));
+
+    let error = runtime
+        .execute_out_of_band_challenge_response_from_headers(
+            &headers,
+            complete_out_of_band_challenge_response(),
+            &hashcash_verifier_for_test(),
+            &mut adapter,
+        )
+        .expect_err("challenge cookie alone must not complete proof");
+
+    assert!(matches!(
+        error,
+        AuthWebRuntimeExecutionError::Core(Error::LoadedStateDoesNotSatisfyLoadContract(
+            "required active-proof challenge is missing"
+        ))
+    ));
+    assert_eq!(adapter.load_calls, 1);
+    assert_eq!(adapter.commit_calls, 0);
+}
+
+#[test]
 fn web_runtime_executes_out_of_band_challenge_completion_after_stateless_fast_fail() {
     let runtime = auth_web_runtime();
     let headers = headers_with_active_proof_challenge_cookie(runtime.web_transport());
@@ -1020,7 +1299,7 @@ fn web_runtime_executes_out_of_band_challenge_completion_after_stateless_fast_fa
         .execute_out_of_band_challenge_response_from_headers(
             &headers,
             complete_out_of_band_challenge_response(),
-            &TestWeakProofGateVerifier,
+            &hashcash_verifier_for_test(),
             &mut adapter,
         )
         .expect("runtime execution");
@@ -1076,7 +1355,7 @@ fn web_runtime_rejects_bad_challenge_response_before_loading_state() {
         .execute_out_of_band_challenge_response_from_headers(
             &headers,
             complete_out_of_band_challenge_response_with_secret(b"wrong-code"),
-            &TestWeakProofGateVerifier,
+            &hashcash_verifier_for_test(),
             &mut adapter,
         )
         .expect_err("bad challenge response fails before state load");
@@ -1123,9 +1402,9 @@ fn web_runtime_rejects_expired_out_of_band_cookie_before_weak_gate() {
             CompleteOutOfBandChallengeResponse {
                 now: at(40),
                 secret_response: challenge_response_secret(b"123456"),
-                weak_proof_gate_response: Some(proof_of_work_gate_response()),
+                weak_proof_gate_response: Some(invalid_proof_of_work_gate_response()),
             },
-            &TestWeakProofGateVerifier,
+            &hashcash_verifier_for_test(),
             &mut adapter,
         )
         .expect_err("expired challenge cookie must fail before weak gate");
@@ -1168,9 +1447,9 @@ fn web_runtime_rejects_out_of_band_cookie_without_response_mac_before_weak_gate(
             CompleteOutOfBandChallengeResponse {
                 now: at(40),
                 secret_response: challenge_response_secret(b"123456"),
-                weak_proof_gate_response: Some(proof_of_work_gate_response()),
+                weak_proof_gate_response: Some(invalid_proof_of_work_gate_response()),
             },
-            &TestWeakProofGateVerifier,
+            &hashcash_verifier_for_test(),
             &mut adapter,
         )
         .expect_err("out-of-band challenge cookie without response MAC must fail before weak gate");
@@ -1207,7 +1486,7 @@ fn web_runtime_rejects_submitted_secret_for_non_out_of_band_challenge_before_loa
         .execute_out_of_band_challenge_response_from_headers(
             &headers,
             complete_out_of_band_challenge_response(),
-            &TestWeakProofGateVerifier,
+            &hashcash_verifier_for_test(),
             &mut adapter,
         )
         .expect_err("submitted-secret fast-fail is only for out-of-band challenge cookies");

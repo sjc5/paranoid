@@ -1,8 +1,12 @@
+use std::collections::BTreeSet;
 use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
 
+use serde::{Deserialize, Serialize};
 use sqlx::Row;
+use subtle::ConstantTimeEq;
+use totp_rs::{Algorithm as TotpRsAlgorithm, TOTP as TotpRs};
 
 use crate::crypto::Keyset;
 use crate::crypto::SecretBytes;
@@ -15,8 +19,8 @@ use crate::db::{
 };
 
 use super::postgres_method_runtime::{
-    KnownSubjectActiveProofMethodVerification, PostgresAuthMethodBuildError,
-    PostgresAuthMethodPlugin, VerifiedActiveProofMethodResponse,
+    ActiveProofMethodChallengeBuild, KnownSubjectActiveProofMethodVerification,
+    PostgresAuthMethodBuildError, PostgresAuthMethodPlugin, VerifiedActiveProofMethodResponse,
 };
 use super::postgres_store::PostgresAuthMethodCommitError;
 use super::*;
@@ -24,6 +28,16 @@ use super::*;
 const TOTP_METHOD_LABEL: &str = "totp";
 const TOTP_SECRET_CONTEXT: &[u8] = b"paranoid/auth/v1/totp-secret";
 const DEFAULT_TOTP_TABLE_PREFIX: &str = "auth_totp_";
+const TOTP_MIN_DIGIT_COUNT: usize = 6;
+const TOTP_MAX_DIGIT_COUNT: usize = 8;
+const TOTP_DEFAULT_DIGIT_COUNT: usize = 6;
+const TOTP_DEFAULT_STEP_SECONDS: u64 = 30;
+const TOTP_DEFAULT_ACCEPTED_ADJACENT_STEPS: u8 = 1;
+const TOTP_CHALLENGE_BOUND_BLOOM_CONTEXT: &[u8] = b"paranoid/auth/v1/totp/challenge-bound-bloom";
+const TOTP_CHALLENGE_BOUND_BLOOM_FILTER_BYTES: usize = 128;
+const TOTP_CHALLENGE_BOUND_BLOOM_FILTER_HASH_COUNT: u8 = 10;
+const TOTP_CHALLENGE_BOUND_MAX_ACCEPTED_CODES: usize = 512;
+const TOTP_CHALLENGE_BOUND_PRESENTATION: &[u8] = b"totp-challenge-bound-bloom-v1";
 
 pub(crate) trait PostgresTotpCodeVerifier: Send + Sync {
     fn verify_totp_code(
@@ -32,6 +46,202 @@ pub(crate) trait PostgresTotpCodeVerifier: Send + Sync {
         submitted_code: &[u8],
         now: UnixSeconds,
     ) -> Result<bool, PostgresTotpMethodError>;
+
+    fn accepted_totp_codes_for_challenge_window(
+        &self,
+        secret: &SecretBytes,
+        issued_at: UnixSeconds,
+        expires_at: UnixSeconds,
+    ) -> Result<Vec<KnownSubjectActiveProofSecretResponse>, PostgresTotpMethodError>;
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct StandardTotpCodeVerifier {
+    config: StandardTotpCodeVerifierConfig,
+}
+
+impl StandardTotpCodeVerifier {
+    pub(crate) fn new(
+        config: StandardTotpCodeVerifierConfig,
+    ) -> Result<Self, PostgresTotpMethodError> {
+        config.validate()?;
+        Ok(Self { config })
+    }
+}
+
+impl PostgresTotpCodeVerifier for StandardTotpCodeVerifier {
+    fn verify_totp_code(
+        &self,
+        secret: &SecretBytes,
+        submitted_code: &[u8],
+        now: UnixSeconds,
+    ) -> Result<bool, PostgresTotpMethodError> {
+        if submitted_code.len() != self.config.digit_count
+            || submitted_code.iter().any(|byte| !byte.is_ascii_digit())
+        {
+            return Ok(false);
+        }
+        let totp = TotpRs::new(
+            self.config.algorithm.into_totp_rs_algorithm(),
+            self.config.digit_count,
+            0,
+            self.config.step_seconds,
+            secret.expose_secret().to_vec(),
+        )
+        .map_err(PostgresTotpMethodError::Totp)?;
+
+        let current_step = now.get() / self.config.step_seconds;
+        let mut accepted = false;
+        for step_index in self.config.accepted_step_indices(current_step)? {
+            let Some(step_time) = step_index.checked_mul(self.config.step_seconds) else {
+                return Err(PostgresTotpMethodError::Core(Error::TimeOverflow));
+            };
+            let expected_code = totp.generate(step_time);
+            accepted |= bool::from(expected_code.as_bytes().ct_eq(submitted_code));
+        }
+        Ok(accepted)
+    }
+
+    fn accepted_totp_codes_for_challenge_window(
+        &self,
+        secret: &SecretBytes,
+        issued_at: UnixSeconds,
+        expires_at: UnixSeconds,
+    ) -> Result<Vec<KnownSubjectActiveProofSecretResponse>, PostgresTotpMethodError> {
+        if expires_at <= issued_at {
+            return Err(PostgresTotpMethodError::Core(
+                Error::ActiveProofChallengeCookieExpiresAtOrBeforeIssuedAt,
+            ));
+        }
+        let totp = TotpRs::new(
+            self.config.algorithm.into_totp_rs_algorithm(),
+            self.config.digit_count,
+            0,
+            self.config.step_seconds,
+            secret.expose_secret().to_vec(),
+        )
+        .map_err(PostgresTotpMethodError::Totp)?;
+        let first_completion_step = issued_at.get() / self.config.step_seconds;
+        let last_completion_step = expires_at
+            .get()
+            .checked_sub(1)
+            .ok_or(PostgresTotpMethodError::Core(Error::TimeOverflow))?
+            / self.config.step_seconds;
+        let mut accepted_steps = BTreeSet::new();
+        for completion_step in first_completion_step..=last_completion_step {
+            for accepted_step in self.config.accepted_step_indices(completion_step)? {
+                accepted_steps.insert(accepted_step);
+                if accepted_steps.len() > TOTP_CHALLENGE_BOUND_MAX_ACCEPTED_CODES {
+                    return Err(PostgresTotpMethodError::Core(Error::InvalidConfig(
+                        "totp challenge window accepts too many codes for challenge-bound Bloom fast-fail",
+                    )));
+                }
+            }
+        }
+        let mut codes = Vec::with_capacity(accepted_steps.len());
+        for accepted_step in accepted_steps {
+            let step_time = accepted_step
+                .checked_mul(self.config.step_seconds)
+                .ok_or(PostgresTotpMethodError::Core(Error::TimeOverflow))?;
+            codes.push(
+                KnownSubjectActiveProofSecretResponse::try_from_bytes(
+                    totp.generate(step_time).into_bytes(),
+                )
+                .map_err(PostgresTotpMethodError::Core)?,
+            );
+        }
+        Ok(codes)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct StandardTotpCodeVerifierConfig {
+    algorithm: StandardTotpAlgorithm,
+    digit_count: usize,
+    step_seconds: u64,
+    accepted_adjacent_steps: u8,
+}
+
+impl StandardTotpCodeVerifierConfig {
+    pub(crate) fn new(
+        algorithm: StandardTotpAlgorithm,
+        digit_count: usize,
+        step_seconds: u64,
+        accepted_adjacent_steps: u8,
+    ) -> Result<Self, PostgresTotpMethodError> {
+        let config = Self {
+            algorithm,
+            digit_count,
+            step_seconds,
+            accepted_adjacent_steps,
+        };
+        config.validate()?;
+        Ok(config)
+    }
+
+    fn validate(&self) -> Result<(), PostgresTotpMethodError> {
+        if !(TOTP_MIN_DIGIT_COUNT..=TOTP_MAX_DIGIT_COUNT).contains(&self.digit_count) {
+            return Err(PostgresTotpMethodError::Core(Error::InvalidConfig(
+                "totp digit count must be between 6 and 8",
+            )));
+        }
+        if self.step_seconds == 0 {
+            return Err(PostgresTotpMethodError::Core(Error::InvalidConfig(
+                "totp step seconds must be non-zero",
+            )));
+        }
+        if self.accepted_adjacent_steps > 1 {
+            return Err(PostgresTotpMethodError::Core(Error::InvalidConfig(
+                "totp verifier may accept at most one adjacent time step",
+            )));
+        }
+        Ok(())
+    }
+
+    fn accepted_step_indices(self, current_step: u64) -> Result<Vec<u64>, PostgresTotpMethodError> {
+        let mut indices = Vec::with_capacity((self.accepted_adjacent_steps as usize * 2) + 1);
+        for past_steps in (1..=self.accepted_adjacent_steps).rev() {
+            if let Some(step_index) = current_step.checked_sub(past_steps as u64) {
+                indices.push(step_index);
+            }
+        }
+        indices.push(current_step);
+        for future_steps in 1..=self.accepted_adjacent_steps {
+            let Some(step_index) = current_step.checked_add(future_steps as u64) else {
+                return Err(PostgresTotpMethodError::Core(Error::TimeOverflow));
+            };
+            indices.push(step_index);
+        }
+        Ok(indices)
+    }
+}
+
+impl Default for StandardTotpCodeVerifierConfig {
+    fn default() -> Self {
+        Self {
+            algorithm: StandardTotpAlgorithm::Sha1,
+            digit_count: TOTP_DEFAULT_DIGIT_COUNT,
+            step_seconds: TOTP_DEFAULT_STEP_SECONDS,
+            accepted_adjacent_steps: TOTP_DEFAULT_ACCEPTED_ADJACENT_STEPS,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum StandardTotpAlgorithm {
+    Sha1,
+    Sha256,
+    Sha512,
+}
+
+impl StandardTotpAlgorithm {
+    fn into_totp_rs_algorithm(self) -> TotpRsAlgorithm {
+        match self {
+            Self::Sha1 => TotpRsAlgorithm::SHA1,
+            Self::Sha256 => TotpRsAlgorithm::SHA256,
+            Self::Sha512 => TotpRsAlgorithm::SHA512,
+        }
+    }
 }
 
 pub(crate) struct PostgresTotpMethodPlugin<V> {
@@ -98,6 +308,173 @@ where
         ))
     }
 
+    async fn build_challenge_bound_challenge_in_current_transaction(
+        &self,
+        tx: &mut Tx<'_>,
+        request: &IssueActiveProofMethodChallengeRequest,
+        subject_id: &SubjectId,
+        challenge: &ActiveProofMethodChallengeSeed,
+    ) -> Result<ActiveProofMethodChallengeBuild, PostgresTotpMethodError> {
+        if request.method != self.method || challenge.proof != self.method.verified_proof_summary()
+        {
+            return Err(PostgresTotpMethodError::Core(
+                Error::LoadedStateContradiction(
+                    "totp challenge-bound issue used a different method",
+                ),
+            ));
+        }
+        let Some(verifier) = self.fetch_locked_verifier(tx, subject_id).await? else {
+            return Err(PostgresTotpMethodError::Core(
+                Error::LoadedStateContradiction(
+                    "totp challenge-bound issue requires a configured verifier",
+                ),
+            ));
+        };
+        let secret = decrypt_bytes_with_associated_data(
+            &self.secret_keyset,
+            &verifier.encrypted_secret,
+            &totp_secret_context(subject_id, &verifier.totp_credential_id),
+        )
+        .map_err(PostgresTotpMethodError::Crypto)?;
+        let accepted_responses = self.verifier.accepted_totp_codes_for_challenge_window(
+            &secret,
+            challenge.issued_at,
+            challenge.expires_at,
+        )?;
+        if accepted_responses.is_empty() {
+            return Err(PostgresTotpMethodError::Core(Error::InvalidConfig(
+                "totp challenge-bound Bloom fast-fail requires at least one accepted code",
+            )));
+        }
+        let metadata = TotpChallengeBoundBloomMetadata {
+            subject_id: subject_id.as_bytes().to_vec(),
+            totp_credential_id: verifier.totp_credential_id.as_bytes().to_vec(),
+            verifier_version: verifier.verifier_version,
+        };
+        let bloom_context = totp_challenge_bound_bloom_context(challenge, &metadata)?;
+        let mut bloom = ChallengeBoundConfiguredSecretFastFailBloomFilter::new(
+            TOTP_CHALLENGE_BOUND_BLOOM_FILTER_BYTES,
+            TOTP_CHALLENGE_BOUND_BLOOM_FILTER_HASH_COUNT,
+        )
+        .map_err(PostgresTotpMethodError::Core)?;
+        for response in &accepted_responses {
+            bloom
+                .insert_response_for_latest_key(&self.secret_keyset, &bloom_context, response)
+                .map_err(PostgresTotpMethodError::Core)?;
+        }
+        let state = TotpChallengeBoundBloomState {
+            version: 1,
+            metadata,
+            bloom_bitset: bloom.bitset_bytes().to_vec(),
+            bloom_hash_count: bloom.hash_count(),
+        };
+        let encoded_state = encode_totp_payload(&state)?;
+        let method_challenge_state = ActiveProofMethodChallengeState::try_from_bytes(encoded_state)
+            .map_err(PostgresTotpMethodError::Core)?;
+        let presentation = ActiveProofMethodChallengePresentation::try_from_bytes(
+            TOTP_CHALLENGE_BOUND_PRESENTATION,
+        )
+        .map_err(PostgresTotpMethodError::Core)?;
+        Ok(ActiveProofMethodChallengeBuild::new(
+            presentation,
+            method_challenge_state,
+            Vec::new(),
+        ))
+    }
+
+    fn verify_challenge_bound_response_before_state_load(
+        &self,
+        challenge: &ActiveProofMethodChallengeMaterial,
+        response: &CompleteChallengeBoundKnownSubjectActiveProofMethodResponse,
+    ) -> Result<(), PostgresTotpMethodError> {
+        if challenge.proof != self.method.verified_proof_summary() {
+            return Err(PostgresTotpMethodError::Core(
+                Error::LoadedStateContradiction(
+                    "totp challenge-bound completion used a different proof",
+                ),
+            ));
+        }
+        let state =
+            decode_totp_challenge_bound_bloom_state(challenge.method_challenge_state.as_bytes())?;
+        let bloom = ChallengeBoundConfiguredSecretFastFailBloomFilter::try_from_parts(
+            state.bloom_bitset,
+            state.bloom_hash_count,
+        )
+        .map_err(PostgresTotpMethodError::Core)?;
+        let bloom_context =
+            totp_challenge_bound_bloom_context_from_material(challenge, &state.metadata)?;
+        if bloom
+            .definitely_rejects_response_in_challenge_context(
+                &self.secret_keyset,
+                &bloom_context,
+                &response.secret_response,
+            )
+            .map_err(PostgresTotpMethodError::Core)?
+        {
+            return Err(PostgresTotpMethodError::Core(
+                Error::StatelessFastFailVerificationFailed,
+            ));
+        }
+        Ok(())
+    }
+
+    async fn verify_challenge_bound_response_in_current_transaction(
+        &self,
+        tx: &mut Tx<'_>,
+        subject_id: &SubjectId,
+        challenge: &ActiveProofMethodChallengeMaterial,
+        response: &CompleteChallengeBoundKnownSubjectActiveProofMethodResponse,
+    ) -> Result<KnownSubjectActiveProofMethodVerification, PostgresTotpMethodError> {
+        if challenge.proof != self.method.verified_proof_summary() {
+            return Err(PostgresTotpMethodError::Core(
+                Error::LoadedStateContradiction(
+                    "totp challenge-bound completion used a different proof",
+                ),
+            ));
+        }
+        let state =
+            decode_totp_challenge_bound_bloom_state(challenge.method_challenge_state.as_bytes())?;
+        let state_subject_id = SubjectId::from_bytes(state.metadata.subject_id.clone())
+            .map_err(PostgresTotpMethodError::Core)?;
+        if &state_subject_id != subject_id {
+            return Ok(KnownSubjectActiveProofMethodVerification::Rejected);
+        }
+        let state_credential_id =
+            VerifiedProofSourceId::from_bytes(state.metadata.totp_credential_id.clone())
+                .map_err(PostgresTotpMethodError::Core)?;
+        let Some(verifier) = self.fetch_locked_verifier(tx, subject_id).await? else {
+            return Ok(KnownSubjectActiveProofMethodVerification::Rejected);
+        };
+        if verifier.totp_credential_id != state_credential_id
+            || verifier.verifier_version != state.metadata.verifier_version
+        {
+            return Ok(KnownSubjectActiveProofMethodVerification::Rejected);
+        }
+        let secret = decrypt_bytes_with_associated_data(
+            &self.secret_keyset,
+            &verifier.encrypted_secret,
+            &totp_secret_context(subject_id, &verifier.totp_credential_id),
+        )
+        .map_err(PostgresTotpMethodError::Crypto)?;
+        if !self.verifier.verify_totp_code(
+            &secret,
+            response.secret_response.expose_secret(),
+            response.now,
+        )? {
+            return Ok(KnownSubjectActiveProofMethodVerification::Rejected);
+        }
+        let verified_proof = VerifiedActiveProof::from_summary_with_source(
+            self.method.verified_proof_summary(),
+            None,
+            totp_proof_source(verifier.totp_credential_id),
+        )
+        .map_err(PostgresTotpMethodError::Core)?;
+        Ok(KnownSubjectActiveProofMethodVerification::Accepted(
+            VerifiedActiveProofMethodResponse::new(verified_proof, Vec::new())
+                .map_err(PostgresTotpMethodError::Core)?,
+        ))
+    }
+
     async fn fetch_locked_verifier(
         &self,
         tx: &mut Tx<'_>,
@@ -105,7 +482,7 @@ where
     ) -> Result<Option<TotpVerifier>, PostgresTotpMethodError> {
         let statement = format!(
             r#"
-            SELECT totp_credential_id, encrypted_secret
+            SELECT totp_credential_id, encrypted_secret, verifier_version
             FROM {}
             WHERE subject_id = $1
             FOR UPDATE
@@ -133,6 +510,10 @@ where
                     .map_err(PostgresTotpMethodError::Core)?,
                     encrypted_secret: row
                         .try_get::<Vec<u8>, _>("encrypted_secret")
+                        .map_err(DbError::query)
+                        .map_err(PostgresTotpMethodError::Database)?,
+                    verifier_version: row
+                        .try_get::<i64, _>("verifier_version")
                         .map_err(DbError::query)
                         .map_err(PostgresTotpMethodError::Database)?,
                 })
@@ -293,6 +674,82 @@ where
         &self.method
     }
 
+    fn build_challenge_bound_known_subject_active_proof_method_challenge<'a, 'tx>(
+        &'a self,
+        tx: &'a mut Tx<'tx>,
+        request: &'a IssueActiveProofMethodChallengeRequest,
+        subject_id: &'a SubjectId,
+        challenge: &'a ActiveProofMethodChallengeSeed,
+    ) -> Pin<
+        Box<
+            dyn Future<
+                    Output = Result<ActiveProofMethodChallengeBuild, PostgresAuthMethodBuildError>,
+                > + Send
+                + 'a,
+        >,
+    > {
+        Box::pin(async move {
+            self.build_challenge_bound_challenge_in_current_transaction(
+                tx, request, subject_id, challenge,
+            )
+            .await
+            .map_err(|error| {
+                PostgresAuthMethodBuildError::plugin_rejected(
+                    &self.method,
+                    "challenge_bound_known_subject_active_proof_method_challenge_issue",
+                    error,
+                )
+            })
+        })
+    }
+
+    fn verify_challenge_bound_known_subject_active_proof_method_response_before_state_load(
+        &self,
+        challenge: &ActiveProofMethodChallengeMaterial,
+        response: &CompleteChallengeBoundKnownSubjectActiveProofMethodResponse,
+    ) -> Result<(), PostgresAuthMethodBuildError> {
+        self.verify_challenge_bound_response_before_state_load(challenge, response)
+            .map_err(|error| {
+                PostgresAuthMethodBuildError::plugin_rejected(
+                    &self.method,
+                    "challenge_bound_known_subject_active_proof_completion",
+                    error,
+                )
+            })
+    }
+
+    fn verify_challenge_bound_known_subject_active_proof_method_response<'a, 'tx>(
+        &'a self,
+        tx: &'a mut Tx<'tx>,
+        subject_id: &'a SubjectId,
+        challenge: &'a ActiveProofMethodChallengeMaterial,
+        response: &'a CompleteChallengeBoundKnownSubjectActiveProofMethodResponse,
+    ) -> Pin<
+        Box<
+            dyn Future<
+                    Output = Result<
+                        KnownSubjectActiveProofMethodVerification,
+                        PostgresAuthMethodBuildError,
+                    >,
+                > + Send
+                + 'a,
+        >,
+    > {
+        Box::pin(async move {
+            self.verify_challenge_bound_response_in_current_transaction(
+                tx, subject_id, challenge, response,
+            )
+            .await
+            .map_err(|error| {
+                PostgresAuthMethodBuildError::plugin_rejected(
+                    &self.method,
+                    "challenge_bound_known_subject_active_proof_completion",
+                    error,
+                )
+            })
+        })
+    }
+
     fn verify_known_subject_active_proof_method_response<'a, 'tx>(
         &'a self,
         tx: &'a mut Tx<'tx>,
@@ -433,6 +890,11 @@ impl Default for PostgresTotpMethodPluginConfig {
 mod tests {
     use super::*;
 
+    const RFC_SHA1_SECRET: &[u8] = b"12345678901234567890";
+    const RFC_SHA256_SECRET: &[u8] = b"12345678901234567890123456789012";
+    const RFC_SHA512_SECRET: &[u8] =
+        b"1234567890123456789012345678901234567890123456789012345678901234";
+
     #[test]
     fn default_config_uses_schema_local_bootstrap_tables() {
         let bootstrap_config = BootstrapConfig::default();
@@ -448,6 +910,206 @@ mod tests {
             "auth_totp_verifiers"
         );
     }
+
+    #[test]
+    fn standard_totp_verifier_matches_rfc6238_sha1_vectors() {
+        assert_rfc6238_vector(
+            StandardTotpAlgorithm::Sha1,
+            RFC_SHA1_SECRET,
+            59,
+            b"94287082",
+        );
+        assert_rfc6238_vector(
+            StandardTotpAlgorithm::Sha1,
+            RFC_SHA1_SECRET,
+            1_111_111_109,
+            b"07081804",
+        );
+        assert_rfc6238_vector(
+            StandardTotpAlgorithm::Sha1,
+            RFC_SHA1_SECRET,
+            1_111_111_111,
+            b"14050471",
+        );
+        assert_rfc6238_vector(
+            StandardTotpAlgorithm::Sha1,
+            RFC_SHA1_SECRET,
+            1_234_567_890,
+            b"89005924",
+        );
+        assert_rfc6238_vector(
+            StandardTotpAlgorithm::Sha1,
+            RFC_SHA1_SECRET,
+            2_000_000_000,
+            b"69279037",
+        );
+        assert_rfc6238_vector(
+            StandardTotpAlgorithm::Sha1,
+            RFC_SHA1_SECRET,
+            20_000_000_000,
+            b"65353130",
+        );
+    }
+
+    #[test]
+    fn standard_totp_verifier_matches_rfc6238_sha256_vectors() {
+        assert_rfc6238_vector(
+            StandardTotpAlgorithm::Sha256,
+            RFC_SHA256_SECRET,
+            59,
+            b"46119246",
+        );
+        assert_rfc6238_vector(
+            StandardTotpAlgorithm::Sha256,
+            RFC_SHA256_SECRET,
+            1_111_111_109,
+            b"68084774",
+        );
+        assert_rfc6238_vector(
+            StandardTotpAlgorithm::Sha256,
+            RFC_SHA256_SECRET,
+            1_111_111_111,
+            b"67062674",
+        );
+        assert_rfc6238_vector(
+            StandardTotpAlgorithm::Sha256,
+            RFC_SHA256_SECRET,
+            1_234_567_890,
+            b"91819424",
+        );
+        assert_rfc6238_vector(
+            StandardTotpAlgorithm::Sha256,
+            RFC_SHA256_SECRET,
+            2_000_000_000,
+            b"90698825",
+        );
+        assert_rfc6238_vector(
+            StandardTotpAlgorithm::Sha256,
+            RFC_SHA256_SECRET,
+            20_000_000_000,
+            b"77737706",
+        );
+    }
+
+    #[test]
+    fn standard_totp_verifier_matches_rfc6238_sha512_vectors() {
+        assert_rfc6238_vector(
+            StandardTotpAlgorithm::Sha512,
+            RFC_SHA512_SECRET,
+            59,
+            b"90693936",
+        );
+        assert_rfc6238_vector(
+            StandardTotpAlgorithm::Sha512,
+            RFC_SHA512_SECRET,
+            1_111_111_109,
+            b"25091201",
+        );
+        assert_rfc6238_vector(
+            StandardTotpAlgorithm::Sha512,
+            RFC_SHA512_SECRET,
+            1_111_111_111,
+            b"99943326",
+        );
+        assert_rfc6238_vector(
+            StandardTotpAlgorithm::Sha512,
+            RFC_SHA512_SECRET,
+            1_234_567_890,
+            b"93441116",
+        );
+        assert_rfc6238_vector(
+            StandardTotpAlgorithm::Sha512,
+            RFC_SHA512_SECRET,
+            2_000_000_000,
+            b"38618901",
+        );
+        assert_rfc6238_vector(
+            StandardTotpAlgorithm::Sha512,
+            RFC_SHA512_SECRET,
+            20_000_000_000,
+            b"47863826",
+        );
+    }
+
+    #[test]
+    fn standard_totp_verifier_accepts_adjacent_steps_when_configured() {
+        let secret = SecretBytes::try_from(RFC_SHA1_SECRET).expect("secret");
+        let verifier = StandardTotpCodeVerifier::new(
+            StandardTotpCodeVerifierConfig::new(StandardTotpAlgorithm::Sha1, 8, 30, 1)
+                .expect("config"),
+        )
+        .expect("verifier");
+
+        assert!(
+            verifier
+                .verify_totp_code(&secret, b"94287082", UnixSeconds::new(89))
+                .expect("verify")
+        );
+        assert!(
+            !verifier
+                .verify_totp_code(&secret, b"94287082", UnixSeconds::new(90))
+                .expect("verify")
+        );
+    }
+
+    #[test]
+    fn standard_totp_verifier_rejects_malformed_submissions_without_error() {
+        let secret = SecretBytes::try_from(RFC_SHA1_SECRET).expect("secret");
+        let verifier = StandardTotpCodeVerifier::new(
+            StandardTotpCodeVerifierConfig::new(StandardTotpAlgorithm::Sha1, 8, 30, 0)
+                .expect("config"),
+        )
+        .expect("verifier");
+
+        assert!(
+            !verifier
+                .verify_totp_code(&secret, b"9428708", UnixSeconds::new(59))
+                .expect("short code rejects")
+        );
+        assert!(
+            !verifier
+                .verify_totp_code(&secret, b"9428708x", UnixSeconds::new(59))
+                .expect("non-digit code rejects")
+        );
+        assert!(
+            !verifier
+                .verify_totp_code(&secret, b"942870821", UnixSeconds::new(59))
+                .expect("long code rejects")
+        );
+    }
+
+    #[test]
+    fn standard_totp_verifier_rejects_invalid_config() {
+        assert!(
+            StandardTotpCodeVerifierConfig::new(StandardTotpAlgorithm::Sha1, 5, 30, 0).is_err()
+        );
+        assert!(
+            StandardTotpCodeVerifierConfig::new(StandardTotpAlgorithm::Sha1, 9, 30, 0).is_err()
+        );
+        assert!(StandardTotpCodeVerifierConfig::new(StandardTotpAlgorithm::Sha1, 6, 0, 0).is_err());
+        assert!(
+            StandardTotpCodeVerifierConfig::new(StandardTotpAlgorithm::Sha1, 6, 30, 2).is_err()
+        );
+    }
+
+    fn assert_rfc6238_vector(
+        algorithm: StandardTotpAlgorithm,
+        secret: &[u8],
+        now: u64,
+        expected_code: &[u8],
+    ) {
+        let secret = SecretBytes::try_from(secret).expect("secret");
+        let verifier = StandardTotpCodeVerifier::new(
+            StandardTotpCodeVerifierConfig::new(algorithm, 8, 30, 0).expect("config"),
+        )
+        .expect("verifier");
+
+        assert!(
+            verifier
+                .verify_totp_code(&secret, expected_code, UnixSeconds::new(now))
+                .expect("verify")
+        );
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -460,6 +1122,9 @@ pub(crate) enum PostgresTotpMethodError {
     Core(Error),
     Crypto(crate::crypto::Error),
     Database(DbError),
+    PayloadEncode(postcard::Error),
+    PayloadDecode(postcard::Error),
+    Totp(totp_rs::TotpUrlError),
 }
 
 impl fmt::Display for PostgresTotpMethodError {
@@ -468,6 +1133,9 @@ impl fmt::Display for PostgresTotpMethodError {
             Self::Core(error) => write!(f, "{error}"),
             Self::Crypto(error) => write!(f, "{error}"),
             Self::Database(error) => write!(f, "{error}"),
+            Self::PayloadEncode(error) => write!(f, "{error}"),
+            Self::PayloadDecode(error) => write!(f, "{error}"),
+            Self::Totp(error) => write!(f, "{error}"),
         }
     }
 }
@@ -478,6 +1146,9 @@ impl std::error::Error for PostgresTotpMethodError {
             Self::Core(error) => Some(error),
             Self::Crypto(error) => Some(error),
             Self::Database(error) => Some(error),
+            Self::PayloadEncode(error) => Some(error),
+            Self::PayloadDecode(error) => Some(error),
+            Self::Totp(error) => Some(error),
         }
     }
 }
@@ -487,6 +1158,22 @@ enum TotpSecretEnvelope {}
 struct TotpVerifier {
     totp_credential_id: VerifiedProofSourceId,
     encrypted_secret: Vec<u8>,
+    verifier_version: i64,
+}
+
+#[derive(Deserialize, Serialize)]
+struct TotpChallengeBoundBloomState {
+    version: u8,
+    metadata: TotpChallengeBoundBloomMetadata,
+    bloom_bitset: Vec<u8>,
+    bloom_hash_count: u8,
+}
+
+#[derive(Deserialize, Serialize)]
+struct TotpChallengeBoundBloomMetadata {
+    subject_id: Vec<u8>,
+    totp_credential_id: Vec<u8>,
+    verifier_version: i64,
 }
 
 fn totp_secret_context(
@@ -515,6 +1202,77 @@ fn totp_proof_source(totp_credential_id: VerifiedProofSourceId) -> VerifiedProof
 fn push_len_prefixed_bytes(target: &mut Vec<u8>, bytes: &[u8]) {
     target.extend_from_slice(&(bytes.len() as u64).to_le_bytes());
     target.extend_from_slice(bytes);
+}
+
+fn totp_challenge_bound_bloom_context(
+    challenge: &ActiveProofMethodChallengeSeed,
+    metadata: &TotpChallengeBoundBloomMetadata,
+) -> Result<Vec<u8>, PostgresTotpMethodError> {
+    let mut context = Vec::new();
+    push_len_prefixed_bytes(&mut context, TOTP_CHALLENGE_BOUND_BLOOM_CONTEXT);
+    push_len_prefixed_bytes(&mut context, challenge.attempt_id.as_bytes());
+    push_len_prefixed_bytes(&mut context, challenge.challenge_id.as_bytes());
+    push_len_prefixed_bytes(
+        &mut context,
+        &[proof_family_wire_id(challenge.proof.family())],
+    );
+    push_len_prefixed_bytes(
+        &mut context,
+        &[online_guessing_risk_wire_id(
+            challenge.proof.online_guessing_risk(),
+        )],
+    );
+    push_len_prefixed_bytes(&mut context, challenge.proof.method_label().as_bytes());
+    push_len_prefixed_bytes(&mut context, &challenge.issued_at.get().to_be_bytes());
+    push_len_prefixed_bytes(&mut context, &challenge.expires_at.get().to_be_bytes());
+    push_len_prefixed_bytes(&mut context, challenge.nonce.as_bytes());
+    push_len_prefixed_bytes(&mut context, &metadata.subject_id);
+    push_len_prefixed_bytes(&mut context, &metadata.totp_credential_id);
+    push_len_prefixed_bytes(&mut context, &metadata.verifier_version.to_be_bytes());
+    Ok(context)
+}
+
+fn totp_challenge_bound_bloom_context_from_material(
+    challenge: &ActiveProofMethodChallengeMaterial,
+    metadata: &TotpChallengeBoundBloomMetadata,
+) -> Result<Vec<u8>, PostgresTotpMethodError> {
+    totp_challenge_bound_bloom_context(
+        &ActiveProofMethodChallengeSeed {
+            attempt_id: challenge.attempt_id.clone(),
+            challenge_id: challenge.challenge_id.clone(),
+            proof: challenge.proof.clone(),
+            issued_at: challenge.issued_at,
+            expires_at: challenge.expires_at,
+            nonce: challenge.nonce.clone(),
+        },
+        metadata,
+    )
+}
+
+fn encode_totp_payload<T: Serialize>(payload: &T) -> Result<Vec<u8>, PostgresTotpMethodError> {
+    postcard::to_allocvec(payload).map_err(PostgresTotpMethodError::PayloadEncode)
+}
+
+fn decode_totp_payload<T: for<'de> Deserialize<'de>>(
+    payload: &[u8],
+) -> Result<T, PostgresTotpMethodError> {
+    postcard::from_bytes(payload).map_err(PostgresTotpMethodError::PayloadDecode)
+}
+
+fn decode_totp_challenge_bound_bloom_state(
+    payload: &[u8],
+) -> Result<TotpChallengeBoundBloomState, PostgresTotpMethodError> {
+    let state: TotpChallengeBoundBloomState = decode_totp_payload(payload)?;
+    if state.version != 1 {
+        return Err(PostgresTotpMethodError::Core(
+            Error::InvalidActiveProofChallengeCookiePayload,
+        ));
+    }
+    SubjectId::from_bytes(state.metadata.subject_id.clone())
+        .map_err(PostgresTotpMethodError::Core)?;
+    VerifiedProofSourceId::from_bytes(state.metadata.totp_credential_id.clone())
+        .map_err(PostgresTotpMethodError::Core)?;
+    Ok(state)
 }
 
 fn i64_from_unix_seconds_u64(value: UnixSeconds) -> Result<i64, PostgresAuthMethodCommitError> {

@@ -573,6 +573,7 @@ struct AuthActiveProofChallengeCookiePayload {
     nonce: Vec<u8>,
     response_mac: Option<Vec<u8>>,
     method_challenge_state: Option<Vec<u8>>,
+    requires_stateless_fast_fail: bool,
 }
 
 impl AuthActiveProofChallengeCookiePayload {
@@ -596,6 +597,7 @@ impl AuthActiveProofChallengeCookiePayload {
                 .method_challenge_state
                 .as_ref()
                 .map(|state| state.as_bytes().to_vec()),
+            requires_stateless_fast_fail: draft.requires_stateless_fast_fail(),
         }
     }
 }
@@ -625,7 +627,7 @@ impl TryFrom<AuthActiveProofChallengeCookiePayload> for DecodedActiveProofChalle
             ActiveProofChallengeFastFailNonce::from_bytes(&payload.nonce)?,
         )?;
         let draft =
-            ActiveProofChallengeCookieDraft::new_with_optional_response_mac_and_method_state(
+            ActiveProofChallengeCookieDraft::new_with_optional_response_mac_and_method_state_with_fast_fail_requirement(
                 context,
                 payload
                     .response_mac
@@ -636,6 +638,7 @@ impl TryFrom<AuthActiveProofChallengeCookiePayload> for DecodedActiveProofChalle
                     .method_challenge_state
                     .map(ActiveProofMethodChallengeState::try_from_bytes)
                     .transpose()?,
+                payload.requires_stateless_fast_fail,
             )?;
         Ok(Self { draft })
     }

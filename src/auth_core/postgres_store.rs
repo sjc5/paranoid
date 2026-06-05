@@ -6,11 +6,12 @@ use std::sync::Arc;
 
 use crate::crypto::{Keyset, MacOverSecret, SecretBytes};
 use crate::db::{
-    BootstrapConfig, ComponentSchemaVersion, DatabaseOperationKind, DbError, PgIdentifier,
-    PgQualifiedTableName, PgSchemaName, Pool, Tx, pooler_safe_query, pooler_safe_query_as,
-    pooler_safe_query_scalar, record_component_schema_version_in_current_transaction,
-    schema_instance_key_for_parts, unparameterized_simple_query,
-    validate_component_schema_version_in_current_transaction,
+    AuditedSql, BootstrapConfig, ComponentSchema, ComponentSchemaStatement,
+    ComponentSchemaValidationCheck, ComponentSchemaVersion, DatabaseOperationKind, DbError,
+    PgIdentifier, PgQualifiedTableName, PgSchemaName, Pool, Tx, WritePool, WriteTx,
+    migrate_component_schema_in_current_transaction, pooler_safe_query, pooler_safe_query_as,
+    pooler_safe_query_scalar, schema_instance_key_for_parts, unparameterized_simple_query,
+    validate_component_schema_in_current_transaction,
 };
 
 use super::postgres_method_runtime::PostgresAuthMethodRegistry;
@@ -231,10 +232,13 @@ impl PostgresAuthStore {
         self.method_registry.as_deref()
     }
 
-    pub(crate) async fn migrate_schema(&self, pool: &Pool) -> Result<(), PostgresAuthStoreError> {
+    pub(crate) async fn migrate_schema(
+        &self,
+        pool: &WritePool,
+    ) -> Result<(), PostgresAuthStoreError> {
         let mut tx = pool.begin_transaction().await?;
         let result = self.migrate_schema_in_current_transaction(&mut tx).await;
-        finish_auth_store_transaction("auth_core.migrate_schema", tx, result).await
+        finish_auth_store_write_transaction("auth_core.migrate_schema", tx, result).await
     }
 
     pub(crate) async fn validate_schema(&self, pool: &Pool) -> Result<(), PostgresAuthStoreError> {
@@ -245,7 +249,7 @@ impl PostgresAuthStore {
 
     pub(crate) async fn migrate_schema_in_current_transaction(
         &self,
-        tx: &mut Tx<'_>,
+        tx: &mut WriteTx<'_>,
     ) -> Result<(), PostgresAuthStoreError> {
         let table_names = self.config.table_names()?;
         for contract in PostgresAuthCoreSchemaContract::table_contracts() {
@@ -271,19 +275,8 @@ impl PostgresAuthStore {
                     source,
                 })?;
         }
-        let ledger_row = ComponentSchemaVersion {
-            component: AUTH_SCHEMA_COMPONENT,
-            instance_key: &schema_instance_key(&self.config),
-            version: AUTH_SCHEMA_VERSION,
-            fingerprint: AUTH_SCHEMA_FINGERPRINT,
-        };
-        record_component_schema_version_in_current_transaction(
-            tx,
-            &self.config.schema_ledger_table_name()?,
-            ledger_row,
-        )
-        .await?;
-        validate_auth_schema_ledger_in_current_transaction(tx, &self.config).await?;
+        migrate_auth_component_schema_in_current_transaction(tx, &self.config, &table_names)
+            .await?;
         Ok(())
     }
 
@@ -302,7 +295,7 @@ impl PostgresAuthStore {
                     source,
                 })?;
         }
-        validate_auth_schema_ledger_in_current_transaction(tx, &self.config).await?;
+        validate_auth_component_schema_in_current_transaction(tx, &self.config).await?;
         Ok(())
     }
 
@@ -936,6 +929,32 @@ pub(super) async fn finish_auth_store_transaction<T>(
     }
 }
 
+async fn finish_auth_store_write_transaction<T>(
+    operation: &'static str,
+    tx: WriteTx<'_>,
+    result: Result<T, PostgresAuthStoreError>,
+) -> Result<T, PostgresAuthStoreError> {
+    match result {
+        Ok(value) => {
+            tx.commit().await?;
+            Ok(value)
+        }
+        Err(error) => {
+            let rollback_result = tx.rollback().await;
+            if let Err(rollback_error) = rollback_result {
+                return Err(PostgresAuthStoreError::Database(
+                    DbError::DatabaseOperationRollbackFailed {
+                        operation,
+                        operation_error: Box::new(db_error_from_auth_error(error)),
+                        rollback_error: Box::new(rollback_error),
+                    },
+                ));
+            }
+            Err(error)
+        }
+    }
+}
+
 async fn finish_auth_store_validation_transaction<T>(
     operation: &'static str,
     tx: Tx<'_>,
@@ -1021,23 +1040,105 @@ async fn validate_physical_schema_in_current_transaction(
     Ok(())
 }
 
-async fn validate_auth_schema_ledger_in_current_transaction(
+async fn migrate_auth_component_schema_in_current_transaction(
+    tx: &mut WriteTx<'_>,
+    config: &PostgresAuthStoreConfig,
+    table_names: &AuthCoreTableNames,
+) -> Result<(), PostgresAuthStoreError> {
+    let instance_key = schema_instance_key(config);
+    let validation_checks = auth_component_schema_validation_checks(table_names)?;
+    let component_schema = ComponentSchema::new(
+        ComponentSchemaVersion {
+            component: AUTH_SCHEMA_COMPONENT,
+            instance_key: &instance_key,
+            version: AUTH_SCHEMA_VERSION,
+            fingerprint: AUTH_SCHEMA_FINGERPRINT,
+        },
+        &[],
+        &[],
+        validation_checks.as_slice(),
+    )?;
+    migrate_component_schema_in_current_transaction(
+        tx,
+        &config.schema_ledger_table_name()?,
+        &component_schema,
+    )
+    .await?;
+    validate_auth_component_schema_in_current_transaction_with_table_names(tx, config, table_names)
+        .await
+}
+
+async fn validate_auth_component_schema_in_current_transaction(
     tx: &mut Tx<'_>,
     config: &PostgresAuthStoreConfig,
 ) -> Result<(), PostgresAuthStoreError> {
-    let ledger_row = ComponentSchemaVersion {
-        component: AUTH_SCHEMA_COMPONENT,
-        instance_key: &schema_instance_key(config),
-        version: AUTH_SCHEMA_VERSION,
-        fingerprint: AUTH_SCHEMA_FINGERPRINT,
-    };
-    validate_component_schema_version_in_current_transaction(
+    let table_names = config.table_names()?;
+    validate_auth_component_schema_in_current_transaction_with_table_names(tx, config, &table_names)
+        .await
+}
+
+async fn validate_auth_component_schema_in_current_transaction_with_table_names(
+    tx: &mut Tx<'_>,
+    config: &PostgresAuthStoreConfig,
+    table_names: &AuthCoreTableNames,
+) -> Result<(), PostgresAuthStoreError> {
+    let instance_key = schema_instance_key(config);
+    let validation_checks = auth_component_schema_validation_checks(table_names)?;
+    let component_schema = ComponentSchema::new(
+        ComponentSchemaVersion {
+            component: AUTH_SCHEMA_COMPONENT,
+            instance_key: &instance_key,
+            version: AUTH_SCHEMA_VERSION,
+            fingerprint: AUTH_SCHEMA_FINGERPRINT,
+        },
+        &[],
+        &[],
+        validation_checks.as_slice(),
+    )?;
+    validate_component_schema_in_current_transaction(
         tx,
         &config.schema_ledger_table_name()?,
-        ledger_row,
+        &component_schema,
     )
     .await?;
     Ok(())
+}
+
+fn auth_component_schema_validation_checks(
+    table_names: &AuthCoreTableNames,
+) -> Result<Vec<ComponentSchemaValidationCheck<'static>>, PostgresAuthStoreError> {
+    PostgresAuthCoreSchemaContract::table_contracts()
+        .iter()
+        .map(|contract| {
+            let expression =
+                build_component_schema_projection_validation_expression(table_names, contract)?;
+            ComponentSchemaValidationCheck::from_audited_dynamic_boolean_expression(
+                AuditedSql::new(expression),
+            )
+            .map_err(PostgresAuthStoreError::from)
+        })
+        .collect()
+}
+
+fn build_component_schema_projection_validation_expression(
+    table_names: &AuthCoreTableNames,
+    contract: &PostgresAuthCoreTableContract,
+) -> Result<String, PostgresAuthStoreError> {
+    let quoted_columns = contract
+        .columns()
+        .iter()
+        .map(|column| {
+            PgIdentifier::new(column.name())
+                .map(|identifier| identifier.quoted().to_string())
+                .map_err(DbError::from)
+                .map_err(PostgresAuthStoreError::from)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(format!(
+        "NOT EXISTS (SELECT {} FROM {} WHERE false)",
+        quoted_columns.join(", "),
+        table_names.get(contract.table()).quoted()
+    ))
 }
 
 fn build_create_table_statement(

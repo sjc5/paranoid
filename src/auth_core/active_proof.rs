@@ -360,17 +360,29 @@ pub(super) fn issue_active_proof_method_challenge(
     command: IssueActiveProofMethodChallenge,
     loaded: &LoadedState,
 ) -> Result<Transition, Error> {
-    let challenge_cookie_kind = MethodAdapterContract::for_method(command.method.clone())
-        .challenge_cookie()
-        .kind();
-    if command.method.family() == ProofFamily::OutOfBandCode
-        || command.method.semantics().interaction != ProofInteraction::Active
-        || challenge_cookie_kind == MethodChallengeCookieKind::NotUsed
-    {
-        return Err(Error::ProofMethodCannotIssueActiveProofMethodChallenge {
-            family: command.method.family(),
-        });
-    }
+    let _challenge_cookie_kind = match command.challenge_issue_kind {
+        ActiveProofMethodChallengeIssueKind::NormalActiveMethod => {
+            let challenge_cookie_kind = MethodAdapterContract::for_method(command.method.clone())
+                .challenge_cookie()
+                .kind();
+            if command.method.family() == ProofFamily::OutOfBandCode
+                || command.method.semantics().interaction != ProofInteraction::Active
+                || challenge_cookie_kind == MethodChallengeCookieKind::NotUsed
+            {
+                return Err(Error::ProofMethodCannotIssueActiveProofMethodChallenge {
+                    family: command.method.family(),
+                });
+            }
+            challenge_cookie_kind
+        }
+        ActiveProofMethodChallengeIssueKind::ChallengeBoundConfiguredSecretFastFail => {
+            MethodAdapterContract::for_challenge_bound_configured_secret_method(
+                command.method.clone(),
+            )?
+            .challenge_cookie()
+            .kind()
+        }
+    };
     let proof = command.method.verified_proof_summary();
     validate_method_commit_work_for_proof(&proof, &command.method_commit_work)?;
     validate_proof_for_use(&proof, loaded_active_attempt(loaded)?.proof_use)?;
@@ -379,6 +391,14 @@ pub(super) fn issue_active_proof_method_challenge(
     ensure_active_proof_attempt_is_open(command.now, attempt)?;
     ensure_active_proof_attempt_not_subject_revoked(loaded, attempt, attempt.subject_id.as_ref())?;
     ensure_active_proof_not_already_satisfied(attempt, proof.family)?;
+    if command.challenge_issue_kind
+        == ActiveProofMethodChallengeIssueKind::ChallengeBoundConfiguredSecretFastFail
+        && attempt.subject_id.is_none()
+    {
+        return Err(Error::LoadedStateContradiction(
+            "challenge-bound configured-secret proof requires a subject-bound attempt",
+        ));
+    }
 
     let expires_at = min(
         command
@@ -394,9 +414,11 @@ pub(super) fn issue_active_proof_method_challenge(
         command.now,
         expires_at,
     )?;
-    if command.challenge_cookie.requires_stateless_fast_fail() {
+    let requires_stateless_fast_fail = command.challenge_issue_kind
+        == ActiveProofMethodChallengeIssueKind::ChallengeBoundConfiguredSecretFastFail;
+    if command.challenge_cookie.requires_stateless_fast_fail() != requires_stateless_fast_fail {
         return Err(Error::LoadedStateContradiction(
-            "active-proof method challenge cookie unexpectedly requires stateless fast-fail",
+            "active-proof method challenge cookie stateless fast-fail requirement does not match challenge lane",
         ));
     }
     let challenge_record = ActiveProofChallengeRecord {
@@ -408,7 +430,7 @@ pub(super) fn issue_active_proof_method_challenge(
         used_delivery_idempotency_keys: Vec::new(),
         resend_count: 0,
         max_resends: 0,
-        requires_stateless_fast_fail: false,
+        requires_stateless_fast_fail,
         created_at: command.now,
         expires_at,
         closed_at: None,
@@ -595,14 +617,6 @@ pub(super) fn complete_active_proof_challenge(
             "challenge_id for out-of-band proof",
         ));
     }
-    if command.challenge_id.is_some()
-        && proof.family.semantics().subject_role == ProofSubjectRole::RequiresKnownSubject
-    {
-        return Err(Error::LoadedStateContradiction(
-            "known-subject proof family cannot complete through an active-proof challenge",
-        ));
-    }
-
     if let Some(challenge_id) = &command.challenge_id {
         let challenge = loaded_active_challenge(loaded)?;
         validate_active_proof_challenge_id(challenge_id, challenge)?;
@@ -611,6 +625,15 @@ pub(super) fn complete_active_proof_challenge(
         if challenge.proof != proof {
             return Err(Error::LoadedStateContradiction(
                 "active-proof challenge proof differs from satisfied proof",
+            ));
+        }
+        if proof.family.semantics().subject_role == ProofSubjectRole::RequiresKnownSubject
+            && !(proof.family == ProofFamily::SharedSecretOtp
+                && challenge.requires_stateless_fast_fail
+                && command.stateless_fast_fail.was_verified_before_state_load())
+        {
+            return Err(Error::LoadedStateContradiction(
+                "known-subject proof family cannot complete through this active-proof challenge",
             ));
         }
         if challenge.requires_stateless_fast_fail
@@ -702,6 +725,22 @@ pub(super) fn record_active_proof_failure(
     let weak_proof_gate = command.weak_proof_gate.verified_summary();
 
     let mut plan = CommitPlan::default();
+    if let Some(challenge_id) = &command.challenge_id {
+        let challenge = loaded_active_challenge(loaded)?;
+        validate_active_proof_challenge_id(challenge_id, challenge)?;
+        validate_challenge_attempt_pair(attempt, challenge)?;
+        ensure_active_proof_challenge_is_open(command.now, challenge)?;
+        if challenge.proof != proof {
+            return Err(Error::LoadedStateContradiction(
+                "active-proof failure challenge proof differs from failed proof",
+            ));
+        }
+        plan.preconditions
+            .push(Precondition::ActiveProofChallengeStillOpen {
+                challenge_id: challenge.challenge_id.clone(),
+                now: command.now,
+            });
+    }
     push_active_proof_attempt_still_open_precondition(
         &mut plan,
         attempt,
@@ -716,7 +755,7 @@ pub(super) fn record_active_proof_failure(
             session_id: None,
             device_credential_id: None,
             attempt_id: Some(command.attempt_id.clone()),
-            challenge_id: None,
+            challenge_id: command.challenge_id.clone(),
             weak_proof_gate: weak_proof_gate.clone(),
         }));
 

@@ -172,6 +172,8 @@ pub struct IssueActiveProofMethodChallengeRequest {
     pub challenge_id: ActiveProofChallengeId,
     /// Active proof method that owns challenge presentation and verification.
     pub method: ProofMethodDeclaration,
+    /// Method-specific opaque challenge request payload supplied to the method plugin.
+    pub method_challenge_request_payload: Option<ActiveProofMethodChallengeRequestPayload>,
 }
 
 /// Runtime-facing active-proof method challenge issue input for an existing attempt.
@@ -181,6 +183,19 @@ pub struct IssueActiveProofMethodChallengeInput {
     pub now: UnixSeconds,
     /// Active proof method that owns challenge presentation and verification.
     pub method: ProofMethodDeclaration,
+    /// Method-specific opaque challenge request payload supplied to the method plugin.
+    pub method_challenge_request_payload: Option<ActiveProofMethodChallengeRequestPayload>,
+}
+
+/// Runtime-facing challenge-bound known-subject configured-secret challenge issue input.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct IssueChallengeBoundKnownSubjectActiveProofMethodChallengeInput {
+    /// Server time for this transition.
+    pub now: UnixSeconds,
+    /// Known-subject configured-secret method that owns challenge presentation and verification.
+    pub method: ProofMethodDeclaration,
+    /// Method-specific opaque challenge request payload supplied to the method plugin.
+    pub method_challenge_request_payload: Option<ActiveProofMethodChallengeRequestPayload>,
 }
 
 impl IssueActiveProofMethodChallengeInput {
@@ -194,6 +209,7 @@ impl IssueActiveProofMethodChallengeInput {
             attempt_id,
             challenge_id,
             method: self.method,
+            method_challenge_request_payload: self.method_challenge_request_payload,
         }
     }
 }
@@ -207,6 +223,8 @@ pub struct StartAndIssueActiveProofMethodChallengeInput {
     pub proof_use: ProofUse,
     /// Active proof method that owns challenge presentation and verification.
     pub method: ProofMethodDeclaration,
+    /// Method-specific opaque challenge request payload supplied to the method plugin.
+    pub method_challenge_request_payload: Option<ActiveProofMethodChallengeRequestPayload>,
 }
 
 impl StartAndIssueActiveProofMethodChallengeInput {
@@ -220,6 +238,7 @@ impl StartAndIssueActiveProofMethodChallengeInput {
             attempt_id,
             challenge_id,
             method: self.method,
+            method_challenge_request_payload: self.method_challenge_request_payload,
         }
     }
 }
@@ -236,6 +255,7 @@ impl IssueActiveProofMethodChallengeRequest {
             attempt_id: self.attempt_id,
             challenge_id: self.challenge_id,
             method: self.method,
+            challenge_issue_kind: ActiveProofMethodChallengeIssueKind::NormalActiveMethod,
             challenge_cookie,
             method_challenge,
             method_commit_work,
@@ -254,12 +274,23 @@ pub struct IssueActiveProofMethodChallenge {
     pub challenge_id: ActiveProofChallengeId,
     /// Active proof method that owns challenge presentation and verification.
     pub method: ProofMethodDeclaration,
+    /// Runtime-selected method challenge lane.
+    pub(crate) challenge_issue_kind: ActiveProofMethodChallengeIssueKind,
     /// Challenge cookie binding completion to runtime-owned challenge material.
     pub(crate) challenge_cookie: ActiveProofChallengeCookieDraft,
     /// Method-specific public challenge material shown to the client.
     pub(crate) method_challenge: ActiveProofMethodChallengePresentation,
     /// Method/plugin work that must commit atomically with accepting this challenge.
     pub(super) method_commit_work: Vec<MethodCommitWork>,
+}
+
+/// Which active-proof method challenge lane produced a challenge.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum ActiveProofMethodChallengeIssueKind {
+    /// Normal active method challenge, such as message signatures, WebAuthn, or OIDC.
+    NormalActiveMethod,
+    /// Known-subject configured-secret challenge carrying a stateless Bloom rejection gate.
+    ChallengeBoundConfiguredSecretFastFail,
 }
 
 /// Out-of-band challenge issue command after runtime-owned cookie construction.
@@ -371,6 +402,31 @@ impl ActiveProofMethodChallengePresentation {
     }
 
     /// Returns the public challenge bytes.
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+/// Method-specific opaque challenge request payload supplied to a method plugin.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ActiveProofMethodChallengeRequestPayload(Vec<u8>);
+
+impl ActiveProofMethodChallengeRequestPayload {
+    /// Creates a bounded non-empty method challenge request payload.
+    pub fn try_from_bytes(bytes: impl Into<Vec<u8>>) -> Result<Self, Error> {
+        let bytes = bytes.into();
+        if bytes.is_empty() {
+            return Err(Error::EmptyActiveProofMethodChallengeRequestPayload);
+        }
+        validate_auth_bytes_not_too_long(
+            "active-proof method challenge request payload",
+            &bytes,
+            ACTIVE_PROOF_METHOD_CHALLENGE_REQUEST_PAYLOAD_MAX_BYTES,
+        )?;
+        Ok(Self(bytes))
+    }
+
+    /// Returns the opaque request bytes.
     pub fn as_bytes(&self) -> &[u8] {
         &self.0
     }
@@ -697,6 +753,17 @@ pub struct CompleteKnownSubjectActiveProofMethodResponse {
     pub weak_proof_gate_response: Option<WeakProofGateResponse>,
 }
 
+/// User response to a challenge-bound known-subject configured-secret method.
+#[derive(Debug)]
+pub struct CompleteChallengeBoundKnownSubjectActiveProofMethodResponse {
+    /// Server time for this transition.
+    pub now: UnixSeconds,
+    /// Method-specific secret response material.
+    pub secret_response: KnownSubjectActiveProofSecretResponse,
+    /// Submitted weak-proof gate response material, when this method requires one.
+    pub weak_proof_gate_response: Option<WeakProofGateResponse>,
+}
+
 impl CompleteActiveProofMethodResponse {
     pub(crate) fn into_command_with_verified_proof(
         self,
@@ -743,6 +810,8 @@ pub struct RecordActiveProofFailure {
     pub now: UnixSeconds,
     /// Attempt that received the failed proof.
     pub attempt_id: ActiveProofAttemptId,
+    /// Challenge that was authoritatively checked before recording this failure, if any.
+    pub challenge_id: Option<ActiveProofChallengeId>,
     /// Proof method that failed.
     pub method: ProofMethodDeclaration,
     /// Whether the configured weak-proof gate was verified before state was loaded.
@@ -911,6 +980,126 @@ impl WeakProofGateResponse {
     }
 }
 
+/// Runtime-derived binding that ties a weak-proof gate to exact proof material.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct WeakProofGateBinding([u8; 32]);
+
+impl WeakProofGateBinding {
+    pub(crate) fn for_active_method_response(
+        challenge: &ActiveProofMethodChallengeMaterial,
+        response_payload: &ActiveProofMethodResponsePayload,
+    ) -> Result<Self, Error> {
+        let proof_family = [proof_family_wire_id(challenge.proof.family())];
+        let online_guessing_risk = [online_guessing_risk_wire_id(
+            challenge.proof.online_guessing_risk(),
+        )];
+        let issued_at = challenge.issued_at.get().to_be_bytes();
+        let expires_at = challenge.expires_at.get().to_be_bytes();
+        let mut hasher = blake3::Hasher::new();
+        update_weak_proof_gate_binding_hash(
+            &mut hasher,
+            b"paranoid/auth/v1/weak-proof-gate-binding/active-method-response",
+        )?;
+        update_weak_proof_gate_binding_hash(&mut hasher, challenge.attempt_id.as_bytes())?;
+        update_weak_proof_gate_binding_hash(&mut hasher, challenge.challenge_id.as_bytes())?;
+        update_weak_proof_gate_binding_hash(&mut hasher, &proof_family)?;
+        update_weak_proof_gate_binding_hash(&mut hasher, &online_guessing_risk)?;
+        update_weak_proof_gate_binding_hash(
+            &mut hasher,
+            challenge.proof.method_label().as_bytes(),
+        )?;
+        update_weak_proof_gate_binding_hash(&mut hasher, &issued_at)?;
+        update_weak_proof_gate_binding_hash(&mut hasher, &expires_at)?;
+        update_weak_proof_gate_binding_hash(&mut hasher, challenge.nonce.as_bytes())?;
+        update_weak_proof_gate_binding_hash(
+            &mut hasher,
+            challenge.method_challenge_state.as_bytes(),
+        )?;
+        update_weak_proof_gate_binding_hash(&mut hasher, response_payload.as_bytes())?;
+        Ok(Self(*hasher.finalize().as_bytes()))
+    }
+
+    pub(crate) fn for_challenge_bound_known_subject_secret_response(
+        challenge: &ActiveProofMethodChallengeMaterial,
+        response: &KnownSubjectActiveProofSecretResponse,
+    ) -> Result<Self, Error> {
+        let proof_family = [proof_family_wire_id(challenge.proof.family())];
+        let online_guessing_risk = [online_guessing_risk_wire_id(
+            challenge.proof.online_guessing_risk(),
+        )];
+        let issued_at = challenge.issued_at.get().to_be_bytes();
+        let expires_at = challenge.expires_at.get().to_be_bytes();
+        let mut hasher = blake3::Hasher::new();
+        update_weak_proof_gate_binding_hash(
+            &mut hasher,
+            b"paranoid/auth/v1/weak-proof-gate-binding/challenge-bound-known-subject-secret-response",
+        )?;
+        update_weak_proof_gate_binding_hash(&mut hasher, challenge.attempt_id.as_bytes())?;
+        update_weak_proof_gate_binding_hash(&mut hasher, challenge.challenge_id.as_bytes())?;
+        update_weak_proof_gate_binding_hash(&mut hasher, &proof_family)?;
+        update_weak_proof_gate_binding_hash(&mut hasher, &online_guessing_risk)?;
+        update_weak_proof_gate_binding_hash(
+            &mut hasher,
+            challenge.proof.method_label().as_bytes(),
+        )?;
+        update_weak_proof_gate_binding_hash(&mut hasher, &issued_at)?;
+        update_weak_proof_gate_binding_hash(&mut hasher, &expires_at)?;
+        update_weak_proof_gate_binding_hash(&mut hasher, challenge.nonce.as_bytes())?;
+        update_weak_proof_gate_binding_hash(
+            &mut hasher,
+            challenge.method_challenge_state.as_bytes(),
+        )?;
+        update_weak_proof_gate_binding_hash(&mut hasher, response.expose_secret())?;
+        Ok(Self(*hasher.finalize().as_bytes()))
+    }
+
+    pub(crate) fn for_known_subject_secret_response(
+        continuation: &ActiveProofContinuationCookieDraft,
+        proof: &ProofSummary,
+        response: &KnownSubjectActiveProofSecretResponse,
+    ) -> Result<Self, Error> {
+        let proof_family = [proof_family_wire_id(proof.family())];
+        let online_guessing_risk = [online_guessing_risk_wire_id(proof.online_guessing_risk())];
+        let proof_use = [proof_use_wire_id(continuation.proof_use)];
+        let attempt_fast_fail_until = continuation.attempt_fast_fail_until.get().to_be_bytes();
+        let mut hasher = blake3::Hasher::new();
+        update_weak_proof_gate_binding_hash(
+            &mut hasher,
+            b"paranoid/auth/v1/weak-proof-gate-binding/known-subject-secret-response",
+        )?;
+        update_weak_proof_gate_binding_hash(&mut hasher, continuation.attempt_id.as_bytes())?;
+        update_weak_proof_gate_binding_hash(&mut hasher, &proof_use)?;
+        match continuation.subject_id.as_ref() {
+            Some(subject_id) => {
+                update_weak_proof_gate_binding_hash(&mut hasher, &[1])?;
+                update_weak_proof_gate_binding_hash(&mut hasher, subject_id.as_bytes())?;
+            }
+            None => update_weak_proof_gate_binding_hash(&mut hasher, &[0])?,
+        }
+        update_weak_proof_gate_binding_hash(&mut hasher, &attempt_fast_fail_until)?;
+        update_weak_proof_gate_binding_hash(&mut hasher, &proof_family)?;
+        update_weak_proof_gate_binding_hash(&mut hasher, &online_guessing_risk)?;
+        update_weak_proof_gate_binding_hash(&mut hasher, proof.method_label().as_bytes())?;
+        update_weak_proof_gate_binding_hash(&mut hasher, response.expose_secret())?;
+        Ok(Self(*hasher.finalize().as_bytes()))
+    }
+
+    /// Returns the binding digest bytes.
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+fn update_weak_proof_gate_binding_hash(
+    hasher: &mut blake3::Hasher,
+    part: &[u8],
+) -> Result<(), Error> {
+    let len = u64::try_from(part.len()).map_err(|_| Error::TimeOverflow)?;
+    hasher.update(&len.to_be_bytes());
+    hasher.update(part);
+    Ok(())
+}
+
 impl std::fmt::Debug for WeakProofGateResponse {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("WeakProofGateResponse")
@@ -1012,6 +1201,7 @@ pub struct WeakProofGateVerificationRequest<'a> {
     now: UnixSeconds,
     proof: &'a ProofSummary,
     response: &'a WeakProofGateResponse,
+    binding: Option<&'a WeakProofGateBinding>,
 }
 
 impl<'a> WeakProofGateVerificationRequest<'a> {
@@ -1024,6 +1214,21 @@ impl<'a> WeakProofGateVerificationRequest<'a> {
             now,
             proof,
             response,
+            binding: None,
+        }
+    }
+
+    pub(crate) fn new_with_binding(
+        now: UnixSeconds,
+        proof: &'a ProofSummary,
+        response: &'a WeakProofGateResponse,
+        binding: Option<&'a WeakProofGateBinding>,
+    ) -> Self {
+        Self {
+            now,
+            proof,
+            response,
+            binding,
         }
     }
 
@@ -1040,6 +1245,11 @@ impl<'a> WeakProofGateVerificationRequest<'a> {
     /// Returns the submitted gate response.
     pub const fn response(&self) -> &WeakProofGateResponse {
         self.response
+    }
+
+    /// Returns the exact proof-material binding required by this verification, if any.
+    pub const fn binding(&self) -> Option<&WeakProofGateBinding> {
+        self.binding
     }
 }
 

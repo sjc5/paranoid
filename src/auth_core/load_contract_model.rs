@@ -293,6 +293,11 @@ impl CommandLoadedStateContract {
                     presented,
                     &command.attempt_id,
                 );
+                if let Some(challenge_id) = &command.challenge_id {
+                    contract.push(LoadedStateRequirement::ActiveProofChallenge {
+                        challenge_id: challenge_id.clone(),
+                    });
+                }
             }
             Command::CompleteFullAuthentication(command) => {
                 contract.push_active_proof_attempt_requirements(&command.attempt_id);

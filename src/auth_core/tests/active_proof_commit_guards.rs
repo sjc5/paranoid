@@ -75,6 +75,7 @@ fn active_proof_attempt_commit_guard_rejects_concurrent_weak_failure_update() {
         Command::RecordActiveProofFailure(RecordActiveProofFailure {
             now: at(40),
             attempt_id: id("attempt"),
+            challenge_id: None,
             method: proof_method(ProofFamily::SharedSecretOtp),
             weak_proof_gate: verified_proof_of_work_gate(),
         }),
@@ -86,6 +87,7 @@ fn active_proof_attempt_commit_guard_rejects_concurrent_weak_failure_update() {
         Command::RecordActiveProofFailure(RecordActiveProofFailure {
             now: at(40),
             attempt_id: id("attempt"),
+            challenge_id: None,
             method: proof_method(ProofFamily::SharedSecretOtp),
             weak_proof_gate: verified_proof_of_work_gate(),
         }),

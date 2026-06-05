@@ -171,6 +171,87 @@ fn schema_ledger_migration_sql_uses_c_collation_and_no_session_level_postgres_fe
 }
 
 #[test]
+fn component_schema_public_constructors_reject_missing_physical_validation() {
+    let version = ComponentSchemaVersion {
+        component: "test_component",
+        instance_key: "state=\"app\".\"component_state\"",
+        version: 1,
+        fingerprint: "schema-v1",
+    };
+
+    let err = ComponentSchema::new(version, &[], &[], &[]).expect_err("missing validation");
+
+    assert!(
+        err.to_string().contains("validation checks"),
+        "error = {err:?}"
+    );
+}
+
+#[test]
+fn component_schema_statement_rejects_empty_and_null_sql() {
+    let empty = ComponentSchemaStatement::from_static_sql(" \n\t").expect_err("empty SQL");
+    assert!(
+        empty.to_string().contains("must not be empty"),
+        "error = {empty:?}"
+    );
+
+    let null_byte = ComponentSchemaStatement::from_audited_dynamic_sql(AuditedSql::new(
+        "SELECT '\0'".to_owned(),
+    ))
+    .expect_err("null byte SQL");
+    assert!(
+        null_byte.to_string().contains("null bytes"),
+        "error = {null_byte:?}"
+    );
+}
+
+#[test]
+fn component_schema_validation_check_rejects_empty_null_and_multi_statement_sql() {
+    let empty = ComponentSchemaValidationCheck::from_static_boolean_expression(" \n\t")
+        .expect_err("empty validation check");
+    assert!(
+        empty.to_string().contains("must not be empty"),
+        "error = {empty:?}"
+    );
+
+    let null_byte = ComponentSchemaValidationCheck::from_audited_dynamic_boolean_expression(
+        AuditedSql::new("true /* \0 */".to_owned()),
+    )
+    .expect_err("null byte validation check");
+    assert!(
+        null_byte.to_string().contains("null bytes"),
+        "error = {null_byte:?}"
+    );
+
+    let multi_statement = ComponentSchemaValidationCheck::from_audited_dynamic_boolean_expression(
+        AuditedSql::new("true; SELECT true".to_owned()),
+    )
+    .expect_err("multi-statement validation check");
+    assert!(
+        multi_statement.to_string().contains("semicolons"),
+        "error = {multi_statement:?}"
+    );
+}
+
+#[test]
+fn component_schema_instance_key_includes_validated_labels_and_qualified_tables() {
+    let state_label = PgIdentifier::new("state").expect("state label");
+    let audit_label = PgIdentifier::new("audit").expect("audit label");
+    let state_table = PgQualifiedTableName::with_schema("app_auth", "state").expect("state table");
+    let audit_table = PgQualifiedTableName::with_schema("app_audit", "state").expect("audit table");
+
+    let instance_key = component_schema_instance_key_for_tables([
+        (&state_label, &state_table),
+        (&audit_label, &audit_table),
+    ]);
+
+    assert_eq!(
+        instance_key,
+        "state=\"app_auth\".\"state\";audit=\"app_audit\".\"state\""
+    );
+}
+
+#[test]
 fn pg_sql_state_maps_known_codes_and_preserves_unknown_codes() {
     assert_eq!(
         PgSqlState::from_code(SQLSTATE_UNIQUE_VIOLATION),
@@ -277,11 +358,13 @@ fn pooler_safe_connect_options_override_url_statement_cache_capacity() {
 #[test]
 fn portable_query_constructors_disable_persistent_prepared_statements() {
     let untyped_query = portable_query("SELECT 1");
+    let audited_untyped_query = portable_query(AuditedSql::new("SELECT 1".to_owned()));
     let row_query = portable_query_as::<(i64,)>("SELECT 1");
     let scalar_query = portable_query_scalar::<i64>("SELECT 1");
     let unparameterized_query = unparameterized_simple_query("SELECT 1");
 
     assert!(!Execute::persistent(&untyped_query));
+    assert!(!Execute::persistent(&audited_untyped_query));
     assert!(!Execute::persistent(&row_query));
     assert!(!Execute::persistent(&scalar_query));
     assert!(!<sqlx::RawSql as Execute<'_, sqlx::Postgres>>::persistent(
@@ -384,17 +467,25 @@ fn pool_config_debug_does_not_expose_database_url_secret() {
 }
 
 #[tokio::test]
-async fn component_schema_migration_chain_executes_real_physical_upgrade() {
+async fn public_component_schema_migration_supports_qualified_tables_and_ordered_upgrade() {
     let database_url = postgres_test_support::standard_test_database_url();
     let pool = connect_write_pool_for_db_test(
         &database_url,
         "paranoid_component_schema_migration_upgrade_test",
     )
     .await;
-    let ledger_table = unique_db_test_table_name("__paranoid_test_upgrade_ledger");
-    let component_table = unique_db_test_table_name("__paranoid_test_upgrade_component");
+    let schema_name = unique_db_test_schema_name("__pcsm");
+    let ledger_table = PgQualifiedTableName::new(
+        Some(schema_name.clone()),
+        PgIdentifier::new("schema_ledger").expect("ledger table identifier"),
+    );
+    let component_table = PgQualifiedTableName::new(
+        Some(schema_name.clone()),
+        PgIdentifier::new("component_state").expect("component table identifier"),
+    );
     let component = "test_component_upgrade";
-    let instance_key = format!("table={}", component_table.quoted());
+    let state_label = PgIdentifier::new("state").expect("schema instance key label");
+    let instance_key = component_schema_instance_key_for_tables([(&state_label, &component_table)]);
     let v1 = ComponentSchemaVersion {
         component,
         instance_key: instance_key.as_str(),
@@ -406,96 +497,90 @@ async fn component_schema_migration_chain_executes_real_physical_upgrade() {
         fingerprint: "test-v2",
         ..v1
     };
-    let migration_steps = [ComponentSchemaMigrationStep::new(
-        schema_migration::ComponentSchemaMigrationTarget::new(1, "test-v1"),
-        schema_migration::ComponentSchemaMigrationTarget::new(2, "test-v2"),
-    )];
+    let v1_fresh_install = [
+        ComponentSchemaStatement::from_audited_dynamic_sql(AuditedSql::new(format!(
+            "CREATE TABLE {} (id BYTEA PRIMARY KEY)",
+            component_table.quoted()
+        )))
+        .expect("v1 fresh install statement"),
+    ];
+    let v1_validation = [
+        ComponentSchemaValidationCheck::from_audited_dynamic_boolean_expression(AuditedSql::new(
+            format!(
+                "NOT EXISTS (SELECT id FROM {} WHERE false)",
+                component_table.quoted()
+            ),
+        ))
+        .expect("v1 validation check"),
+    ];
+    let v1_schema =
+        ComponentSchema::new(v1, &v1_fresh_install, &[], &v1_validation).expect("v1 schema");
 
-    postgres_test_support::drop_test_table(pool.sqlx_pool(), &component_table).await;
-    postgres_test_support::drop_test_table(pool.sqlx_pool(), &ledger_table).await;
+    let v2_upgrade_statements =
+        [
+            ComponentSchemaStatement::from_audited_dynamic_sql(AuditedSql::new(format!(
+                "ALTER TABLE {} ADD COLUMN payload BYTEA NOT NULL DEFAULT ''::bytea",
+                component_table.quoted()
+            )))
+            .expect("v2 migration statement"),
+        ];
+    let v2_migrations = [ComponentSchemaMigration::new(
+        ComponentSchemaMigrationStep::new(
+            ComponentSchemaMigrationTarget::new(1, "test-v1"),
+            ComponentSchemaMigrationTarget::new(2, "test-v2"),
+        ),
+        &v2_upgrade_statements,
+    )];
+    let v2_validation = [
+        ComponentSchemaValidationCheck::from_audited_dynamic_boolean_expression(AuditedSql::new(
+            format!(
+                "NOT EXISTS (SELECT id, payload FROM {} WHERE false)",
+                component_table.quoted()
+            ),
+        ))
+        .expect("v2 validation check"),
+    ];
+    let v2_schema =
+        ComponentSchema::new(v2, &[], &v2_migrations, &v2_validation).expect("v2 schema");
+
+    drop_test_schema(pool.sqlx_pool(), &schema_name).await;
+    create_test_schema(pool.sqlx_pool(), &schema_name).await;
 
     let mut install_tx = pool
         .begin_transaction()
         .await
         .expect("begin install transaction");
     assert_eq!(
-        plan_component_schema_migration_in_current_transaction(
-            &mut install_tx,
-            &ledger_table,
-            v1,
-            &[]
-        )
-        .await
-        .expect("plan fresh install"),
-        ComponentSchemaMigrationPlan::FreshInstall
+        migrate_component_schema_in_current_transaction(&mut install_tx, &ledger_table, &v1_schema)
+            .await
+            .expect("migrate v1 schema"),
+        ComponentSchemaMigrationOutcome::FreshInstall { version: 1 }
     );
-    unparameterized_simple_query(sqlx::AssertSqlSafe(format!(
-        "CREATE TABLE {} (id BYTEA PRIMARY KEY)",
-        component_table.quoted()
-    )))
-    .execute(install_tx.sqlx_transaction().as_mut())
-    .await
-    .expect("create v1 component table");
-    record_component_schema_migration_completion_in_current_transaction(
-        &mut install_tx,
-        &ledger_table,
-        v1,
-        None,
-    )
-    .await
-    .expect("record v1 completion");
     install_tx.commit().await.expect("commit v1 install");
 
     let mut upgrade_tx = pool
         .begin_transaction()
         .await
         .expect("begin upgrade transaction");
-    let prior_recorded_version = match plan_component_schema_migration_in_current_transaction(
-        &mut upgrade_tx,
-        &ledger_table,
-        v2,
-        &migration_steps,
-    )
-    .await
-    .expect("plan upgrade")
-    {
-        ComponentSchemaMigrationPlan::Upgrade { from, steps } => {
-            assert_eq!(from.version, 1);
-            assert_eq!(from.fingerprint, "test-v1");
-            assert_eq!(steps, migration_steps);
-            from
-        }
-        other => panic!("expected upgrade plan, got {other:?}"),
-    };
-
-    unparameterized_simple_query(sqlx::AssertSqlSafe(format!(
-        "ALTER TABLE {} ADD COLUMN payload BYTEA NOT NULL DEFAULT ''::bytea",
-        component_table.quoted()
-    )))
-    .execute(upgrade_tx.sqlx_transaction().as_mut())
-    .await
-    .expect("execute physical v1 to v2 migration");
-    assert!(
-        fetch_column_exists_in_current_transaction(&mut upgrade_tx, &component_table, "payload")
+    assert_eq!(
+        migrate_component_schema_in_current_transaction(&mut upgrade_tx, &ledger_table, &v2_schema)
             .await
+            .expect("migrate v2 schema"),
+        ComponentSchemaMigrationOutcome::Upgraded {
+            from_version: 1,
+            to_version: 2,
+            steps_applied: 1,
+        }
     );
-    record_component_schema_migration_completion_in_current_transaction(
-        &mut upgrade_tx,
-        &ledger_table,
-        v2,
-        Some(&prior_recorded_version),
-    )
-    .await
-    .expect("record v2 completion");
     upgrade_tx.commit().await.expect("commit v2 upgrade");
 
     let mut validation_tx = pool
         .begin_transaction()
         .await
         .expect("begin validation transaction");
-    validate_component_schema_version_in_current_transaction(&mut validation_tx, &ledger_table, v2)
+    validate_component_schema_in_current_transaction(&mut validation_tx, &ledger_table, &v2_schema)
         .await
-        .expect("validate v2 ledger row");
+        .expect("validate v2 schema");
     assert!(
         fetch_column_exists_in_current_transaction(&mut validation_tx, &component_table, "payload")
             .await
@@ -504,6 +589,158 @@ async fn component_schema_migration_chain_executes_real_physical_upgrade() {
         .rollback()
         .await
         .expect("rollback validation transaction");
+
+    drop_test_schema(pool.sqlx_pool(), &schema_name).await;
+}
+
+#[tokio::test]
+async fn public_component_schema_validation_false_rejects_before_recording_component_version() {
+    let database_url = postgres_test_support::standard_test_database_url();
+    let pool = connect_write_pool_for_db_test(
+        &database_url,
+        "paranoid_component_schema_validation_false_test",
+    )
+    .await;
+    let schema_name = unique_db_test_schema_name("__pcsvf");
+    let ledger_table = PgQualifiedTableName::new(
+        Some(schema_name.clone()),
+        PgIdentifier::new("schema_ledger").expect("ledger table identifier"),
+    );
+    let component_table = PgQualifiedTableName::new(
+        Some(schema_name.clone()),
+        PgIdentifier::new("component_state").expect("component table identifier"),
+    );
+    let component = "test_component_validation_false";
+    let state_label = PgIdentifier::new("state").expect("schema instance key label");
+    let instance_key = component_schema_instance_key_for_tables([(&state_label, &component_table)]);
+    let version = ComponentSchemaVersion {
+        component,
+        instance_key: instance_key.as_str(),
+        version: 1,
+        fingerprint: "test-v1",
+    };
+    let fresh_install = [
+        ComponentSchemaStatement::from_audited_dynamic_sql(AuditedSql::new(format!(
+            "CREATE TABLE {} (id BYTEA PRIMARY KEY)",
+            component_table.quoted()
+        )))
+        .expect("fresh install statement"),
+    ];
+    let false_validation = [
+        ComponentSchemaValidationCheck::from_static_boolean_expression("false")
+            .expect("false validation check"),
+    ];
+    let false_schema =
+        ComponentSchema::new(version, &fresh_install, &[], &false_validation).expect("schema");
+    let null_validation = [
+        ComponentSchemaValidationCheck::from_static_boolean_expression("NULL::boolean")
+            .expect("null validation check"),
+    ];
+    let null_schema =
+        ComponentSchema::new(version, &fresh_install, &[], &null_validation).expect("schema");
+    let true_validation = [
+        ComponentSchemaValidationCheck::from_audited_dynamic_boolean_expression(AuditedSql::new(
+            format!(
+                "NOT EXISTS (SELECT id FROM {} WHERE false)",
+                component_table.quoted()
+            ),
+        ))
+        .expect("true validation check"),
+    ];
+    let true_schema =
+        ComponentSchema::new(version, &fresh_install, &[], &true_validation).expect("schema");
+
+    drop_test_schema(pool.sqlx_pool(), &schema_name).await;
+    create_test_schema(pool.sqlx_pool(), &schema_name).await;
+
+    let mut false_tx = pool
+        .begin_transaction()
+        .await
+        .expect("begin validation false transaction");
+    let error = migrate_component_schema_in_current_transaction(
+        &mut false_tx,
+        &ledger_table,
+        &false_schema,
+    )
+    .await
+    .expect_err("false validation check must fail migration");
+    assert!(
+        error.to_string().contains("returned false"),
+        "error = {error:?}"
+    );
+    let error = validate_component_schema_in_current_transaction(
+        &mut false_tx,
+        &ledger_table,
+        &true_schema,
+    )
+    .await
+    .expect_err("failed validation must not record component version");
+    assert!(
+        error.to_string().contains("was not found"),
+        "error = {error:?}"
+    );
+    false_tx
+        .rollback()
+        .await
+        .expect("rollback false validation transaction");
+
+    let mut null_tx = pool
+        .begin_transaction()
+        .await
+        .expect("begin validation null transaction");
+    let error =
+        migrate_component_schema_in_current_transaction(&mut null_tx, &ledger_table, &null_schema)
+            .await
+            .expect_err("null validation check must fail migration");
+    assert!(
+        error.to_string().contains("returned null"),
+        "error = {error:?}"
+    );
+    let error =
+        validate_component_schema_in_current_transaction(&mut null_tx, &ledger_table, &true_schema)
+            .await
+            .expect_err("failed null validation must not record component version");
+    assert!(
+        error.to_string().contains("was not found"),
+        "error = {error:?}"
+    );
+    null_tx
+        .rollback()
+        .await
+        .expect("rollback null validation transaction");
+
+    let mut tx = pool
+        .begin_transaction()
+        .await
+        .expect("begin successful validation transaction");
+    assert_eq!(
+        migrate_component_schema_in_current_transaction(&mut tx, &ledger_table, &true_schema)
+            .await
+            .expect("true validation check should still fresh install"),
+        ComponentSchemaMigrationOutcome::FreshInstall { version: 1 }
+    );
+    tx.commit().await.expect("commit true migration");
+
+    let mut validation_tx = pool
+        .begin_transaction()
+        .await
+        .expect("begin already-current validation transaction");
+    assert_eq!(
+        migrate_component_schema_in_current_transaction(
+            &mut validation_tx,
+            &ledger_table,
+            &true_schema,
+        )
+        .await
+        .expect("already-current validation should pass"),
+        ComponentSchemaMigrationOutcome::AlreadyCurrent { version: 1 }
+    );
+    validation_tx
+        .rollback()
+        .await
+        .expect("rollback validation transaction");
+
+    drop_test_schema(pool.sqlx_pool(), &schema_name).await;
 }
 
 fn test_pool_config(database_url: &str) -> PoolConfig {
@@ -519,12 +756,32 @@ async fn connect_write_pool_for_db_test(database_url: &str, application_name: &s
         .expect("connect write pool")
 }
 
-fn unique_db_test_table_name(prefix: &str) -> PgQualifiedTableName {
+fn unique_db_test_schema_name(prefix: &str) -> PgSchemaName {
     let suffix = UniqueTestId::new()
         .expect("new unique test id")
         .to_text()
         .replace('-', "_");
-    PgQualifiedTableName::unqualified(format!("{prefix}_{suffix}")).expect("test table name")
+    PgSchemaName::from_identifier_text(format!("{prefix}_{suffix}")).expect("test schema name")
+}
+
+async fn create_test_schema(pool: &sqlx::PgPool, schema_name: &PgSchemaName) {
+    unparameterized_simple_query(AuditedSql::new(format!(
+        "CREATE SCHEMA {}",
+        schema_name.identifier().quoted()
+    )))
+    .execute(pool)
+    .await
+    .expect("create test schema");
+}
+
+async fn drop_test_schema(pool: &sqlx::PgPool, schema_name: &PgSchemaName) {
+    unparameterized_simple_query(AuditedSql::new(format!(
+        "DROP SCHEMA IF EXISTS {} CASCADE",
+        schema_name.identifier().quoted()
+    )))
+    .execute(pool)
+    .await
+    .expect("drop test schema");
 }
 
 async fn fetch_column_exists_in_current_transaction(

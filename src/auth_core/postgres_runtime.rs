@@ -195,115 +195,8 @@ impl PostgresAuthWebRuntime {
         headers: &HeaderMap,
         command: Command,
     ) -> Result<AuthWebRuntimeExecution, AuthPostgresWebRuntimeExecutionError> {
-        if matches!(command, Command::ResolveRequest(_)) {
-            return Err(AuthPostgresWebRuntimeExecutionError::core(
-                Error::RequestResolutionRequiresRuntimeFreshIdGeneration,
-            ));
-        }
-        if matches!(command, Command::StartActiveProofAttempt(_)) {
-            return Err(AuthPostgresWebRuntimeExecutionError::core(
-                Error::ActiveProofAttemptStartRequiresRuntimeFreshIdGeneration,
-            ));
-        }
-        if matches!(
-            command,
-            Command::StartActiveProofAttemptForCurrentSession(_)
-                | Command::StartActiveProofAttemptForCurrentTrustedDevice(_)
-        ) {
-            return Err(AuthPostgresWebRuntimeExecutionError::core(
-                Error::ActiveProofAttemptStartRequiresRuntimeFreshIdGeneration,
-            ));
-        }
-        if matches!(command, Command::CompleteFullAuthentication(_)) {
-            return Err(AuthPostgresWebRuntimeExecutionError::core(
-                Error::FullAuthenticationCompletionRequiresRuntimeFreshIdGeneration,
-            ));
-        }
-        if matches!(
-            command,
-            Command::CompleteTrustedDeviceRevivalWithActiveProof(_)
-        ) {
-            return Err(AuthPostgresWebRuntimeExecutionError::core(
-                Error::TrustedDeviceRevivalCompletionRequiresRuntimeFreshIdGeneration,
-            ));
-        }
-        if matches!(command, Command::CompleteStepUp(_)) {
-            return Err(AuthPostgresWebRuntimeExecutionError::core(
-                Error::StepUpCompletionRequiresRuntimeAttemptContinuation,
-            ));
-        }
-        if matches!(command, Command::IssueOutOfBandChallenge(_)) {
-            return Err(AuthPostgresWebRuntimeExecutionError::core(
-                Error::OutOfBandChallengeIssueRequiresRuntimeCookieConstruction,
-            ));
-        }
-        if matches!(command, Command::IssueActiveProofMethodChallenge(_)) {
-            return Err(AuthPostgresWebRuntimeExecutionError::core(
-                Error::LoadedStateContradiction(
-                    "active-proof method challenge issue requires runtime nonce construction",
-                ),
-            ));
-        }
-        if matches!(command, Command::ResendOutOfBandChallenge(_)) {
-            return Err(AuthPostgresWebRuntimeExecutionError::core(
-                Error::OutOfBandChallengeResendRequiresRuntimeMethodDispatch,
-            ));
-        }
-        if matches!(command, Command::CompleteActiveProofChallenge(_)) {
-            return Err(AuthPostgresWebRuntimeExecutionError::core(
-                Error::ActiveProofCompletionRequiresRuntimeMethodDispatch,
-            ));
-        }
-        if matches!(command, Command::RecordActiveProofFailure(_)) {
-            return Err(AuthPostgresWebRuntimeExecutionError::core(
-                Error::ActiveProofFailureRequiresRuntimeMethodDispatch,
-            ));
-        }
-        if matches!(command, Command::PlanCredentialReset(_)) {
-            return Err(AuthPostgresWebRuntimeExecutionError::core(
-                Error::CredentialResetPlanningRequiresRuntimeLifecycleDecision,
-            ));
-        }
-        if matches!(command, Command::ExecuteCredentialReset(_)) {
-            return Err(AuthPostgresWebRuntimeExecutionError::core(
-                Error::CredentialResetExecutionRequiresRuntimeMethodDispatch,
-            ));
-        }
-        if matches!(command, Command::CancelPendingCredentialReset(_)) {
-            return Err(AuthPostgresWebRuntimeExecutionError::core(
-                Error::CredentialResetCancellationRequiresRuntimeLifecycleDecision,
-            ));
-        }
-        if matches!(
-            command,
-            Command::ExecuteNonResetPendingCredentialLifecycleAction(_)
-        ) {
-            return Err(AuthPostgresWebRuntimeExecutionError::core(
-                Error::CredentialLifecycleExecutionRequiresRuntimeMethodDispatch,
-            ));
-        }
-        if matches!(
-            command,
-            Command::CancelNonResetPendingCredentialLifecycleAction(_)
-        ) {
-            return Err(AuthPostgresWebRuntimeExecutionError::core(
-                Error::CredentialLifecycleCancellationRequiresRuntimeLifecycleDecision,
-            ));
-        }
-        if matches!(command, Command::ScheduleSubjectAuthStateDeletion(_)) {
-            return Err(AuthPostgresWebRuntimeExecutionError::core(
-                Error::SubjectAuthStateDeletionSchedulingRequiresRuntimeLifecycleDecision,
-            ));
-        }
-        if matches!(command, Command::ExecutePendingSubjectAuthStateDeletion(_)) {
-            return Err(AuthPostgresWebRuntimeExecutionError::core(
-                Error::SubjectAuthStateDeletionExecutionRequiresRuntimeLifecycleDecision,
-            ));
-        }
-        if matches!(command, Command::CancelPendingSubjectAuthStateDeletion(_)) {
-            return Err(AuthPostgresWebRuntimeExecutionError::core(
-                Error::SubjectAuthStateDeletionCancellationRequiresRuntimeLifecycleDecision,
-            ));
+        if let Some(error) = command.direct_web_runtime_rejection() {
+            return Err(AuthPostgresWebRuntimeExecutionError::core(error));
         }
         let decoded = self
             .runtime
@@ -574,7 +467,47 @@ impl PostgresAuthWebRuntime {
         let request = request.into_request(continuation.attempt_id.clone(), generate_auth_id()?);
         let tx = self.begin_runtime_transaction().await?;
         self.execute_active_proof_method_challenge_issue_from_decoded_in_current_transaction(
-            tx, decoded, request,
+            tx,
+            decoded,
+            request,
+            ActiveProofMethodChallengeIssueKind::NormalActiveMethod,
+        )
+        .await
+    }
+
+    pub(crate) async fn execute_challenge_bound_known_subject_active_proof_method_challenge_issue_from_headers(
+        &self,
+        headers: &HeaderMap,
+        request: IssueChallengeBoundKnownSubjectActiveProofMethodChallengeInput,
+    ) -> Result<AuthWebRuntimeExecution, AuthPostgresWebRuntimeExecutionError> {
+        super::active_proof_support::validate_challenge_bound_known_subject_active_proof_method(
+            &request.method,
+        )
+        .map_err(AuthPostgresWebRuntimeExecutionError::core)?;
+        let decoded = self
+            .runtime
+            .web_transport()
+            .decode_presented_cookies_from_headers(headers)
+            .map_err(AuthPostgresWebRuntimeExecutionError::web)?;
+        let continuation =
+            super::active_proof_support::require_active_proof_continuation_before_state_load(
+                decoded.presented_cookies(),
+                request.now,
+            )
+            .map_err(AuthPostgresWebRuntimeExecutionError::core)?;
+        let request = IssueActiveProofMethodChallengeRequest {
+            now: request.now,
+            attempt_id: continuation.attempt_id.clone(),
+            challenge_id: generate_auth_id()?,
+            method: request.method,
+            method_challenge_request_payload: request.method_challenge_request_payload,
+        };
+        let tx = self.begin_runtime_transaction().await?;
+        self.execute_active_proof_method_challenge_issue_from_decoded_in_current_transaction(
+            tx,
+            decoded,
+            request,
+            ActiveProofMethodChallengeIssueKind::ChallengeBoundConfiguredSecretFastFail,
         )
         .await
     }
@@ -628,7 +561,10 @@ impl PostgresAuthWebRuntime {
         };
         let mut execution = self
             .execute_active_proof_method_challenge_issue_from_decoded_in_current_transaction(
-                tx, decoded, request,
+                tx,
+                decoded,
+                request,
+                ActiveProofMethodChallengeIssueKind::NormalActiveMethod,
             )
             .await?;
         execution.prepend_set_cookie_headers(start_set_cookie_headers);
@@ -640,19 +576,31 @@ impl PostgresAuthWebRuntime {
         tx: Tx<'_>,
         decoded: DecodedAuthWebCookies,
         request: IssueActiveProofMethodChallengeRequest,
+        challenge_issue_kind: ActiveProofMethodChallengeIssueKind,
     ) -> Result<AuthWebRuntimeExecution, AuthPostgresWebRuntimeExecutionError> {
-        let challenge_cookie_kind = MethodAdapterContract::for_method(request.method.clone())
-            .challenge_cookie()
-            .kind();
-        if request.method.family() == ProofFamily::OutOfBandCode
-            || request.method.semantics().interaction != ProofInteraction::Active
-            || challenge_cookie_kind == MethodChallengeCookieKind::NotUsed
-        {
-            return Err(AuthPostgresWebRuntimeExecutionError::core(
-                Error::ProofMethodCannotIssueActiveProofMethodChallenge {
-                    family: request.method.family(),
-                },
-            ));
+        match challenge_issue_kind {
+            ActiveProofMethodChallengeIssueKind::NormalActiveMethod => {
+                let challenge_cookie_kind =
+                    MethodAdapterContract::for_method(request.method.clone())
+                        .challenge_cookie()
+                        .kind();
+                if request.method.family() == ProofFamily::OutOfBandCode
+                    || request.method.semantics().interaction != ProofInteraction::Active
+                    || challenge_cookie_kind == MethodChallengeCookieKind::NotUsed
+                {
+                    return Err(AuthPostgresWebRuntimeExecutionError::core(
+                        Error::ProofMethodCannotIssueActiveProofMethodChallenge {
+                            family: request.method.family(),
+                        },
+                    ));
+                }
+            }
+            ActiveProofMethodChallengeIssueKind::ChallengeBoundConfiguredSecretFastFail => {
+                super::active_proof_support::validate_challenge_bound_known_subject_active_proof_method(
+                    &request.method,
+                )
+                .map_err(AuthPostgresWebRuntimeExecutionError::core)?;
+            }
         }
         let now = request.now;
         let (presented_cookies, presented_cookie_secrets) = decoded.into_parts();
@@ -700,6 +648,23 @@ impl PostgresAuthWebRuntime {
             )
             .await);
         };
+        let challenge_bound_subject_id = if challenge_issue_kind
+            == ActiveProofMethodChallengeIssueKind::ChallengeBoundConfiguredSecretFastFail
+        {
+            let Some(subject_id) = attempt.subject_id.as_ref() else {
+                return Err(rollback_after_core_error(
+                    "auth_core.runtime.validate_load",
+                    tx,
+                    Error::LoadedStateContradiction(
+                        "challenge-bound configured-secret issue requires a subject-bound attempt",
+                    ),
+                )
+                .await);
+            };
+            Some(subject_id)
+        } else {
+            None
+        };
         let proof = request.method.verified_proof_summary();
         let expires_at = match now
             .checked_add_duration(self.runtime.config().out_of_band_challenge_lifetime)
@@ -734,12 +699,37 @@ impl PostgresAuthWebRuntime {
             expires_at,
             nonce,
         };
-        let challenge_build = match self.method_registry().and_then(|registry| {
-            registry
-                .build_active_proof_method_challenge(&request, &challenge_seed)
-                .map_err(AuthPostgresWebRuntimeExecutionError::method_build)
-        }) {
-            Ok(challenge_build) => challenge_build,
+        let challenge_build = match self.method_registry() {
+            Ok(registry) => {
+                let build_result = match challenge_bound_subject_id {
+                    Some(subject_id) => {
+                        registry
+                            .build_challenge_bound_known_subject_active_proof_method_challenge(
+                                &mut tx,
+                                &request,
+                                subject_id,
+                                &challenge_seed,
+                            )
+                            .await
+                    }
+                    None => {
+                        registry
+                            .build_active_proof_method_challenge(&mut tx, &request, &challenge_seed)
+                            .await
+                    }
+                };
+                match build_result.map_err(AuthPostgresWebRuntimeExecutionError::method_build) {
+                    Ok(challenge_build) => challenge_build,
+                    Err(error) => {
+                        return Err(rollback_after_runtime_error(
+                            "auth_core.runtime.build_method_challenge",
+                            tx,
+                            error,
+                        )
+                        .await);
+                    }
+                }
+            }
             Err(error) => {
                 return Err(rollback_after_runtime_error(
                     "auth_core.runtime.build_method_challenge",
@@ -769,27 +759,41 @@ impl PostgresAuthWebRuntime {
                 .await);
             }
         };
-        let challenge_cookie =
-            match ActiveProofChallengeCookieDraft::new_with_method_challenge_state(
-                challenge_context,
-                method_challenge_state,
-            ) {
-                Ok(cookie) => cookie,
-                Err(error) => {
-                    return Err(rollback_after_core_error(
-                        "auth_core.runtime.build_challenge_cookie",
-                        tx,
-                        error,
-                    )
-                    .await);
-                }
-            };
-        let command =
-            Command::IssueActiveProofMethodChallenge(request.into_command_with_challenge(
-                challenge_cookie,
-                method_challenge,
-                method_commit_work,
-            ));
+        let challenge_cookie = match challenge_issue_kind {
+            ActiveProofMethodChallengeIssueKind::NormalActiveMethod => {
+                ActiveProofChallengeCookieDraft::new_with_method_challenge_state(
+                    challenge_context,
+                    method_challenge_state,
+                )
+            }
+            ActiveProofMethodChallengeIssueKind::ChallengeBoundConfiguredSecretFastFail => {
+                ActiveProofChallengeCookieDraft::new_with_method_challenge_state_requiring_stateless_fast_fail(
+                    challenge_context,
+                    method_challenge_state,
+                )
+            }
+        };
+        let challenge_cookie = match challenge_cookie {
+            Ok(cookie) => cookie,
+            Err(error) => {
+                return Err(rollback_after_core_error(
+                    "auth_core.runtime.build_challenge_cookie",
+                    tx,
+                    error,
+                )
+                .await);
+            }
+        };
+        let command = Command::IssueActiveProofMethodChallenge(IssueActiveProofMethodChallenge {
+            now: request.now,
+            attempt_id: request.attempt_id,
+            challenge_id: request.challenge_id,
+            method: request.method,
+            challenge_issue_kind,
+            challenge_cookie,
+            method_challenge,
+            method_commit_work,
+        });
         let prepared = match PreparedCommandExecution::prepare(
             self.runtime.config(),
             command,
@@ -958,6 +962,7 @@ impl PostgresAuthWebRuntime {
                 now,
                 &challenge_cookie.proof,
                 response.weak_proof_gate_response.as_ref(),
+                None,
                 self.weak_proof_gate_verifier.as_ref(),
             )
             .map_err(AuthPostgresWebRuntimeExecutionError::core)?;
@@ -1128,15 +1133,21 @@ impl PostgresAuthWebRuntime {
         challenge_cookie
             .validate_for_active_method_completion_before_state_load(response.now)
             .map_err(AuthPostgresWebRuntimeExecutionError::core)?;
+        let challenge_material = ActiveProofMethodChallengeMaterial::from_cookie(&challenge_cookie)
+            .map_err(AuthPostgresWebRuntimeExecutionError::core)?;
+        let weak_proof_gate_binding = WeakProofGateBinding::for_active_method_response(
+            &challenge_material,
+            &response.response_payload,
+        )
+        .map_err(AuthPostgresWebRuntimeExecutionError::core)?;
         let weak_proof_gate =
             super::active_proof_support::verify_weak_proof_gate_before_state_load(
                 response.now,
                 &challenge_cookie.proof,
                 response.weak_proof_gate_response.as_ref(),
+                Some(&weak_proof_gate_binding),
                 self.weak_proof_gate_verifier.as_ref(),
             )
-            .map_err(AuthPostgresWebRuntimeExecutionError::core)?;
-        let challenge_material = ActiveProofMethodChallengeMaterial::from_cookie(&challenge_cookie)
             .map_err(AuthPostgresWebRuntimeExecutionError::core)?;
         let verification = self.method_registry().and_then(|registry| {
             registry
@@ -1340,6 +1351,191 @@ impl PostgresAuthWebRuntime {
         .await
     }
 
+    pub(crate) async fn execute_challenge_bound_known_subject_active_proof_method_response_from_headers(
+        &self,
+        headers: &HeaderMap,
+        response: CompleteChallengeBoundKnownSubjectActiveProofMethodResponse,
+    ) -> Result<AuthWebRuntimeExecution, AuthPostgresWebRuntimeExecutionError> {
+        let decoded = self
+            .runtime
+            .web_transport()
+            .decode_presented_cookies_from_headers(headers)
+            .map_err(AuthPostgresWebRuntimeExecutionError::web)?;
+        let challenge_cookie = decoded
+            .presented_cookies()
+            .active_proof_challenge_cookie
+            .clone()
+            .ok_or(Error::MissingActiveProofChallengeCookie)
+            .map_err(AuthPostgresWebRuntimeExecutionError::core)?;
+        challenge_cookie
+            .validate_for_active_method_completion_before_state_load(response.now)
+            .map_err(AuthPostgresWebRuntimeExecutionError::core)?;
+        if !challenge_cookie.requires_stateless_fast_fail() {
+            return Err(AuthPostgresWebRuntimeExecutionError::core(
+                Error::StatelessFastFailVerificationRequired,
+            ));
+        }
+        let challenge_material = ActiveProofMethodChallengeMaterial::from_cookie(&challenge_cookie)
+            .map_err(AuthPostgresWebRuntimeExecutionError::core)?;
+        let method = proof_summary_to_method_declaration(&challenge_cookie.proof)
+            .map_err(AuthPostgresWebRuntimeExecutionError::core)?;
+        super::active_proof_support::validate_challenge_bound_known_subject_active_proof_method(
+            &method,
+        )
+        .map_err(AuthPostgresWebRuntimeExecutionError::core)?;
+        let weak_proof_gate_binding =
+            WeakProofGateBinding::for_challenge_bound_known_subject_secret_response(
+                &challenge_material,
+                &response.secret_response,
+            )
+            .map_err(AuthPostgresWebRuntimeExecutionError::core)?;
+        let weak_proof_gate =
+            super::active_proof_support::verify_weak_proof_gate_before_state_load(
+                response.now,
+                &challenge_cookie.proof,
+                response.weak_proof_gate_response.as_ref(),
+                Some(&weak_proof_gate_binding),
+                self.weak_proof_gate_verifier.as_ref(),
+            )
+            .map_err(AuthPostgresWebRuntimeExecutionError::core)?;
+        self.method_registry()?
+            .verify_challenge_bound_known_subject_active_proof_method_response_before_state_load(
+                &challenge_material,
+                &response,
+            )
+            .map_err(AuthPostgresWebRuntimeExecutionError::method_build)?;
+
+        let now = response.now;
+        let (presented_cookies, presented_cookie_secrets) = decoded.into_parts();
+        let loaded_state_contract =
+            CommandLoadedStateContract::for_active_proof_method_authoritative_verification(
+                self.runtime.config(),
+                &challenge_cookie,
+            )
+            .map_err(AuthPostgresWebRuntimeExecutionError::core)?;
+        let prepared_storage_boundary_contract =
+            PreparedStorageBoundaryContract::for_loaded_state_contract(&loaded_state_contract);
+        let mut tx = self.begin_runtime_transaction().await?;
+        let loaded = match self
+            .store
+            .load_state_in_current_transaction(
+                &mut tx,
+                AuthLoadStateRequest::new(
+                    now,
+                    &presented_cookies,
+                    &presented_cookie_secrets,
+                    &loaded_state_contract,
+                    &prepared_storage_boundary_contract,
+                ),
+            )
+            .await
+        {
+            Ok(loaded) => loaded,
+            Err(error) => {
+                return Err(rollback_after_store_error("auth_core.runtime.load", tx, error).await);
+            }
+        };
+        if let Err(error) = loaded_state_contract.validate_loaded_state(&loaded) {
+            return Err(
+                rollback_after_core_error("auth_core.runtime.validate_load", tx, error).await,
+            );
+        }
+        let Some(attempt) = loaded.active_proof_attempt_record.as_ref() else {
+            return Err(rollback_after_core_error(
+                "auth_core.runtime.validate_load",
+                tx,
+                Error::LoadedStateDoesNotSatisfyLoadContract(
+                    "required active-proof attempt record is missing",
+                ),
+            )
+            .await);
+        };
+        let Some(subject_id) = attempt.subject_id.as_ref() else {
+            return Err(rollback_after_core_error(
+                "auth_core.runtime.validate_load",
+                tx,
+                Error::LoadedStateContradiction(
+                    "challenge-bound known-subject completion requires a subject-bound attempt",
+                ),
+            )
+            .await);
+        };
+        let verification = match self.method_registry() {
+            Ok(registry) => {
+                match registry
+                    .verify_challenge_bound_known_subject_active_proof_method_response(
+                        &mut tx,
+                        subject_id,
+                        &challenge_material,
+                        &response,
+                    )
+                    .await
+                    .map_err(AuthPostgresWebRuntimeExecutionError::method_build)
+                {
+                    Ok(verified) => verified,
+                    Err(error) => {
+                        return Err(rollback_after_runtime_error(
+                            "auth_core.runtime.verify_challenge_bound_known_subject_method",
+                            tx,
+                            error,
+                        )
+                        .await);
+                    }
+                }
+            }
+            Err(error) => {
+                return Err(rollback_after_runtime_error(
+                    "auth_core.runtime.verify_challenge_bound_known_subject_method",
+                    tx,
+                    error,
+                )
+                .await);
+            }
+        };
+        let command = match command_from_challenge_bound_known_subject_active_proof_method_response(
+            response,
+            &challenge_cookie,
+            method,
+            weak_proof_gate,
+            verification,
+        ) {
+            Ok(command) => command,
+            Err(error) => {
+                return Err(
+                    rollback_after_core_error("auth_core.runtime.prepare", tx, error).await,
+                );
+            }
+        };
+        let prepared = match PreparedCommandExecution::prepare(
+            self.runtime.config(),
+            command,
+            presented_cookies,
+        ) {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                return Err(
+                    rollback_after_core_error("auth_core.runtime.prepare", tx, error).await,
+                );
+            }
+        };
+        if prepared.loaded_state_contract() != &loaded_state_contract {
+            return Err(rollback_after_core_error(
+                "auth_core.runtime.prepare",
+                tx,
+                Error::RuntimeLoadedStateContractChangedAfterCookieConstruction,
+            )
+            .await);
+        }
+        self.execute_prepared_with_loaded_state_boundary(
+            tx,
+            prepared,
+            prepared_storage_boundary_contract,
+            loaded,
+            presented_cookie_secrets,
+        )
+        .await
+    }
+
     pub(crate) async fn execute_known_subject_active_proof_method_response_from_headers(
         &self,
         headers: &HeaderMap,
@@ -1360,11 +1556,18 @@ impl PostgresAuthWebRuntime {
             )
             .map_err(AuthPostgresWebRuntimeExecutionError::core)?;
         let attempt_id = continuation.attempt_id.clone();
+        let weak_proof_gate_binding = WeakProofGateBinding::for_known_subject_secret_response(
+            continuation,
+            &response.method.verified_proof_summary(),
+            &response.secret_response,
+        )
+        .map_err(AuthPostgresWebRuntimeExecutionError::core)?;
         let weak_proof_gate =
             super::active_proof_support::verify_weak_proof_gate_before_state_load(
                 now,
                 &response.method.verified_proof_summary(),
                 response.weak_proof_gate_response.as_ref(),
+                Some(&weak_proof_gate_binding),
                 self.weak_proof_gate_verifier.as_ref(),
             )
             .map_err(AuthPostgresWebRuntimeExecutionError::core)?;
@@ -3146,11 +3349,66 @@ fn command_from_known_subject_active_proof_method_response(
             Command::RecordActiveProofFailure(RecordActiveProofFailure {
                 now: response.now,
                 attempt_id,
+                challenge_id: None,
                 method: response.method,
                 weak_proof_gate,
             }),
         ),
     }
+}
+
+fn command_from_challenge_bound_known_subject_active_proof_method_response(
+    response: CompleteChallengeBoundKnownSubjectActiveProofMethodResponse,
+    challenge_cookie: &ActiveProofChallengeCookieDraft,
+    method: ProofMethodDeclaration,
+    weak_proof_gate: WeakProofGateStatus,
+    verification: KnownSubjectActiveProofMethodVerification,
+) -> Result<Command, Error> {
+    match verification {
+        KnownSubjectActiveProofMethodVerification::Accepted(verified) => {
+            let (verified_proof, method_commit_work) = verified.into_parts();
+            if verified_proof.proof() != &challenge_cookie.proof {
+                return Err(Error::LoadedStateContradiction(
+                    "challenge-bound known-subject method verified a different proof",
+                ));
+            }
+            if verified_proof.subject_id().is_some() {
+                return Err(Error::LoadedStateContradiction(
+                    "challenge-bound known-subject method unexpectedly resolved a subject",
+                ));
+            }
+            Ok(Command::CompleteActiveProofChallenge(
+                CompleteActiveProofChallenge {
+                    now: response.now,
+                    attempt_id: challenge_cookie.attempt_id.clone(),
+                    challenge_id: Some(challenge_cookie.challenge_id.clone()),
+                    verified_proof,
+                    stateless_fast_fail: StatelessFastFailStatus::verified_before_state_load(),
+                    weak_proof_gate,
+                    method_commit_work,
+                },
+            ))
+        }
+        KnownSubjectActiveProofMethodVerification::Rejected => Ok(
+            Command::RecordActiveProofFailure(RecordActiveProofFailure {
+                now: response.now,
+                attempt_id: challenge_cookie.attempt_id.clone(),
+                challenge_id: Some(challenge_cookie.challenge_id.clone()),
+                method,
+                weak_proof_gate,
+            }),
+        ),
+    }
+}
+
+fn proof_summary_to_method_declaration(
+    proof: &ProofSummary,
+) -> Result<ProofMethodDeclaration, Error> {
+    ProofMethodDeclaration::new_with_online_guessing_risk(
+        proof.family(),
+        proof.method_label().to_owned(),
+        proof.online_guessing_risk(),
+    )
 }
 
 #[derive(Debug)]

@@ -35,6 +35,7 @@ mod outcome_model;
 mod postgres_adapter_execution_model;
 mod postgres_bootstrap;
 mod postgres_method_runtime;
+mod postgres_password_derived_signature_method;
 mod postgres_recovery_code_method;
 mod postgres_runtime;
 mod postgres_schema_model;
@@ -51,25 +52,29 @@ mod session_resolution;
 mod session_revocation;
 mod storage_adapter_boundary_model;
 mod storage_contract_model;
+mod weak_proof_gate;
 mod web_transport_model;
 
 pub(crate) use active_proof_model::{
-    ActiveProofAttemptRecord, ActiveProofChallengeRecord, ActiveProofMethodChallengeMaterial,
-    ActiveProofMethodChallengePresentation, ActiveProofMethodChallengeSeed,
+    ActiveProofAttemptRecord, ActiveProofChallengeRecord, ActiveProofMethodChallengeIssueKind,
+    ActiveProofMethodChallengeMaterial, ActiveProofMethodChallengePresentation,
+    ActiveProofMethodChallengeRequestPayload, ActiveProofMethodChallengeSeed,
     ActiveProofMethodChallengeState, ActiveProofMethodResponsePayload,
     ChallengeBoundConfiguredSecretFastFailBloomFilter, ChallengeIssuePreflightResponse,
     ChallengeIssuePreflightVerificationRequest, CompleteActiveProofChallenge,
-    CompleteActiveProofMethodResponse, CompleteKnownSubjectActiveProofMethodResponse,
-    CompleteOutOfBandChallengeResponse, IssueActiveProofMethodChallenge,
-    IssueActiveProofMethodChallengeInput, IssueActiveProofMethodChallengeRequest,
-    IssueOutOfBandChallenge, IssueOutOfBandChallengeInput, IssueOutOfBandChallengeRequest,
+    CompleteActiveProofMethodResponse, CompleteChallengeBoundKnownSubjectActiveProofMethodResponse,
+    CompleteKnownSubjectActiveProofMethodResponse, CompleteOutOfBandChallengeResponse,
+    IssueActiveProofMethodChallenge, IssueActiveProofMethodChallengeInput,
+    IssueActiveProofMethodChallengeRequest,
+    IssueChallengeBoundKnownSubjectActiveProofMethodChallengeInput, IssueOutOfBandChallenge,
+    IssueOutOfBandChallengeInput, IssueOutOfBandChallengeRequest,
     KnownSubjectActiveProofSecretResponse, OutOfBandChallengeDedupeKey, RecordActiveProofFailure,
     ResendOutOfBandChallenge, ResendOutOfBandChallengeRequest, StartActiveProofAttempt,
     StartActiveProofAttemptForCurrentSession, StartActiveProofAttemptForCurrentTrustedDevice,
     StartAndIssueActiveProofMethodChallengeInput, StartAndIssueOutOfBandChallengeInput,
     StartCurrentSessionActiveProofAttemptInput, StartCurrentTrustedDeviceActiveProofAttemptInput,
-    StatelessFastFailStatus, VerifiedWeakProofGateBeforeStateLoad, WeakProofGateKind,
-    WeakProofGateResponse, WeakProofGateStatus, WeakProofGateSummary,
+    StatelessFastFailStatus, VerifiedWeakProofGateBeforeStateLoad, WeakProofGateBinding,
+    WeakProofGateKind, WeakProofGateResponse, WeakProofGateStatus, WeakProofGateSummary,
     WeakProofGateVerificationRequest, WeakProofGateVerifier,
 };
 pub(crate) use challenge_cookie_model::{
@@ -95,6 +100,7 @@ pub(crate) use execution_model::*;
 pub(crate) use identity::*;
 pub(crate) use input_limits::{
     ACTIVE_PROOF_METHOD_CHALLENGE_PRESENTATION_MAX_BYTES,
+    ACTIVE_PROOF_METHOD_CHALLENGE_REQUEST_PAYLOAD_MAX_BYTES,
     ACTIVE_PROOF_METHOD_CHALLENGE_STATE_MAX_BYTES, ACTIVE_PROOF_METHOD_RESPONSE_PAYLOAD_MAX_BYTES,
     CHALLENGE_BOUND_CONFIGURED_SECRET_FAST_FAIL_BLOOM_FILTER_MAX_BYTES,
     CHALLENGE_BOUND_CONFIGURED_SECRET_FAST_FAIL_BLOOM_FILTER_MAX_HASH_COUNT,
@@ -124,6 +130,7 @@ pub(crate) use runtime_adapter_model::*;
 pub(crate) use runtime_orchestration_model::*;
 pub(crate) use storage_adapter_boundary_model::*;
 pub(crate) use storage_contract_model::*;
+pub(crate) use weak_proof_gate::*;
 pub(crate) use web_transport_model::*;
 
 pub(crate) fn reduce_command(

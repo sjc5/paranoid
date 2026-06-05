@@ -518,29 +518,47 @@ pub(super) fn verified_proof(
 }
 
 pub(super) fn proof_of_work_gate_summary() -> WeakProofGateSummary {
-    WeakProofGateSummary::new(WeakProofGateKind::ProofOfWork, "hashcash").expect("weak proof gate")
+    hashcash_verifier_for_test().summary().clone()
 }
 
 pub(super) fn verified_proof_of_work_gate() -> WeakProofGateStatus {
     WeakProofGateStatus::verified_before_state_load(proof_of_work_gate_summary())
 }
 
-pub(super) fn proof_of_work_gate_response() -> WeakProofGateResponse {
-    WeakProofGateResponse::try_from_bytes(
-        WeakProofGateKind::ProofOfWork,
-        "hashcash",
-        b"valid-hashcash".as_slice(),
-    )
-    .expect("weak proof gate response")
+pub(super) fn hashcash_verifier_for_test() -> HashcashProofOfWorkVerifier {
+    HashcashProofOfWorkVerifier::new(HashcashProofOfWorkConfig::new(8, DurationSeconds::new(300)))
+        .expect("test Hashcash verifier")
 }
 
-pub(super) fn challenge_issue_preflight_response() -> ChallengeIssuePreflightResponse {
-    ChallengeIssuePreflightResponse::try_from_bytes(
-        WeakProofGateKind::ProofOfWork,
-        "hashcash",
-        b"valid-hashcash".as_slice(),
+pub(super) fn proof_of_work_gate_response_for_test(
+    now: UnixSeconds,
+    proof: &ProofSummary,
+    binding: &WeakProofGateBinding,
+) -> WeakProofGateResponse {
+    hashcash_verifier_for_test().solve_weak_proof_gate_response_for_test(now, proof, binding)
+}
+
+pub(super) fn challenge_issue_preflight_response_for_test(
+    now: UnixSeconds,
+    proof_use: ProofUse,
+    method: &ProofMethodDeclaration,
+) -> ChallengeIssuePreflightResponse {
+    hashcash_verifier_for_test().solve_challenge_issue_preflight_response_for_test(
+        now,
+        proof_use,
+        &method.verified_proof_summary(),
     )
-    .expect("challenge issue preflight response")
+}
+
+pub(super) fn email_otp_challenge_issue_preflight_response_at(
+    now: UnixSeconds,
+) -> ChallengeIssuePreflightResponse {
+    challenge_issue_preflight_response_for_test(
+        now,
+        ProofUse::ContributeToFullAuthentication,
+        &ProofMethodDeclaration::new(ProofFamily::OutOfBandCode, "email_otp")
+            .expect("email OTP method"),
+    )
 }
 
 pub(super) fn invalid_challenge_issue_preflight_response() -> ChallengeIssuePreflightResponse {
@@ -568,21 +586,6 @@ pub(super) fn invalid_proof_of_work_gate_response() -> WeakProofGateResponse {
         b"invalid-hashcash".as_slice(),
     )
     .expect("weak proof gate response")
-}
-
-pub(super) struct TestWeakProofGateVerifier;
-
-impl WeakProofGateVerifier for TestWeakProofGateVerifier {
-    fn verify_weak_proof_gate_before_state_load(
-        &self,
-        request: WeakProofGateVerificationRequest<'_>,
-    ) -> Result<(), Error> {
-        if request.response().payload() == b"valid-hashcash" {
-            Ok(())
-        } else {
-            Err(Error::WeakProofGateVerificationFailed)
-        }
-    }
 }
 
 pub(super) fn recovery_code_method_commit_work() -> MethodCommitWork {

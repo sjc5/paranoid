@@ -22,6 +22,8 @@ pub const METHOD_COMMIT_OPERATION_MAX_BYTES: usize = 256;
 pub const METHOD_COMMIT_PAYLOAD_MAX_BYTES: usize = 64 * 1024;
 /// Maximum byte length for one method/plugin challenge presentation.
 pub const ACTIVE_PROOF_METHOD_CHALLENGE_PRESENTATION_MAX_BYTES: usize = 64 * 1024;
+/// Maximum byte length for one method/plugin challenge request payload.
+pub const ACTIVE_PROOF_METHOD_CHALLENGE_REQUEST_PAYLOAD_MAX_BYTES: usize = 64 * 1024;
 /// Maximum byte length for one method/plugin challenge state payload.
 pub const ACTIVE_PROOF_METHOD_CHALLENGE_STATE_MAX_BYTES: usize = 64 * 1024;
 /// Maximum byte length for one method/plugin challenge response.

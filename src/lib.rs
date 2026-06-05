@@ -1,7 +1,8 @@
 //! Misuse-resistant application security primitives.
 //!
 //! Default features are disabled. Consumers opt into the namespaces they use:
-//! `crypto`, `id`, `local-lock`, `local-env-vault`, `web`, or `db`.
+//! `crypto`, `id`, `local-lock`, `local-env-vault`, `web`, `db`, or
+//! `db-test-harness`.
 //!
 //! The Postgres-backed APIs are intentionally namespaced under `kv`, `fleet`,
 //! and `queue` so callers can use plain names like `Store` and `Key` without

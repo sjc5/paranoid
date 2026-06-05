@@ -324,7 +324,7 @@ fn configured_secret_proofs_reject_stateful_challenge_completion() {
         assert_eq!(
             error,
             Error::LoadedStateContradiction(
-                "known-subject proof family cannot complete through an active-proof challenge",
+                "known-subject proof family cannot complete through this active-proof challenge",
             )
         );
     }
@@ -340,6 +340,7 @@ fn configured_secret_methods_cannot_issue_active_proof_challenges() {
                 attempt_id: id("attempt"),
                 challenge_id: id("challenge"),
                 method: proof_method(proof_family),
+                challenge_issue_kind: ActiveProofMethodChallengeIssueKind::NormalActiveMethod,
                 challenge_cookie: active_proof_challenge_cookie(),
                 method_challenge: ActiveProofMethodChallengePresentation::try_from_bytes(
                     b"challenge".as_slice(),
@@ -731,6 +732,7 @@ fn commands_requiring_open_active_proof_attempts_reject_closed_and_expired_attem
         Command::RecordActiveProofFailure(RecordActiveProofFailure {
             now: at(40),
             attempt_id: id("attempt"),
+            challenge_id: None,
             method: proof_method(ProofFamily::SharedSecretOtp),
             weak_proof_gate: verified_proof_of_work_gate(),
         }),

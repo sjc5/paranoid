@@ -52,6 +52,25 @@ pub(crate) fn validate_known_subject_active_proof_method(
     Ok(())
 }
 
+pub(crate) fn validate_challenge_bound_known_subject_active_proof_method(
+    method: &ProofMethodDeclaration,
+) -> Result<(), Error> {
+    let contract =
+        MethodAdapterContract::for_challenge_bound_configured_secret_method(method.clone())?;
+    if method.semantics().subject_role != ProofSubjectRole::RequiresKnownSubject
+        || method.semantics().interaction != ProofInteraction::Active
+        || contract.challenge_cookie().kind()
+            != MethodChallengeCookieKind::EncryptedConfiguredSecretFastFailChallenge
+    {
+        return Err(
+            Error::ProofMethodCannotUseChallengeBoundConfiguredSecretFastFail {
+                family: method.family(),
+            },
+        );
+    }
+    Ok(())
+}
+
 pub(super) fn active_proof_subject_id_after_completion(
     attempt: &ActiveProofAttemptRecord,
     proof: &ProofSummary,
@@ -108,6 +127,7 @@ pub(super) fn verify_weak_proof_gate_before_state_load(
     now: UnixSeconds,
     proof: &ProofSummary,
     response: Option<&WeakProofGateResponse>,
+    binding: Option<&WeakProofGateBinding>,
     verifier: &(impl WeakProofGateVerifier + ?Sized),
 ) -> Result<WeakProofGateStatus, Error> {
     if !proof.uses_weak_attempt_failure_budget() {
@@ -118,9 +138,9 @@ pub(super) fn verify_weak_proof_gate_before_state_load(
     }
 
     let response = response.ok_or(Error::WeakProofGateVerificationRequired)?;
-    verifier.verify_weak_proof_gate_before_state_load(WeakProofGateVerificationRequest::new(
-        now, proof, response,
-    ))?;
+    verifier.verify_weak_proof_gate_before_state_load(
+        WeakProofGateVerificationRequest::new_with_binding(now, proof, response, binding),
+    )?;
     Ok(WeakProofGateStatus::verified_before_state_load(
         response.summary().clone(),
     ))

@@ -4,8 +4,10 @@ This is the dependency-ordered checklist from the current private auth-core stat
 public alpha. It is not a taxonomy of work areas. Earlier phases contain decisions and
 invariants that make later work easier, safer, and less likely to be rewritten.
 
-A checked item means the deliverable exists in live design, code, tests, and durable notes
-well enough that later work may rely on it.
+A checked item means the named deliverable has been addressed at the level described by
+the item itself. Some checked items are design decisions, some are model/code slices, and
+some are executable test guarantees. Do not read a design-decision checkbox as proof that
+the corresponding runtime path is fully implemented or operation-count pinned.
 
 This roadmap is grounded in the current auth notes, the raw-note design intent, and the
 live `auth_core` module/test shape. The raw notes are not implementation instructions, but
@@ -16,7 +18,7 @@ ergonomics.
 
 ## Where We Are Now
 
-Auth-core readiness estimate: about 42%.
+Auth-core readiness estimate: about 45%.
 
 Auth is private WIP behind the `__auth_wip` feature. The lower-core planner, runtime-owned
 continuation/cookie shape, fast-fail challenge model, Postgres runtime slices, method
@@ -30,7 +32,7 @@ docs, and the adversarial lifecycle suite.
 Standing design rules live in `AUTH_DESIGN.md`. Unresolved questions live in
 `AUTH_OPEN_QUESTIONS.md`. This file is the ordered work plan.
 
-## Phase 0: Close Model-Blocking Questions
+## Phase 0: Close Model-Blocking Questions And Design Choices
 
 This phase must stay first. These decisions define the shape of everything downstream.
 Feature work that depends on one of these questions should wait until the relevant item is
@@ -40,18 +42,16 @@ closed.
       `AUTH_DESIGN.md` or this roadmap.
 - [x] Reduce `AUTH_OPEN_QUESTIONS.md` to genuinely open questions, not historical ledger
       noise.
-- [x] Complete the transition-by-transition fast-fail audit against the matrix in
-      `AUTH_DESIGN.md`.
-- [x] For every fast-fail matrix row, record the exact pre-state rejection gate and
+- [x] Draft the transition-by-transition fast-fail matrix in `AUTH_DESIGN.md`.
+- [x] For every fast-fail matrix row, record the intended pre-state rejection gate and
       authoritative post-gate boundary.
-- [x] Decide whether each fast-fail matrix row is already satisfied, needs code, needs
-      tests, or needs redesign.
+- [x] Record the current live-shape status for each fast-fail matrix row.
 - [x] Decide the public-alpha first-party method set.
 - [x] Decide whether challenge-bound TOTP Bloom fast-fail is public-alpha scope.
 - [x] Decide the recovery-code fast-fail shape: opaque sealed base58 token carrying
       subject id plus random token, with parse/decrypt/tag and subject-mismatch rejection
       before DB.
-- [ ] Decide the mature crate or audited wrapper choice for the alpha TOTP implementation.
+- [x] Decide the mature crate or audited wrapper choice for the alpha TOTP implementation.
 - [x] Finalize the session/trusted-device lifecycle semantics that affect storage and
       cookies: refresh window, previous-secret grace, concurrent stale-cookie behavior,
       tripwire behavior, trusted-device revival, and trusted-device expiry.
@@ -60,12 +60,16 @@ closed.
 - [x] Define recovery-authority metadata.
 - [x] Define lifecycle policy checks that reject apparent factor independence when
       recovery/reset authorities overlap.
-- [ ] Define weak-gate policy at the architecture level: native proof of work, human/risk
+- [x] Define weak-gate policy at the architecture level: native proof of work, human/risk
       adapters, proof binding, ceremony budgets, and delivery cooldowns.
-- [ ] Decide whether the generic runtime is retained as production substrate or test/model
+- [x] Decide whether the generic runtime is retained as production substrate or test/model
       scaffolding once the Postgres runtime is complete.
-- [ ] Decide the public mounted API shape well enough that lower-layer APIs can be judged
+- [x] Decide the public mounted API shape well enough that lower-layer APIs can be judged
       against it.
+
+Phase 0 closure means the model-blocking decisions are recorded. It does not mean every
+fast-fail claim is executable or operation-count pinned. The executable fast-fail audit is
+tracked in Phase 2.
 
 ## Phase 1: Lock Lower-Core And Runtime Invariants
 
@@ -90,7 +94,7 @@ public APIs depend on it.
 - [x] Derive challenge id and attempt id from encrypted challenge cookies on completion.
 - [x] Validate loaded-state contracts immediately after adapter load.
 - [x] Separate reducer/internal command material from runtime-facing semantic inputs.
-- [ ] Add tests proving stateless cookie or challenge material cannot grant positive auth
+- [x] Add tests proving stateless cookie or challenge material cannot grant positive auth
       without authoritative state, except the bounded safe-read path.
 - [x] Pin the refresh-window write-rate invariant: active sessions refresh only in the
       configured refresh window, not on every request.
@@ -98,14 +102,18 @@ public APIs depend on it.
 - [x] Add tests for finalized tripwire and previous-secret grace behavior.
 - [x] Verify trusted-device previous-secret grace cannot keep stolen credentials alive
       indefinitely.
-- [ ] Audit the generic runtime path before any public auth exposure.
-- [ ] Remove the private-WIP dead-code allowance before exposing any auth API.
+- [x] Audit the generic runtime path before any public auth exposure.
 
 ## Phase 2: Pin Fast-Fail And Abuse-Resistance Guarantees
 
 This phase turns the core thesis into executable guarantees before method implementation
 spreads those assumptions across the system.
 
+- [ ] Complete the executable transition-by-transition fast-fail audit against live code.
+- [ ] For every fast-fail matrix row, classify the runtime path as not built, modeled
+      only, implemented but not operation-count pinned, or fully pinned by tests.
+- [ ] Update the matrix whenever a row graduates from modeled intent to executable
+      guarantee.
 - [x] Model encrypted challenge cookies as pre-state rejection material.
 - [x] Put out-of-band response MAC verification before state load.
 - [x] Put out-of-band challenge cookie validation before resend state load.
@@ -116,18 +124,36 @@ spreads those assumptions across the system.
 - [x] Decide that account-level lockouts are not the primary defense because they create
       denial-of-service risk.
 - [x] Model weak failure budgets on active-proof attempts.
-- [ ] Add tests proving wrong out-of-band codes reject before any database work.
-- [ ] Add tests proving resend rejects before database work unless the encrypted challenge
+- [x] Add tests proving wrong out-of-band codes reject before any database work.
+- [x] Add tests proving resend rejects before database work unless the encrypted challenge
       cookie validates.
-- [ ] Add tests proving active-method challenge completion verifies method-owned pre-state
+- [x] Add tests proving active-method challenge completion verifies method-owned pre-state
       material before authoritative state load.
+- [x] Add tests proving invalid direct TOTP weak gates reject before database work.
+- [x] Add tests proving direct TOTP wrong-code handling with a valid weak gate reaches
+      authoritative verifier state and spends only the active ceremony budget.
+- [x] Add tests proving recovery-code malformed, guessed, and wrong-subject sealed tokens
+      reject before database work.
+- [x] Add tests proving plausible but unused sealed recovery-code tokens reject
+      authoritatively without consuming stored recovery codes.
+- [x] Audit current message-signature fast-fail coverage and record that it is
+      method-registry/test-plugin coverage, not first-party password-derived auth.
+- [x] Audit challenge-bound TOTP Bloom coverage and record the current runtime status in
+      the fast-fail matrix.
 - [ ] Add method-by-method tests proving impossible submissions reject before DB where the
       design claims they should.
 - [ ] Add operation-count tests for every fast-fail claim that depends on avoiding storage
       work.
-- [ ] Implement native Hashcash-style proof-of-work weak gate.
-- [ ] Bind proof-of-work evidence to the proof attempt so one solved gate cannot be reused
-      across many password or TOTP guesses.
+- [x] Add first-party password-derived message-signature tests proving wrong signatures
+      reject before DB and successful signatures still recheck authoritative
+      verifier/version state.
+- [x] Add password-derived weak-gate binding tests proving a gate solved for one submitted
+      signature rejects before DB when replayed with another submitted signature.
+- [x] Add first-party challenge-bound TOTP Bloom tests proving definite misses reject
+      before DB and possible hits perform authoritative verifier/replay checks.
+- [x] Implement native Hashcash-style proof-of-work weak gate.
+- [x] Bind proof-of-work evidence to the exact protected ceremony material so one solved
+      gate cannot be reused across many password or TOTP guesses.
 - [ ] Implement callback/adaptor shape for Turnstile, reCAPTCHA, self-hosted CAPTCHA, or
       other human challenges.
 - [ ] Implement callback/adaptor shape for application risk engines.
@@ -140,7 +166,7 @@ spreads those assumptions across the system.
       subject or identifier.
 - [ ] Add tests proving weak-gate failures do not create write amplification.
 - [ ] Add tests proving weak failures do not consume strong proof material.
-- [ ] Add tests proving failed recovery-code submissions do not consume recovery codes.
+- [x] Add tests proving failed recovery-code submissions do not consume recovery codes.
 - [ ] Add tests proving out-of-band delivery dedupe and cooldown bound harassment without
       revealing identifier existence.
 
@@ -282,16 +308,18 @@ assumptions.
 - [ ] Implement the lifecycle/runtime path that generates and stores new user-visible
       recovery codes.
 - [x] Give TOTP a stable configured-secret credential instance id.
-- [ ] Implement real TOTP using the selected mature crate or audited RFC-6238 wrapper.
-- [ ] Implement challenge-bound TOTP Bloom fast-fail as a real first-party method lane.
-- [ ] Add cookie-budget tests for challenge-bound TOTP Bloom filters.
-- [ ] Add false-negative safety tests for challenge-bound TOTP Bloom filters.
-- [ ] Implement password-derived message-signature auth.
-- [ ] Define password salt/verifier construction.
-- [ ] Define canonical signed message format for password-derived signatures.
-- [ ] Seal verifier material into the message-signature challenge when safe.
-- [ ] Recheck authoritative verifier/version after message-signature pre-state success.
-- [ ] Bind password-derived proof-of-work to the signature or signed payload.
+- [x] Implement real direct TOTP using the selected mature crate through a Paranoid-owned
+      RFC-6238 wrapper.
+- [x] Implement challenge-bound TOTP Bloom fast-fail as a real first-party method lane.
+- [x] Add cookie-budget tests for challenge-bound TOTP Bloom filters.
+- [x] Add false-negative safety tests for challenge-bound TOTP Bloom filters.
+- [x] Implement password-derived message-signature auth.
+- [x] Define password salt/verifier construction.
+- [x] Define canonical signed message format for password-derived signatures.
+- [x] Seal verifier material into the message-signature challenge when safe.
+- [x] Recheck authoritative verifier/version after message-signature pre-state success.
+- [x] Bind password-derived weak-proof gate verification to the exact challenge state and
+      submitted response payload.
 - [ ] Keep WebAuthn/passkey contract hooks modeled for post-alpha implementation.
 - [ ] Keep OIDC contract hooks modeled for post-alpha implementation.
 - [ ] Keep SAML contract hooks modeled for post-alpha implementation.
@@ -317,6 +345,9 @@ This phase turns the executable model into a production Postgres subsystem.
       DB bootstrap schema, shared schema ledger, and schema-local core table names.
 - [x] Make first-party Postgres method configs derive schema-local method table names from
       the DB foundation schema by default.
+- [x] Route auth-core schema ledger migration and validation through Paranoid's
+      public-shaped component schema API, while preserving auth-owned physical schema
+      validation before the component version is recorded.
 - [x] Build the private WIP auth bootstrap facade that runs after DB foundation bootstrap,
       constructs the core store plus registered method plugins from one DB bootstrap
       config, and performs auth migration or validation without application-managed table
@@ -408,6 +439,8 @@ runtime and credential lifecycle surfaces exist.
 This phase should be late. Public docs should describe the actual mounted system, not an
 intermediate planning model.
 
+- [ ] Remove private-WIP dead-code and unused-import allowances before exposing any auth
+      API.
 - [ ] Decide public module names for auth.
 - [ ] Expose high-level mounted auth APIs instead of lower-core planner internals.
 - [ ] Write public auth README material.

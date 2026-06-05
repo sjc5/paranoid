@@ -23,17 +23,54 @@ pub(crate) trait PostgresAuthMethodPlugin: Send + Sync {
         ))
     }
 
-    fn build_active_proof_method_challenge(
-        &self,
-        request: &IssueActiveProofMethodChallengeRequest,
-        challenge: &ActiveProofMethodChallengeSeed,
-    ) -> Result<ActiveProofMethodChallengeBuild, PostgresAuthMethodBuildError> {
+    fn build_active_proof_method_challenge<'a, 'tx>(
+        &'a self,
+        tx: &'a mut Tx<'tx>,
+        request: &'a IssueActiveProofMethodChallengeRequest,
+        challenge: &'a ActiveProofMethodChallengeSeed,
+    ) -> Pin<
+        Box<
+            dyn Future<
+                    Output = Result<ActiveProofMethodChallengeBuild, PostgresAuthMethodBuildError>,
+                > + Send
+                + 'a,
+        >,
+    > {
+        let _ = tx;
         let _ = request;
         let _ = challenge;
-        Err(PostgresAuthMethodBuildError::unsupported(
-            self.method(),
-            "active_proof_method_challenge_issue",
-        ))
+        Box::pin(async move {
+            Err(PostgresAuthMethodBuildError::unsupported(
+                self.method(),
+                "active_proof_method_challenge_issue",
+            ))
+        })
+    }
+
+    fn build_challenge_bound_known_subject_active_proof_method_challenge<'a, 'tx>(
+        &'a self,
+        tx: &'a mut Tx<'tx>,
+        request: &'a IssueActiveProofMethodChallengeRequest,
+        subject_id: &'a SubjectId,
+        challenge: &'a ActiveProofMethodChallengeSeed,
+    ) -> Pin<
+        Box<
+            dyn Future<
+                    Output = Result<ActiveProofMethodChallengeBuild, PostgresAuthMethodBuildError>,
+                > + Send
+                + 'a,
+        >,
+    > {
+        let _ = tx;
+        let _ = request;
+        let _ = subject_id;
+        let _ = challenge;
+        Box::pin(async move {
+            Err(PostgresAuthMethodBuildError::unsupported(
+                self.method(),
+                "challenge_bound_known_subject_active_proof_method_challenge_issue",
+            ))
+        })
     }
 
     fn build_out_of_band_resend_commit_work(
@@ -156,6 +193,48 @@ pub(crate) trait PostgresAuthMethodPlugin: Send + Sync {
             Err(PostgresAuthMethodBuildError::unsupported(
                 self.method(),
                 "known_subject_active_proof_completion",
+            ))
+        })
+    }
+
+    fn verify_challenge_bound_known_subject_active_proof_method_response_before_state_load(
+        &self,
+        challenge: &ActiveProofMethodChallengeMaterial,
+        response: &CompleteChallengeBoundKnownSubjectActiveProofMethodResponse,
+    ) -> Result<(), PostgresAuthMethodBuildError> {
+        let _ = challenge;
+        let _ = response;
+        Err(PostgresAuthMethodBuildError::unsupported(
+            self.method(),
+            "challenge_bound_known_subject_active_proof_completion",
+        ))
+    }
+
+    fn verify_challenge_bound_known_subject_active_proof_method_response<'a, 'tx>(
+        &'a self,
+        tx: &'a mut Tx<'tx>,
+        subject_id: &'a SubjectId,
+        challenge: &'a ActiveProofMethodChallengeMaterial,
+        response: &'a CompleteChallengeBoundKnownSubjectActiveProofMethodResponse,
+    ) -> Pin<
+        Box<
+            dyn Future<
+                    Output = Result<
+                        KnownSubjectActiveProofMethodVerification,
+                        PostgresAuthMethodBuildError,
+                    >,
+                > + Send
+                + 'a,
+        >,
+    > {
+        let _ = tx;
+        let _ = subject_id;
+        let _ = challenge;
+        let _ = response;
+        Box::pin(async move {
+            Err(PostgresAuthMethodBuildError::unsupported(
+                self.method(),
+                "challenge_bound_known_subject_active_proof_completion",
             ))
         })
     }
@@ -316,13 +395,29 @@ impl PostgresAuthMethodRegistry {
             .build_out_of_band_issue(request)
     }
 
-    pub(crate) fn build_active_proof_method_challenge(
+    pub(crate) async fn build_active_proof_method_challenge<'tx>(
         &self,
+        tx: &mut Tx<'tx>,
         request: &IssueActiveProofMethodChallengeRequest,
         challenge: &ActiveProofMethodChallengeSeed,
     ) -> Result<ActiveProofMethodChallengeBuild, PostgresAuthMethodBuildError> {
         self.plugin_for_method(&request.method)?
-            .build_active_proof_method_challenge(request, challenge)
+            .build_active_proof_method_challenge(tx, request, challenge)
+            .await
+    }
+
+    pub(crate) async fn build_challenge_bound_known_subject_active_proof_method_challenge<'tx>(
+        &self,
+        tx: &mut Tx<'tx>,
+        request: &IssueActiveProofMethodChallengeRequest,
+        subject_id: &SubjectId,
+        challenge: &ActiveProofMethodChallengeSeed,
+    ) -> Result<ActiveProofMethodChallengeBuild, PostgresAuthMethodBuildError> {
+        self.plugin_for_method(&request.method)?
+            .build_challenge_bound_known_subject_active_proof_method_challenge(
+                tx, request, subject_id, challenge,
+            )
+            .await
     }
 
     pub(crate) fn build_out_of_band_resend_commit_work(
@@ -390,6 +485,31 @@ impl PostgresAuthMethodRegistry {
     ) -> Result<KnownSubjectActiveProofMethodVerification, PostgresAuthMethodBuildError> {
         self.plugin_for_method(&response.method)?
             .verify_known_subject_active_proof_method_response(tx, subject_id, response)
+            .await
+    }
+
+    pub(crate) fn verify_challenge_bound_known_subject_active_proof_method_response_before_state_load(
+        &self,
+        challenge: &ActiveProofMethodChallengeMaterial,
+        response: &CompleteChallengeBoundKnownSubjectActiveProofMethodResponse,
+    ) -> Result<(), PostgresAuthMethodBuildError> {
+        self.plugin_for_proof(&challenge.proof)?
+            .verify_challenge_bound_known_subject_active_proof_method_response_before_state_load(
+                challenge, response,
+            )
+    }
+
+    pub(crate) async fn verify_challenge_bound_known_subject_active_proof_method_response<'tx>(
+        &self,
+        tx: &mut Tx<'tx>,
+        subject_id: &SubjectId,
+        challenge: &ActiveProofMethodChallengeMaterial,
+        response: &CompleteChallengeBoundKnownSubjectActiveProofMethodResponse,
+    ) -> Result<KnownSubjectActiveProofMethodVerification, PostgresAuthMethodBuildError> {
+        self.plugin_for_proof(&challenge.proof)?
+            .verify_challenge_bound_known_subject_active_proof_method_response(
+                tx, subject_id, challenge, response,
+            )
             .await
     }
 

@@ -70,6 +70,7 @@ fn state_dependent_mutations_have_commit_time_guards() {
                 Command::RecordActiveProofFailure(RecordActiveProofFailure {
                     now: at(40),
                     attempt_id: id("attempt"),
+                    challenge_id: None,
                     method: proof_method(ProofFamily::SharedSecretOtp),
                     weak_proof_gate: verified_proof_of_work_gate(),
                 }),
@@ -83,6 +84,7 @@ fn state_dependent_mutations_have_commit_time_guards() {
                 Command::RecordActiveProofFailure(RecordActiveProofFailure {
                     now: at(40),
                     attempt_id: id("attempt"),
+                    challenge_id: None,
                     method: proof_method(ProofFamily::SharedSecretOtp),
                     weak_proof_gate: verified_proof_of_work_gate(),
                 }),
@@ -329,6 +331,7 @@ fn command_commit_guard_matrix_is_stable() {
                 Command::RecordActiveProofFailure(RecordActiveProofFailure {
                     now: at(40),
                     attempt_id: id("attempt"),
+                    challenge_id: None,
                     method: proof_method(ProofFamily::SharedSecretOtp),
                     weak_proof_gate: verified_proof_of_work_gate(),
                 }),
@@ -763,6 +766,7 @@ fn commands_reject_missing_required_loaded_state_before_planning_mutations() {
         Command::RecordActiveProofFailure(RecordActiveProofFailure {
             now: at(40),
             attempt_id: id("attempt"),
+            challenge_id: None,
             method: proof_method(ProofFamily::SharedSecretOtp),
             weak_proof_gate: verified_proof_of_work_gate(),
         }),

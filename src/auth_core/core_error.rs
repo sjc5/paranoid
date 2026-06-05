@@ -116,6 +116,8 @@ pub enum Error {
     },
     /// Out-of-band challenge issue requires runtime-owned fast-fail cookie construction.
     OutOfBandChallengeIssueRequiresRuntimeCookieConstruction,
+    /// Active-proof method challenge issue requires runtime-owned method dispatch.
+    ActiveProofMethodChallengeIssueRequiresRuntimeMethodDispatch,
     /// Out-of-band challenge resend requires runtime-owned method dispatch.
     OutOfBandChallengeResendRequiresRuntimeMethodDispatch,
     /// Active-proof completion requires runtime-owned method dispatch.
@@ -215,6 +217,8 @@ pub enum Error {
     EmptyActiveProofChallengeResponseSecret,
     /// Active-proof method challenge presentations must not be empty.
     EmptyActiveProofMethodChallengePresentation,
+    /// Active-proof method challenge request payloads must not be empty.
+    EmptyActiveProofMethodChallengeRequestPayload,
     /// Active-proof method challenge state payloads must not be empty.
     EmptyActiveProofMethodChallengeState,
     /// Active-proof method response payloads must not be empty.
@@ -498,6 +502,12 @@ impl fmt::Display for Error {
                     "auth core: out-of-band challenge issue requires runtime-owned fast-fail cookie construction"
                 )
             }
+            Self::ActiveProofMethodChallengeIssueRequiresRuntimeMethodDispatch => {
+                write!(
+                    f,
+                    "auth core: active-proof method challenge issue requires runtime-owned method dispatch"
+                )
+            }
             Self::OutOfBandChallengeResendRequiresRuntimeMethodDispatch => {
                 write!(
                     f,
@@ -722,6 +732,12 @@ impl fmt::Display for Error {
                 write!(
                     f,
                     "auth core: active-proof method challenge presentation is empty"
+                )
+            }
+            Self::EmptyActiveProofMethodChallengeRequestPayload => {
+                write!(
+                    f,
+                    "auth core: active-proof method challenge request payload is empty"
                 )
             }
             Self::EmptyActiveProofMethodChallengeState => {

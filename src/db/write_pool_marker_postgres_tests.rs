@@ -162,7 +162,14 @@ async fn read_only_role_hidden_behind_write_pool_proves_public_db_handle_contrac
         .expect("seed Fleet topic event");
 
     let read_only_role_name = read_only_test_role_name();
-    grant_schema_read_access_to_login_role(&admin_sqlx_pool, &read_only_role_name).await;
+    grant_marker_table_read_access_to_login_role(
+        &admin_sqlx_pool,
+        &read_only_role_name,
+        &kv_config,
+        &fleet_config,
+        &queue_config,
+    )
+    .await;
 
     let read_only_database_url = common_read_only_test_database_url();
     let read_only_backed_write_pool =
@@ -183,8 +190,15 @@ async fn read_only_role_hidden_behind_write_pool_proves_public_db_handle_contrac
     .await;
 
     read_only_backed_write_pool.sqlx_pool().close().await;
+    revoke_marker_table_read_access_from_login_role(
+        &admin_sqlx_pool,
+        &read_only_role_name,
+        &kv_config,
+        &fleet_config,
+        &queue_config,
+    )
+    .await;
     drop_marker_tables(&admin_sqlx_pool, &kv_config, &fleet_config, &queue_config).await;
-    revoke_schema_read_access_from_login_role(&admin_sqlx_pool, &read_only_role_name).await;
     admin_pool.sqlx_pool().close().await;
     admin_sqlx_pool.close().await;
 }
@@ -623,6 +637,43 @@ async fn drop_marker_tables(
     common_drop_test_table(pool, &queue_config.pause_table_name).await;
 }
 
+fn readable_marker_test_tables<'a>(
+    kv_config: &'a KvStoreConfig,
+    fleet_config: &'a FleetStoreConfig,
+    queue_config: &'a QueueStoreConfig,
+) -> Vec<&'a PgQualifiedTableName> {
+    let mut tables = Vec::new();
+    for table in [
+        &kv_config.table_name,
+        &kv_config.schema_ledger_table_name,
+        &fleet_config.state_table_name,
+        &fleet_config.coordination_table_name,
+        &fleet_config.fencing_counter_table_name,
+        &fleet_config.schema_ledger_table_name,
+        &queue_config.table_name,
+        &queue_config.dead_letter_table_name,
+        &queue_config.pause_table_name,
+        &queue_config.schema_ledger_table_name,
+    ] {
+        if !tables.contains(&table) {
+            tables.push(table);
+        }
+    }
+    tables
+}
+
+fn comma_separated_quoted_table_names(
+    kv_config: &KvStoreConfig,
+    fleet_config: &FleetStoreConfig,
+    queue_config: &QueueStoreConfig,
+) -> String {
+    readable_marker_test_tables(kv_config, fleet_config, queue_config)
+        .into_iter()
+        .map(|table| table.quoted().to_string())
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 fn unique_test_table_name(prefix: &str) -> PgQualifiedTableName {
     PgQualifiedTableName::unqualified(unique_test_identifier_text(prefix)).expect("table name")
 }
@@ -646,7 +697,13 @@ async fn connect_write_pool(database_url: &str, application_name: &str) -> Write
     WritePool::connect(config).await.expect("connect WritePool")
 }
 
-async fn grant_schema_read_access_to_login_role(pool: &PgPool, role_name: &PgIdentifier) {
+async fn grant_marker_table_read_access_to_login_role(
+    pool: &PgPool,
+    role_name: &PgIdentifier,
+    kv_config: &KvStoreConfig,
+    fleet_config: &FleetStoreConfig,
+    queue_config: &QueueStoreConfig,
+) {
     unparameterized_simple_query(sqlx::AssertSqlSafe(format!(
         "GRANT USAGE ON SCHEMA public TO {}",
         role_name.quoted()
@@ -655,23 +712,33 @@ async fn grant_schema_read_access_to_login_role(pool: &PgPool, role_name: &PgIde
     .await
     .expect("grant public schema usage");
 
+    let marker_table_names =
+        comma_separated_quoted_table_names(kv_config, fleet_config, queue_config);
     unparameterized_simple_query(sqlx::AssertSqlSafe(format!(
-        "GRANT SELECT ON ALL TABLES IN SCHEMA public TO {}",
+        "GRANT SELECT ON TABLE {marker_table_names} TO {}",
         role_name.quoted()
     )))
     .execute(pool)
     .await
-    .expect("grant schema read access");
+    .expect("grant marker table read access");
 }
 
-async fn revoke_schema_read_access_from_login_role(pool: &PgPool, role_name: &PgIdentifier) {
+async fn revoke_marker_table_read_access_from_login_role(
+    pool: &PgPool,
+    role_name: &PgIdentifier,
+    kv_config: &KvStoreConfig,
+    fleet_config: &FleetStoreConfig,
+    queue_config: &QueueStoreConfig,
+) {
+    let marker_table_names =
+        comma_separated_quoted_table_names(kv_config, fleet_config, queue_config);
     unparameterized_simple_query(sqlx::AssertSqlSafe(format!(
-        "REVOKE ALL PRIVILEGES ON ALL TABLES IN SCHEMA public FROM {}",
+        "REVOKE ALL PRIVILEGES ON TABLE {marker_table_names} FROM {}",
         role_name.quoted()
     )))
     .execute(pool)
     .await
-    .expect("revoke schema table privileges");
+    .expect("revoke marker table privileges");
     unparameterized_simple_query(sqlx::AssertSqlSafe(format!(
         "REVOKE ALL PRIVILEGES ON SCHEMA public FROM {}",
         role_name.quoted()

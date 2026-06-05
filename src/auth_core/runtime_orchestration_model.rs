@@ -277,115 +277,8 @@ impl AuthWebRuntime {
     where
         A: AuthRuntimeStorageAdapter,
     {
-        if matches!(command, Command::ResolveRequest(_)) {
-            return Err(AuthWebRuntimeExecutionError::core(
-                Error::RequestResolutionRequiresRuntimeFreshIdGeneration,
-            ));
-        }
-        if matches!(command, Command::StartActiveProofAttempt(_)) {
-            return Err(AuthWebRuntimeExecutionError::core(
-                Error::ActiveProofAttemptStartRequiresRuntimeFreshIdGeneration,
-            ));
-        }
-        if matches!(
-            command,
-            Command::StartActiveProofAttemptForCurrentSession(_)
-                | Command::StartActiveProofAttemptForCurrentTrustedDevice(_)
-        ) {
-            return Err(AuthWebRuntimeExecutionError::core(
-                Error::ActiveProofAttemptStartRequiresRuntimeFreshIdGeneration,
-            ));
-        }
-        if matches!(command, Command::CompleteFullAuthentication(_)) {
-            return Err(AuthWebRuntimeExecutionError::core(
-                Error::FullAuthenticationCompletionRequiresRuntimeFreshIdGeneration,
-            ));
-        }
-        if matches!(
-            command,
-            Command::CompleteTrustedDeviceRevivalWithActiveProof(_)
-        ) {
-            return Err(AuthWebRuntimeExecutionError::core(
-                Error::TrustedDeviceRevivalCompletionRequiresRuntimeFreshIdGeneration,
-            ));
-        }
-        if matches!(command, Command::CompleteStepUp(_)) {
-            return Err(AuthWebRuntimeExecutionError::core(
-                Error::StepUpCompletionRequiresRuntimeAttemptContinuation,
-            ));
-        }
-        if matches!(command, Command::IssueOutOfBandChallenge(_)) {
-            return Err(AuthWebRuntimeExecutionError::core(
-                Error::OutOfBandChallengeIssueRequiresRuntimeCookieConstruction,
-            ));
-        }
-        if matches!(command, Command::IssueActiveProofMethodChallenge(_)) {
-            return Err(AuthWebRuntimeExecutionError::core(
-                Error::LoadedStateContradiction(
-                    "active-proof method challenge issue requires runtime nonce construction",
-                ),
-            ));
-        }
-        if matches!(command, Command::CompleteActiveProofChallenge(_)) {
-            return Err(AuthWebRuntimeExecutionError::core(
-                Error::ActiveProofCompletionRequiresRuntimeMethodDispatch,
-            ));
-        }
-        if matches!(command, Command::ResendOutOfBandChallenge(_)) {
-            return Err(AuthWebRuntimeExecutionError::core(
-                Error::OutOfBandChallengeResendRequiresRuntimeMethodDispatch,
-            ));
-        }
-        if matches!(command, Command::RecordActiveProofFailure(_)) {
-            return Err(AuthWebRuntimeExecutionError::core(
-                Error::ActiveProofFailureRequiresRuntimeMethodDispatch,
-            ));
-        }
-        if matches!(command, Command::PlanCredentialReset(_)) {
-            return Err(AuthWebRuntimeExecutionError::core(
-                Error::CredentialResetPlanningRequiresRuntimeLifecycleDecision,
-            ));
-        }
-        if matches!(command, Command::ExecuteCredentialReset(_)) {
-            return Err(AuthWebRuntimeExecutionError::core(
-                Error::CredentialResetExecutionRequiresRuntimeMethodDispatch,
-            ));
-        }
-        if matches!(command, Command::CancelPendingCredentialReset(_)) {
-            return Err(AuthWebRuntimeExecutionError::core(
-                Error::CredentialResetCancellationRequiresRuntimeLifecycleDecision,
-            ));
-        }
-        if matches!(
-            command,
-            Command::ExecuteNonResetPendingCredentialLifecycleAction(_)
-        ) {
-            return Err(AuthWebRuntimeExecutionError::core(
-                Error::CredentialLifecycleExecutionRequiresRuntimeMethodDispatch,
-            ));
-        }
-        if matches!(
-            command,
-            Command::CancelNonResetPendingCredentialLifecycleAction(_)
-        ) {
-            return Err(AuthWebRuntimeExecutionError::core(
-                Error::CredentialLifecycleCancellationRequiresRuntimeLifecycleDecision,
-            ));
-        }
-        if matches!(command, Command::ScheduleSubjectAuthStateDeletion(_)) {
-            return Err(AuthWebRuntimeExecutionError::core(
-                Error::SubjectAuthStateDeletionSchedulingRequiresRuntimeLifecycleDecision,
-            ));
-        }
-        if matches!(command, Command::ExecutePendingSubjectAuthStateDeletion(_)) {
-            return Err(AuthWebRuntimeExecutionError::core(
-                Error::SubjectAuthStateDeletionExecutionRequiresRuntimeLifecycleDecision,
-            ));
-        }
-        if matches!(command, Command::CancelPendingSubjectAuthStateDeletion(_)) {
-            return Err(AuthWebRuntimeExecutionError::core(
-                Error::SubjectAuthStateDeletionCancellationRequiresRuntimeLifecycleDecision,
-            ));
+        if let Some(error) = command.direct_web_runtime_rejection() {
+            return Err(AuthWebRuntimeExecutionError::core(error));
         }
         let decoded = self
             .web_transport
@@ -520,6 +413,7 @@ impl AuthWebRuntime {
                 now,
                 &challenge_cookie.proof,
                 response.weak_proof_gate_response.as_ref(),
+                None,
                 weak_proof_gate_verifier,
             )
             .map_err(AuthWebRuntimeExecutionError::core)?;

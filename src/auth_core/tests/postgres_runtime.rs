@@ -11,6 +11,11 @@ use super::super::email_otp_method::{
     PostgresEmailOtpMethodPlugin, PostgresEmailOtpMethodPluginConfig,
     PostgresEmailOtpSubjectResolver, PostgresEmailOtpVerifiedIdentifier,
 };
+use super::super::postgres_method_runtime::PostgresAuthMethodPlugin;
+use super::super::postgres_password_derived_signature_method::{
+    PasswordDerivedSignatureVerifierForTest, PostgresPasswordDerivedSignatureMethodPlugin,
+    PostgresPasswordDerivedSignatureMethodPluginConfig,
+};
 use super::super::postgres_recovery_code_method::{
     PostgresRecoveryCodeMethodPlugin, PostgresRecoveryCodeMethodPluginConfig,
 };
@@ -18,7 +23,10 @@ use super::super::postgres_totp_method::{
     PostgresTotpCodeVerifier, PostgresTotpMethodError, PostgresTotpMethodPlugin,
     PostgresTotpMethodPluginConfig,
 };
-use crate::crypto::SecretBytes;
+use crate::crypto::{
+    PASSWORD_KDF_MIN_ITERATIONS, PASSWORD_KDF_MIN_MEMORY_COST_KIB, PASSWORD_KDF_SALT_SIZE,
+    PasswordKdfParams, PasswordKdfSalt, SecretBytes,
+};
 use crate::db::{
     BootstrapConfig, DatabaseOperationObserver, PgIdentifier, PgQualifiedTableName, PgSchemaName,
     Pool, PoolConfig, Tx, WritePool, pooler_safe_query, pooler_safe_query_as,
@@ -76,6 +84,14 @@ struct PostgresRuntimeTestHarness {
     email_otp_plugin: Option<Arc<PostgresEmailOtpMethodPlugin>>,
     totp_plugin: Option<Arc<PostgresTotpMethodPlugin<TestTotpCodeVerifier>>>,
     recovery_code_plugin: Option<Arc<PostgresRecoveryCodeMethodPlugin>>,
+    password_derived_signature_plugin: Option<Arc<PostgresPasswordDerivedSignatureMethodPlugin>>,
+}
+
+#[derive(Clone, Copy, Default)]
+struct FirstPartyMethodSelection {
+    include_totp_plugin: bool,
+    include_recovery_code_plugin: bool,
+    include_password_derived_signature_plugin: bool,
 }
 
 impl PostgresRuntimeTestHarness {
@@ -106,8 +122,7 @@ impl PostgresRuntimeTestHarness {
             Some(subject_resolver),
             None,
             TestActiveMethodVerificationMode::BeforeStateLoad,
-            false,
-            false,
+            FirstPartyMethodSelection::default(),
         )
         .await
     }
@@ -144,6 +159,21 @@ impl PostgresRuntimeTestHarness {
         Self::connect_required_with_configured_secret_plugins(false, true).await
     }
 
+    async fn connect_required_with_password_derived_signature_method() -> Self {
+        Self::connect_required_with_registered_plugins_for_test_method_and_configured_methods(
+            None,
+            true,
+            None,
+            None,
+            TestActiveMethodVerificationMode::BeforeStateLoad,
+            FirstPartyMethodSelection {
+                include_password_derived_signature_plugin: true,
+                ..FirstPartyMethodSelection::default()
+            },
+        )
+        .await
+    }
+
     async fn connect_required_with_configured_secret_plugins(
         include_totp_plugin: bool,
         include_recovery_code_plugin: bool,
@@ -154,8 +184,11 @@ impl PostgresRuntimeTestHarness {
             None,
             None,
             TestActiveMethodVerificationMode::BeforeStateLoad,
-            include_totp_plugin,
-            include_recovery_code_plugin,
+            FirstPartyMethodSelection {
+                include_totp_plugin,
+                include_recovery_code_plugin,
+                ..FirstPartyMethodSelection::default()
+            },
         )
         .await
     }
@@ -219,8 +252,7 @@ impl PostgresRuntimeTestHarness {
             email_otp_subject_resolver,
             test_method,
             active_method_verification_mode,
-            false,
-            false,
+            FirstPartyMethodSelection::default(),
         )
         .await
     }
@@ -231,11 +263,14 @@ impl PostgresRuntimeTestHarness {
         email_otp_subject_resolver: Option<Arc<dyn PostgresEmailOtpSubjectResolver>>,
         test_method: Option<ProofMethodDeclaration>,
         active_method_verification_mode: TestActiveMethodVerificationMode,
-        include_totp_plugin: bool,
-        include_recovery_code_plugin: bool,
+        first_party_methods: FirstPartyMethodSelection,
     ) -> Self {
         let database_url = required_auth_postgres_runtime_test_database_url();
 
+        let write_pool =
+            WritePool::connect(PoolConfig::new(SecretString::from(database_url.clone())))
+                .await
+                .expect("connect write test database");
         let raw_pool = Pool::connect(PoolConfig::new(SecretString::from(database_url)))
             .await
             .expect("connect test database");
@@ -296,7 +331,7 @@ impl PostgresRuntimeTestHarness {
         } else {
             None
         };
-        let totp_plugin = if include_totp_plugin {
+        let totp_plugin = if first_party_methods.include_totp_plugin {
             Some(Arc::new(
                 PostgresTotpMethodPlugin::new(
                     PostgresTotpMethodPluginConfig::new(
@@ -312,7 +347,7 @@ impl PostgresRuntimeTestHarness {
         } else {
             None
         };
-        let recovery_code_plugin = if include_recovery_code_plugin {
+        let recovery_code_plugin = if first_party_methods.include_recovery_code_plugin {
             Some(Arc::new(
                 PostgresRecoveryCodeMethodPlugin::new(
                     PostgresRecoveryCodeMethodPluginConfig::new(
@@ -328,6 +363,22 @@ impl PostgresRuntimeTestHarness {
         } else {
             None
         };
+        let password_derived_signature_plugin =
+            if first_party_methods.include_password_derived_signature_plugin {
+                Some(Arc::new(
+                    PostgresPasswordDerivedSignatureMethodPlugin::new(
+                        PostgresPasswordDerivedSignatureMethodPluginConfig::new(
+                            Some(schema.clone()),
+                            PgIdentifier::new("__paranoid_auth_password_signature_")
+                                .expect("password-derived signature table prefix"),
+                        )
+                        .expect("password-derived signature method config"),
+                    )
+                    .expect("password-derived signature method plugin"),
+                ))
+            } else {
+                None
+            };
         let mut store = super::super::postgres_store::PostgresAuthStore::new(
             store_config.clone(),
             test_keyset("tests.auth.postgres-runtime.credentials.v1"),
@@ -347,6 +398,9 @@ impl PostgresRuntimeTestHarness {
         if let Some(plugin) = recovery_code_plugin.as_ref() {
             plugins.push(plugin.clone());
         }
+        if let Some(plugin) = password_derived_signature_plugin.as_ref() {
+            plugins.push(plugin.clone());
+        }
         if !plugins.is_empty() {
             let registry =
                 super::super::postgres_method_runtime::PostgresAuthMethodRegistry::new(plugins)
@@ -354,14 +408,14 @@ impl PostgresRuntimeTestHarness {
             store = store.with_method_registry(Arc::new(registry));
         }
         store
-            .migrate_schema(&pool)
+            .migrate_schema(&write_pool)
             .await
             .expect("migrate auth schema");
         let runtime = super::super::postgres_runtime::PostgresAuthWebRuntime::new(
             AuthWebRuntime::new(config(), auth_web_transport()),
             pool.clone(),
             store,
-            Arc::new(TestWeakProofGateVerifier),
+            Arc::new(hashcash_verifier_for_test()),
         );
 
         Self {
@@ -374,6 +428,7 @@ impl PostgresRuntimeTestHarness {
             email_otp_plugin,
             totp_plugin,
             recovery_code_plugin,
+            password_derived_signature_plugin,
         }
     }
 
@@ -386,6 +441,26 @@ impl PostgresRuntimeTestHarness {
     }
 }
 
+fn assert_no_database_operations(observer: &DatabaseOperationObserver, expectation: &'static str) {
+    let records = observer.records();
+    assert!(
+        records.is_empty(),
+        "{expectation}; observed database operations: {records:?}"
+    );
+}
+
+fn assert_database_operations_include_label(
+    observer: &DatabaseOperationObserver,
+    expected_label: &'static str,
+    expectation: &'static str,
+) {
+    let records = observer.records();
+    assert!(
+        records.iter().any(|record| record.label == expected_label),
+        "{expectation}; expected database operation label {expected_label:?}; observed database operations: {records:?}"
+    );
+}
+
 fn email_otp_plugin_for_harness(
     harness: &PostgresRuntimeTestHarness,
 ) -> &PostgresEmailOtpMethodPlugin {
@@ -393,6 +468,15 @@ fn email_otp_plugin_for_harness(
         .email_otp_plugin
         .as_ref()
         .expect("email otp method plugin")
+}
+
+fn password_derived_signature_plugin_for_harness(
+    harness: &PostgresRuntimeTestHarness,
+) -> &PostgresPasswordDerivedSignatureMethodPlugin {
+    harness
+        .password_derived_signature_plugin
+        .as_ref()
+        .expect("password-derived signature method plugin")
 }
 
 struct EmbeddedSubjectEmailOtpResolver;
@@ -524,6 +608,39 @@ impl PostgresTotpCodeVerifier for TestTotpCodeVerifier {
         now: UnixSeconds,
     ) -> Result<bool, PostgresTotpMethodError> {
         Ok(submitted_code == test_totp_code_bytes(secret.expose_secret(), now))
+    }
+
+    fn accepted_totp_codes_for_challenge_window(
+        &self,
+        secret: &SecretBytes,
+        issued_at: UnixSeconds,
+        expires_at: UnixSeconds,
+    ) -> Result<Vec<KnownSubjectActiveProofSecretResponse>, PostgresTotpMethodError> {
+        if expires_at <= issued_at {
+            return Err(PostgresTotpMethodError::Core(
+                Error::ActiveProofChallengeCookieExpiresAtOrBeforeIssuedAt,
+            ));
+        }
+        let first_step = issued_at.get() / 30;
+        let last_step = expires_at
+            .get()
+            .checked_sub(1)
+            .ok_or(PostgresTotpMethodError::Core(Error::TimeOverflow))?
+            / 30;
+        let mut accepted_codes = Vec::new();
+        for step in first_step..=last_step {
+            let step_time = step
+                .checked_mul(30)
+                .ok_or(PostgresTotpMethodError::Core(Error::TimeOverflow))?;
+            accepted_codes.push(
+                KnownSubjectActiveProofSecretResponse::try_from_bytes(test_totp_code_bytes(
+                    secret.expose_secret(),
+                    UnixSeconds::new(step_time),
+                ))
+                .map_err(PostgresTotpMethodError::Core)?,
+            );
+        }
+        Ok(accepted_codes)
     }
 }
 
@@ -1008,6 +1125,15 @@ fn mismatched_recovery_code_test_method_response_payload() -> KnownSubjectActive
         .expect("mismatched recovery code test method response payload")
 }
 
+fn minimum_accepted_password_kdf_params_for_tests() -> PasswordKdfParams {
+    PasswordKdfParams::new(
+        PASSWORD_KDF_MIN_MEMORY_COST_KIB,
+        PASSWORD_KDF_MIN_ITERATIONS,
+        1,
+    )
+    .expect("minimum accepted password KDF params")
+}
+
 fn guessed_recovery_code_test_method_response_payload() -> KnownSubjectActiveProofSecretResponse {
     KnownSubjectActiveProofSecretResponse::try_from_bytes(b"1111111111111111".as_slice())
         .expect("guessed recovery code test method response payload")
@@ -1073,65 +1199,75 @@ impl super::super::postgres_method_runtime::PostgresAuthMethodPlugin
         )
     }
 
-    fn build_active_proof_method_challenge(
-        &self,
-        request: &IssueActiveProofMethodChallengeRequest,
-        challenge: &ActiveProofMethodChallengeSeed,
-    ) -> Result<
-        super::super::postgres_method_runtime::ActiveProofMethodChallengeBuild,
-        super::super::postgres_method_runtime::PostgresAuthMethodBuildError,
+    fn build_active_proof_method_challenge<'a, 'tx>(
+        &'a self,
+        _tx: &'a mut Tx<'tx>,
+        request: &'a IssueActiveProofMethodChallengeRequest,
+        challenge: &'a ActiveProofMethodChallengeSeed,
+    ) -> Pin<
+        Box<
+            dyn Future<
+                    Output = Result<
+                        super::super::postgres_method_runtime::ActiveProofMethodChallengeBuild,
+                        super::super::postgres_method_runtime::PostgresAuthMethodBuildError,
+                    >,
+                > + Send
+                + 'a,
+        >,
     > {
-        if request.method != self.method {
-            return Err(
-                super::super::postgres_method_runtime::PostgresAuthMethodBuildError::plugin_rejected(
-                    self.method(),
-                    "active_proof_method_challenge_issue",
-                    "active proof challenge issue used a different method".to_owned(),
-                ),
-            );
-        }
-        if challenge.proof != self.method.verified_proof_summary() {
-            return Err(
-                super::super::postgres_method_runtime::PostgresAuthMethodBuildError::plugin_rejected(
-                    self.method(),
-                    "active_proof_method_challenge_issue",
-                    "active proof challenge material used a different proof".to_owned(),
-                ),
-            );
-        }
-        let mut method_challenge_state = b"sealed-method-state:".to_vec();
-        method_challenge_state.extend_from_slice(challenge.nonce.as_bytes());
-        let method_challenge_state = ActiveProofMethodChallengeState::try_from_bytes(
-            method_challenge_state,
-        )
-        .map_err(|error| {
-            super::super::postgres_method_runtime::PostgresAuthMethodBuildError::plugin_rejected(
-                self.method(),
-                "active_proof_method_challenge_issue",
-                error.to_string(),
-            )
-        })?;
-        let mut presentation = self.challenge_presentation_prefix()?.to_vec();
-        presentation.extend_from_slice(challenge.nonce.as_bytes());
-        presentation.extend_from_slice(b";state:");
-        presentation.extend_from_slice(method_challenge_state.as_bytes());
-        let presentation =
-            ActiveProofMethodChallengePresentation::try_from_bytes(presentation).map_err(
-                |error| {
+        Box::pin(async move {
+            if request.method != self.method {
+                return Err(
                     super::super::postgres_method_runtime::PostgresAuthMethodBuildError::plugin_rejected(
                         self.method(),
                         "active_proof_method_challenge_issue",
-                        error.to_string(),
-                    )
-                },
-            )?;
-        Ok(
-            super::super::postgres_method_runtime::ActiveProofMethodChallengeBuild::new(
-                presentation,
-                method_challenge_state,
-                Vec::new(),
-            ),
-        )
+                        "active proof challenge issue used a different method".to_owned(),
+                    ),
+                );
+            }
+            if challenge.proof != self.method.verified_proof_summary() {
+                return Err(
+                    super::super::postgres_method_runtime::PostgresAuthMethodBuildError::plugin_rejected(
+                        self.method(),
+                        "active_proof_method_challenge_issue",
+                        "active proof challenge material used a different proof".to_owned(),
+                    ),
+                );
+            }
+            let mut method_challenge_state = b"sealed-method-state:".to_vec();
+            method_challenge_state.extend_from_slice(challenge.nonce.as_bytes());
+            let method_challenge_state =
+                ActiveProofMethodChallengeState::try_from_bytes(method_challenge_state).map_err(
+                    |error| {
+                        super::super::postgres_method_runtime::PostgresAuthMethodBuildError::plugin_rejected(
+                            self.method(),
+                            "active_proof_method_challenge_issue",
+                            error.to_string(),
+                        )
+                    },
+                )?;
+            let mut presentation = self.challenge_presentation_prefix()?.to_vec();
+            presentation.extend_from_slice(challenge.nonce.as_bytes());
+            presentation.extend_from_slice(b";state:");
+            presentation.extend_from_slice(method_challenge_state.as_bytes());
+            let presentation =
+                ActiveProofMethodChallengePresentation::try_from_bytes(presentation).map_err(
+                    |error| {
+                        super::super::postgres_method_runtime::PostgresAuthMethodBuildError::plugin_rejected(
+                            self.method(),
+                            "active_proof_method_challenge_issue",
+                            error.to_string(),
+                        )
+                    },
+                )?;
+            Ok(
+                super::super::postgres_method_runtime::ActiveProofMethodChallengeBuild::new(
+                    presentation,
+                    method_challenge_state,
+                    Vec::new(),
+                ),
+            )
+        })
     }
 
     fn verify_active_proof_method_response_before_state_load(
@@ -1711,9 +1847,10 @@ async fn auth_bootstrap_facade_uses_db_foundation_schema() {
 
     let _runtime = auth_bootstrap
         .migrate_schema_and_build_web_runtime_after_db_bootstrap(
+            &write_pool,
             pool.clone(),
             AuthWebRuntime::new(config(), auth_web_transport()),
-            Arc::new(TestWeakProofGateVerifier),
+            Arc::new(hashcash_verifier_for_test()),
         )
         .await
         .expect("migrate auth schema and build runtime");
@@ -1729,6 +1866,7 @@ async fn auth_bootstrap_facade_uses_db_foundation_schema() {
         "auth_email_otp_delivery_commands",
         "auth_totp_verifiers",
         "auth_recovery_code_codes",
+        "auth_password_signature_verifiers",
     ] {
         assert!(
             auth_runtime_test_table_exists(&pool, &schema, table_name).await,
@@ -1772,9 +1910,14 @@ async fn postgres_runtime_completes_message_signature_through_method_registry() 
             StartAndIssueActiveProofMethodChallengeInput {
                 now: at(20),
                 proof_use: ProofUse::ContributeToFullAuthentication,
-                method,
+                method: method.clone(),
+                method_challenge_request_payload: None,
             },
-            challenge_issue_preflight_response(),
+            challenge_issue_preflight_response_for_test(
+                at(20),
+                ProofUse::ContributeToFullAuthentication,
+                &method,
+            ),
         )
         .await
         .expect("issue message signature challenge through method registry");
@@ -1817,6 +1960,42 @@ async fn postgres_runtime_completes_message_signature_through_method_registry() 
     );
 
     let completion_headers = headers_from_cookie_pairs(&[challenge_cookie_pair.as_str()]);
+    harness.database_operation_observer.clear();
+    let bad_response_error = runtime
+        .execute_active_proof_method_response_from_headers(
+            &completion_headers,
+            CompleteActiveProofMethodResponse {
+                now: at(40),
+                response_payload: mismatched_runtime_challenge_test_method_response_payload(
+                    ProofFamily::MessageSignature,
+                    message_signature_nonce,
+                    &subject_id,
+                ),
+                weak_proof_gate_response: None,
+            },
+        )
+        .await
+        .expect_err("bad message signature response must reject before authoritative state load");
+    assert!(matches!(
+        bad_response_error,
+        super::super::postgres_runtime::AuthPostgresWebRuntimeExecutionError::MethodBuild(
+            super::super::postgres_method_runtime::PostgresAuthMethodBuildError::PluginRejected {
+                family: ProofFamily::MessageSignature,
+                operation: "active_proof_completion",
+                ..
+            }
+        )
+    ));
+    assert_no_database_operations(
+        &harness.database_operation_observer,
+        "bad message signature response must reject before any database operation",
+    );
+    assert_eq!(
+        count_open_challenges_for_challenge(pool, store_config, &challenge_id).await,
+        1,
+        "bad message signature response must leave the authoritative challenge open"
+    );
+
     let completed = runtime
         .execute_active_proof_method_response_from_headers(
             &completion_headers,
@@ -1886,9 +2065,14 @@ async fn postgres_runtime_completes_message_signature_after_authoritative_confir
             StartAndIssueActiveProofMethodChallengeInput {
                 now: at(20),
                 proof_use: ProofUse::ContributeToFullAuthentication,
-                method,
+                method: method.clone(),
+                method_challenge_request_payload: None,
             },
-            challenge_issue_preflight_response(),
+            challenge_issue_preflight_response_for_test(
+                at(20),
+                ProofUse::ContributeToFullAuthentication,
+                &method,
+            ),
         )
         .await
         .expect("issue authoritative message signature challenge through method registry");
@@ -1949,6 +2133,509 @@ async fn postgres_runtime_completes_message_signature_after_authoritative_confir
 }
 
 #[tokio::test]
+async fn postgres_runtime_completes_password_derived_signature_after_authoritative_recheck() {
+    let _postgres_runtime_test_guard = AUTH_POSTGRES_RUNTIME_TEST_LOCK.lock().await;
+    let harness =
+        PostgresRuntimeTestHarness::connect_required_with_password_derived_signature_method().await;
+    let pool = &harness.pool;
+    let store_config = &harness.store_config;
+    let runtime = &harness.runtime;
+    let plugin = password_derived_signature_plugin_for_harness(&harness);
+    let empty_headers = HeaderMap::new();
+    let subject_id: SubjectId = id("password-signature-subject");
+    let password_credential_id: VerifiedProofSourceId = id("password-signature-credential");
+    let lookup_handle = b"password-signature-lookup";
+    let password = b"correct-password";
+    let salt = PasswordKdfSalt::from_bytes(&[11_u8; PASSWORD_KDF_SALT_SIZE]).expect("KDF salt");
+    let params = minimum_accepted_password_kdf_params_for_tests();
+
+    plugin
+        .store_verifier_for_test(
+            pool,
+            PasswordDerivedSignatureVerifierForTest {
+                subject_id: &subject_id,
+                password_credential_id: &password_credential_id,
+                lookup_handle,
+                password,
+                salt,
+                params,
+                now: at(10),
+            },
+        )
+        .await
+        .expect("store password-derived verifier");
+
+    let issued = runtime
+        .execute_unbound_active_proof_attempt_start_and_active_proof_method_challenge_issue_from_headers(
+            &empty_headers,
+            StartAndIssueActiveProofMethodChallengeInput {
+                now: at(20),
+                proof_use: ProofUse::ContributeToFullAuthentication,
+                method: plugin.method().clone(),
+                method_challenge_request_payload: Some(
+                    PostgresPasswordDerivedSignatureMethodPlugin::challenge_request_payload_for_test(
+                        lookup_handle,
+                    )
+                    .expect("password-derived challenge request payload"),
+                ),
+            },
+            challenge_issue_preflight_response_for_test(
+                at(20),
+                ProofUse::ContributeToFullAuthentication,
+                plugin.method(),
+            ),
+        )
+        .await
+        .expect("issue password-derived signature challenge");
+    let (attempt_id, challenge_id, method_challenge) = match issued.outcome() {
+        Outcome::ActiveProofMethodChallengeIssued {
+            attempt_id,
+            challenge_id,
+            proof,
+            method_challenge,
+            ..
+        } => {
+            assert_eq!(proof, &plugin.method().verified_proof_summary());
+            (attempt_id.clone(), challenge_id.clone(), method_challenge)
+        }
+        outcome => panic!("expected password-derived signature challenge issue, got {outcome:?}"),
+    };
+    let challenge_cookie_pair = cookie_pair_from_set_cookie(
+        issued.set_cookie_headers(),
+        "__Host-__paranoid_auth_active_proof_challenge=",
+    )
+    .to_owned();
+    let completion_headers = headers_from_cookie_pairs(&[challenge_cookie_pair.as_str()]);
+    let response_payload = PostgresPasswordDerivedSignatureMethodPlugin::response_payload_for_test(
+        password,
+        method_challenge,
+    )
+    .expect("password-derived signature response");
+    let weak_proof_gate_response = bound_proof_of_work_gate_response_for_active_method_completion(
+        &completion_headers,
+        &response_payload,
+        at(30),
+    );
+
+    harness.database_operation_observer.clear();
+    let completed = runtime
+        .execute_active_proof_method_response_from_headers(
+            &completion_headers,
+            CompleteActiveProofMethodResponse {
+                now: at(30),
+                response_payload,
+                weak_proof_gate_response: Some(weak_proof_gate_response),
+            },
+        )
+        .await
+        .expect("complete password-derived signature proof");
+
+    assert_database_operations_include_label(
+        &harness.database_operation_observer,
+        "auth_core.password_derived_signature.verify.fetch_locked_current_verifier",
+        "password-derived signature success must recheck authoritative verifier state",
+    );
+    assert_eq!(
+        completed.outcome(),
+        &Outcome::ActiveProofCompleted {
+            attempt_id: attempt_id.clone(),
+            proof: plugin.method().verified_proof_summary(),
+        }
+    );
+    assert_eq!(
+        count_satisfied_proofs_for_attempt(pool, store_config, &attempt_id).await,
+        1
+    );
+    assert_eq!(
+        fetch_satisfied_proof_source_for_attempt(pool, store_config, &attempt_id).await,
+        Some(VerifiedProofSource::new(
+            VerifiedProofSourceKind::CredentialInstance,
+            password_credential_id,
+        ))
+    );
+    assert_eq!(
+        count_open_challenges_for_challenge(pool, store_config, &challenge_id).await,
+        0
+    );
+
+    harness.drop_schema().await;
+}
+
+#[tokio::test]
+async fn postgres_runtime_rejects_wrong_password_derived_signature_before_database_work() {
+    let _postgres_runtime_test_guard = AUTH_POSTGRES_RUNTIME_TEST_LOCK.lock().await;
+    let harness =
+        PostgresRuntimeTestHarness::connect_required_with_password_derived_signature_method().await;
+    let pool = &harness.pool;
+    let store_config = &harness.store_config;
+    let runtime = &harness.runtime;
+    let plugin = password_derived_signature_plugin_for_harness(&harness);
+    let empty_headers = HeaderMap::new();
+    let subject_id: SubjectId = id("wrong-password-signature-subject");
+    let password_credential_id: VerifiedProofSourceId = id("wrong-password-signature-credential");
+    let lookup_handle = b"wrong-password-signature-lookup";
+    let salt = PasswordKdfSalt::from_bytes(&[12_u8; PASSWORD_KDF_SALT_SIZE]).expect("KDF salt");
+    let params = minimum_accepted_password_kdf_params_for_tests();
+
+    plugin
+        .store_verifier_for_test(
+            pool,
+            PasswordDerivedSignatureVerifierForTest {
+                subject_id: &subject_id,
+                password_credential_id: &password_credential_id,
+                lookup_handle,
+                password: b"correct-password",
+                salt,
+                params,
+                now: at(10),
+            },
+        )
+        .await
+        .expect("store password-derived verifier");
+
+    let issued = runtime
+        .execute_unbound_active_proof_attempt_start_and_active_proof_method_challenge_issue_from_headers(
+            &empty_headers,
+            StartAndIssueActiveProofMethodChallengeInput {
+                now: at(20),
+                proof_use: ProofUse::ContributeToFullAuthentication,
+                method: plugin.method().clone(),
+                method_challenge_request_payload: Some(
+                    PostgresPasswordDerivedSignatureMethodPlugin::challenge_request_payload_for_test(
+                        lookup_handle,
+                    )
+                    .expect("password-derived challenge request payload"),
+                ),
+            },
+            challenge_issue_preflight_response_for_test(
+                at(20),
+                ProofUse::ContributeToFullAuthentication,
+                plugin.method(),
+            ),
+        )
+        .await
+        .expect("issue password-derived signature challenge");
+    let (challenge_id, method_challenge) = match issued.outcome() {
+        Outcome::ActiveProofMethodChallengeIssued {
+            challenge_id,
+            method_challenge,
+            ..
+        } => (challenge_id.clone(), method_challenge),
+        outcome => panic!("expected password-derived signature challenge issue, got {outcome:?}"),
+    };
+    let challenge_cookie_pair = cookie_pair_from_set_cookie(
+        issued.set_cookie_headers(),
+        "__Host-__paranoid_auth_active_proof_challenge=",
+    )
+    .to_owned();
+    let completion_headers = headers_from_cookie_pairs(&[challenge_cookie_pair.as_str()]);
+    let response_payload = PostgresPasswordDerivedSignatureMethodPlugin::response_payload_for_test(
+        b"wrong-password",
+        method_challenge,
+    )
+    .expect("wrong password-derived signature response");
+    let weak_proof_gate_response = bound_proof_of_work_gate_response_for_active_method_completion(
+        &completion_headers,
+        &response_payload,
+        at(30),
+    );
+
+    harness.database_operation_observer.clear();
+    let error = runtime
+        .execute_active_proof_method_response_from_headers(
+            &completion_headers,
+            CompleteActiveProofMethodResponse {
+                now: at(30),
+                response_payload,
+                weak_proof_gate_response: Some(weak_proof_gate_response),
+            },
+        )
+        .await
+        .expect_err("wrong password-derived signature must reject before state load");
+
+    assert!(matches!(
+        error,
+        super::super::postgres_runtime::AuthPostgresWebRuntimeExecutionError::MethodBuild(
+            super::super::postgres_method_runtime::PostgresAuthMethodBuildError::PluginRejected {
+                family: ProofFamily::MessageSignature,
+                operation: "active_proof_completion",
+                ..
+            }
+        )
+    ));
+    assert_no_database_operations(
+        &harness.database_operation_observer,
+        "wrong password-derived signature must reject before any database operation",
+    );
+    assert_eq!(
+        count_open_challenges_for_challenge(pool, store_config, &challenge_id).await,
+        1,
+        "wrong password-derived signature must leave the authoritative challenge open",
+    );
+
+    harness.drop_schema().await;
+}
+
+#[tokio::test]
+async fn postgres_runtime_rejects_reused_password_derived_weak_gate_for_different_signature_before_database_work()
+ {
+    let _postgres_runtime_test_guard = AUTH_POSTGRES_RUNTIME_TEST_LOCK.lock().await;
+    let harness =
+        PostgresRuntimeTestHarness::connect_required_with_password_derived_signature_method().await;
+    let pool = &harness.pool;
+    let store_config = &harness.store_config;
+    let runtime = &harness.runtime;
+    let plugin = password_derived_signature_plugin_for_harness(&harness);
+    let empty_headers = HeaderMap::new();
+    let subject_id: SubjectId = id("reused-gate-password-signature-subject");
+    let password_credential_id: VerifiedProofSourceId =
+        id("reused-gate-password-signature-credential");
+    let lookup_handle = b"reused-gate-password-signature-lookup";
+    let salt = PasswordKdfSalt::from_bytes(&[15_u8; PASSWORD_KDF_SALT_SIZE]).expect("KDF salt");
+    let params = minimum_accepted_password_kdf_params_for_tests();
+
+    plugin
+        .store_verifier_for_test(
+            pool,
+            PasswordDerivedSignatureVerifierForTest {
+                subject_id: &subject_id,
+                password_credential_id: &password_credential_id,
+                lookup_handle,
+                password: b"correct-password",
+                salt,
+                params,
+                now: at(10),
+            },
+        )
+        .await
+        .expect("store password-derived verifier");
+
+    let issued = runtime
+        .execute_unbound_active_proof_attempt_start_and_active_proof_method_challenge_issue_from_headers(
+            &empty_headers,
+            StartAndIssueActiveProofMethodChallengeInput {
+                now: at(20),
+                proof_use: ProofUse::ContributeToFullAuthentication,
+                method: plugin.method().clone(),
+                method_challenge_request_payload: Some(
+                    PostgresPasswordDerivedSignatureMethodPlugin::challenge_request_payload_for_test(
+                        lookup_handle,
+                    )
+                    .expect("password-derived challenge request payload"),
+                ),
+            },
+            challenge_issue_preflight_response_for_test(
+                at(20),
+                ProofUse::ContributeToFullAuthentication,
+                plugin.method(),
+            ),
+        )
+        .await
+        .expect("issue password-derived signature challenge");
+    let (challenge_id, method_challenge) = match issued.outcome() {
+        Outcome::ActiveProofMethodChallengeIssued {
+            challenge_id,
+            method_challenge,
+            ..
+        } => (challenge_id.clone(), method_challenge),
+        outcome => panic!("expected password-derived signature challenge issue, got {outcome:?}"),
+    };
+    let challenge_cookie_pair = cookie_pair_from_set_cookie(
+        issued.set_cookie_headers(),
+        "__Host-__paranoid_auth_active_proof_challenge=",
+    )
+    .to_owned();
+    let completion_headers = headers_from_cookie_pairs(&[challenge_cookie_pair.as_str()]);
+    let first_guessed_response_payload =
+        PostgresPasswordDerivedSignatureMethodPlugin::response_payload_for_test(
+            b"first-wrong-password",
+            method_challenge,
+        )
+        .expect("first guessed password-derived signature response");
+    let weak_proof_gate_response = bound_proof_of_work_gate_response_for_active_method_completion(
+        &completion_headers,
+        &first_guessed_response_payload,
+        at(30),
+    );
+    let second_guessed_response_payload =
+        PostgresPasswordDerivedSignatureMethodPlugin::response_payload_for_test(
+            b"second-wrong-password",
+            method_challenge,
+        )
+        .expect("second guessed password-derived signature response");
+
+    harness.database_operation_observer.clear();
+    let error = runtime
+        .execute_active_proof_method_response_from_headers(
+            &completion_headers,
+            CompleteActiveProofMethodResponse {
+                now: at(30),
+                response_payload: second_guessed_response_payload,
+                weak_proof_gate_response: Some(weak_proof_gate_response),
+            },
+        )
+        .await
+        .expect_err("weak gate solved for one signature must not work for another signature");
+
+    assert!(matches!(
+        error,
+        super::super::postgres_runtime::AuthPostgresWebRuntimeExecutionError::Core(
+            Error::WeakProofGateVerificationFailed
+        )
+    ));
+    assert_no_database_operations(
+        &harness.database_operation_observer,
+        "reused password-derived weak gate must reject before any database operation",
+    );
+    assert_eq!(
+        count_open_challenges_for_challenge(pool, store_config, &challenge_id).await,
+        1,
+        "reused password-derived weak gate must leave the authoritative challenge open",
+    );
+
+    harness.drop_schema().await;
+}
+
+#[tokio::test]
+async fn postgres_runtime_rejects_password_derived_signature_after_verifier_rotation() {
+    let _postgres_runtime_test_guard = AUTH_POSTGRES_RUNTIME_TEST_LOCK.lock().await;
+    let harness =
+        PostgresRuntimeTestHarness::connect_required_with_password_derived_signature_method().await;
+    let pool = &harness.pool;
+    let store_config = &harness.store_config;
+    let runtime = &harness.runtime;
+    let plugin = password_derived_signature_plugin_for_harness(&harness);
+    let empty_headers = HeaderMap::new();
+    let subject_id: SubjectId = id("rotated-password-signature-subject");
+    let password_credential_id: VerifiedProofSourceId = id("rotated-password-signature-credential");
+    let lookup_handle = b"rotated-password-signature-lookup";
+    let first_salt =
+        PasswordKdfSalt::from_bytes(&[13_u8; PASSWORD_KDF_SALT_SIZE]).expect("first KDF salt");
+    let second_salt =
+        PasswordKdfSalt::from_bytes(&[14_u8; PASSWORD_KDF_SALT_SIZE]).expect("second KDF salt");
+    let params = minimum_accepted_password_kdf_params_for_tests();
+
+    plugin
+        .store_verifier_for_test(
+            pool,
+            PasswordDerivedSignatureVerifierForTest {
+                subject_id: &subject_id,
+                password_credential_id: &password_credential_id,
+                lookup_handle,
+                password: b"old-password",
+                salt: first_salt,
+                params,
+                now: at(10),
+            },
+        )
+        .await
+        .expect("store old password-derived verifier");
+
+    let issued = runtime
+        .execute_unbound_active_proof_attempt_start_and_active_proof_method_challenge_issue_from_headers(
+            &empty_headers,
+            StartAndIssueActiveProofMethodChallengeInput {
+                now: at(20),
+                proof_use: ProofUse::ContributeToFullAuthentication,
+                method: plugin.method().clone(),
+                method_challenge_request_payload: Some(
+                    PostgresPasswordDerivedSignatureMethodPlugin::challenge_request_payload_for_test(
+                        lookup_handle,
+                    )
+                    .expect("password-derived challenge request payload"),
+                ),
+            },
+            challenge_issue_preflight_response_for_test(
+                at(20),
+                ProofUse::ContributeToFullAuthentication,
+                plugin.method(),
+            ),
+        )
+        .await
+        .expect("issue password-derived signature challenge");
+    let (attempt_id, challenge_id, method_challenge) = match issued.outcome() {
+        Outcome::ActiveProofMethodChallengeIssued {
+            attempt_id,
+            challenge_id,
+            method_challenge,
+            ..
+        } => (attempt_id.clone(), challenge_id.clone(), method_challenge),
+        outcome => panic!("expected password-derived signature challenge issue, got {outcome:?}"),
+    };
+    let challenge_cookie_pair = cookie_pair_from_set_cookie(
+        issued.set_cookie_headers(),
+        "__Host-__paranoid_auth_active_proof_challenge=",
+    )
+    .to_owned();
+    let response_payload = PostgresPasswordDerivedSignatureMethodPlugin::response_payload_for_test(
+        b"old-password",
+        method_challenge,
+    )
+    .expect("password-derived signature response against sealed old verifier");
+    let weak_proof_gate_response = bound_proof_of_work_gate_response_for_active_method_completion(
+        &headers_from_cookie_pairs(&[challenge_cookie_pair.as_str()]),
+        &response_payload,
+        at(30),
+    );
+
+    plugin
+        .store_verifier_for_test(
+            pool,
+            PasswordDerivedSignatureVerifierForTest {
+                subject_id: &subject_id,
+                password_credential_id: &password_credential_id,
+                lookup_handle,
+                password: b"new-password",
+                salt: second_salt,
+                params,
+                now: at(25),
+            },
+        )
+        .await
+        .expect("rotate password-derived verifier");
+
+    let completion_headers = headers_from_cookie_pairs(&[challenge_cookie_pair.as_str()]);
+    harness.database_operation_observer.clear();
+    let error = runtime
+        .execute_active_proof_method_response_from_headers(
+            &completion_headers,
+            CompleteActiveProofMethodResponse {
+                now: at(30),
+                response_payload,
+                weak_proof_gate_response: Some(weak_proof_gate_response),
+            },
+        )
+        .await
+        .expect_err("stale password-derived signature challenge must reject after recheck");
+
+    assert!(matches!(
+        error,
+        super::super::postgres_runtime::AuthPostgresWebRuntimeExecutionError::MethodBuild(
+            super::super::postgres_method_runtime::PostgresAuthMethodBuildError::PluginRejected {
+                family: ProofFamily::MessageSignature,
+                operation: "active_proof_authoritative_confirmation",
+                ..
+            }
+        )
+    ));
+    assert_database_operations_include_label(
+        &harness.database_operation_observer,
+        "auth_core.password_derived_signature.verify.fetch_locked_current_verifier",
+        "stale password-derived signature challenge must perform authoritative verifier recheck",
+    );
+    assert_eq!(
+        count_satisfied_proofs_for_attempt(pool, store_config, &attempt_id).await,
+        0
+    );
+    assert_eq!(
+        count_open_challenges_for_challenge(pool, store_config, &challenge_id).await,
+        1
+    );
+
+    harness.drop_schema().await;
+}
+
+#[tokio::test]
 async fn postgres_runtime_authoritative_active_method_loads_resolved_subject_revocation() {
     let _postgres_runtime_test_guard = AUTH_POSTGRES_RUNTIME_TEST_LOCK.lock().await;
     let method = ProofMethodDeclaration::new(ProofFamily::MessageSignature, "ssh_signature")
@@ -1970,9 +2657,14 @@ async fn postgres_runtime_authoritative_active_method_loads_resolved_subject_rev
             StartAndIssueActiveProofMethodChallengeInput {
                 now: at(20),
                 proof_use: ProofUse::ContributeToFullAuthentication,
-                method,
+                method: method.clone(),
+                method_challenge_request_payload: None,
             },
-            challenge_issue_preflight_response(),
+            challenge_issue_preflight_response_for_test(
+                at(20),
+                ProofUse::ContributeToFullAuthentication,
+                &method,
+            ),
         )
         .await
         .expect("issue authoritative message signature challenge through method registry");
@@ -2073,6 +2765,7 @@ async fn postgres_runtime_rejects_active_method_cookie_without_sealed_method_sta
     );
     let completion_headers = headers_from_cookie_pairs(&[challenge_cookie_pair]);
 
+    harness.database_operation_observer.clear();
     let error = runtime
         .execute_active_proof_method_response_from_headers(
             &completion_headers,
@@ -2083,7 +2776,7 @@ async fn postgres_runtime_rejects_active_method_cookie_without_sealed_method_sta
                     nonce.as_bytes(),
                     &id("missing-method-state-subject"),
                 ),
-                weak_proof_gate_response: Some(proof_of_work_gate_response()),
+                weak_proof_gate_response: Some(invalid_proof_of_work_gate_response()),
             },
         )
         .await
@@ -2095,6 +2788,10 @@ async fn postgres_runtime_rejects_active_method_cookie_without_sealed_method_sta
             Error::MissingActiveProofMethodChallengeState
         )
     ));
+    assert_no_database_operations(
+        &harness.database_operation_observer,
+        "active method cookie without sealed method state must reject before any database operation",
+    );
 
     harness.drop_schema().await;
 }
@@ -2135,6 +2832,7 @@ async fn postgres_runtime_rejects_expired_active_method_cookie_before_plugin_dis
     );
     let completion_headers = headers_from_cookie_pairs(&[challenge_cookie_pair]);
 
+    harness.database_operation_observer.clear();
     let error = runtime
         .execute_active_proof_method_response_from_headers(
             &completion_headers,
@@ -2156,6 +2854,10 @@ async fn postgres_runtime_rejects_expired_active_method_cookie_before_plugin_dis
             Error::ActiveProofChallengeCookieExpired
         )
     ));
+    assert_no_database_operations(
+        &harness.database_operation_observer,
+        "expired active method cookie must reject before any database operation",
+    );
 
     harness.drop_schema().await;
 }
@@ -2179,9 +2881,14 @@ async fn postgres_runtime_completes_origin_bound_public_key_through_method_regis
             StartAndIssueActiveProofMethodChallengeInput {
                 now: at(20),
                 proof_use: ProofUse::ContributeToFullAuthentication,
-                method,
+                method: method.clone(),
+                method_challenge_request_payload: None,
             },
-            challenge_issue_preflight_response(),
+            challenge_issue_preflight_response_for_test(
+                at(20),
+                ProofUse::ContributeToFullAuthentication,
+                &method,
+            ),
         )
         .await
         .expect("issue origin-bound public-key challenge through method registry");
@@ -2316,9 +3023,14 @@ async fn postgres_runtime_completes_federated_identity_through_method_registry()
             StartAndIssueActiveProofMethodChallengeInput {
                 now: at(20),
                 proof_use: ProofUse::ContributeToFullAuthentication,
-                method,
+                method: method.clone(),
+                method_challenge_request_payload: None,
             },
-            challenge_issue_preflight_response(),
+            challenge_issue_preflight_response_for_test(
+                at(20),
+                ProofUse::ContributeToFullAuthentication,
+                &method,
+            ),
         )
         .await
         .expect("issue federated identity state through method registry");
@@ -2476,14 +3188,23 @@ async fn postgres_runtime_completes_totp_through_known_subject_method_registry()
     let continuation_cookie_pair = started.continuation_cookie_pair;
     let continuation_headers = headers_from_cookie_pairs(&[continuation_cookie_pair.as_str()]);
 
+    harness.database_operation_observer.clear();
+    let failed_secret_response = mismatched_totp_test_method_response_payload();
+    let failed_weak_proof_gate_response =
+        bound_proof_of_work_gate_response_for_known_subject_completion(
+            &continuation_headers,
+            &method,
+            &failed_secret_response,
+            at(30),
+        );
     let failed = runtime
         .execute_known_subject_active_proof_method_response_from_headers(
             &continuation_headers,
             CompleteKnownSubjectActiveProofMethodResponse {
                 now: at(30),
                 method: method.clone(),
-                secret_response: mismatched_totp_test_method_response_payload(),
-                weak_proof_gate_response: Some(proof_of_work_gate_response()),
+                secret_response: failed_secret_response,
+                weak_proof_gate_response: Some(failed_weak_proof_gate_response),
             },
         )
         .await
@@ -2495,6 +3216,11 @@ async fn postgres_runtime_completes_totp_through_known_subject_method_registry()
             attempt_was_deleted: false,
         }
     );
+    assert_database_operations_include_label(
+        &harness.database_operation_observer,
+        "auth_core.totp.verify.fetch_locked_verifier",
+        "wrong direct TOTP with a valid weak gate must perform authoritative verifier lookup",
+    );
     assert!(failed.set_cookie_headers().is_empty());
     assert_eq!(
         count_satisfied_proofs_for_attempt(pool, store_config, &attempt_id).await,
@@ -2505,14 +3231,22 @@ async fn postgres_runtime_completes_totp_through_known_subject_method_registry()
         Some(1),
     );
 
+    let completed_secret_response = totp_test_method_response_payload(totp_secret, at(85));
+    let completed_weak_proof_gate_response =
+        bound_proof_of_work_gate_response_for_known_subject_completion(
+            &continuation_headers,
+            &method,
+            &completed_secret_response,
+            at(85),
+        );
     let completed = runtime
         .execute_known_subject_active_proof_method_response_from_headers(
             &continuation_headers,
             CompleteKnownSubjectActiveProofMethodResponse {
                 now: at(85),
                 method,
-                secret_response: totp_test_method_response_payload(totp_secret, at(85)),
-                weak_proof_gate_response: Some(proof_of_work_gate_response()),
+                secret_response: completed_secret_response,
+                weak_proof_gate_response: Some(completed_weak_proof_gate_response),
             },
         )
         .await
@@ -2536,6 +3270,349 @@ async fn postgres_runtime_completes_totp_through_known_subject_method_registry()
             VerifiedProofSourceKind::CredentialInstance,
             totp_credential_id,
         ))
+    );
+
+    harness.drop_schema().await;
+}
+
+#[tokio::test]
+async fn postgres_runtime_challenge_bound_totp_bloom_rejects_definite_miss_before_database_work() {
+    let _postgres_runtime_test_guard = AUTH_POSTGRES_RUNTIME_TEST_LOCK.lock().await;
+    let harness = PostgresRuntimeTestHarness::connect_required_with_totp_method().await;
+    let pool = &harness.pool;
+    let store_config = &harness.store_config;
+    let runtime = &harness.runtime;
+    let totp_plugin = harness.totp_plugin.as_ref().expect("TOTP method plugin");
+    let email_otp = email_otp_plugin_for_harness(&harness);
+    let subject_id: SubjectId = id("totp-bloom-definite-miss-subject");
+    let totp_credential_id: VerifiedProofSourceId = id("totp-bloom-definite-miss-credential");
+    let totp_secret = b"totp-bloom-definite-miss-secret";
+
+    totp_plugin
+        .store_secret_for_test(pool, &subject_id, &totp_credential_id, totp_secret, at(10))
+        .await
+        .expect("store TOTP verifier state");
+
+    let issued_auth = complete_full_authentication_through_runtime(
+        runtime,
+        pool,
+        store_config,
+        email_otp,
+        "totp-bloom-definite-miss-bootstrap",
+        20,
+        subject_id,
+        false,
+    )
+    .await;
+    let challenge = start_current_session_and_issue_challenge_bound_totp_through_runtime(
+        runtime,
+        issued_auth.session_cookie_pair.as_str(),
+        at(70),
+        at(80),
+    )
+    .await;
+    let completion_headers = headers_from_cookie_pairs(&[challenge.challenge_cookie_pair.as_str()]);
+    let secret_response = mismatched_totp_test_method_response_payload();
+    let weak_proof_gate_response =
+        bound_proof_of_work_gate_response_for_challenge_bound_totp_completion(
+            &completion_headers,
+            &secret_response,
+            at(85),
+        );
+
+    harness.database_operation_observer.clear();
+    let error = runtime
+        .execute_challenge_bound_known_subject_active_proof_method_response_from_headers(
+            &completion_headers,
+            CompleteChallengeBoundKnownSubjectActiveProofMethodResponse {
+                now: at(85),
+                secret_response,
+                weak_proof_gate_response: Some(weak_proof_gate_response),
+            },
+        )
+        .await
+        .expect_err("definite Bloom miss must reject before authoritative state load");
+
+    assert!(matches!(
+        error,
+        super::super::postgres_runtime::AuthPostgresWebRuntimeExecutionError::MethodBuild(
+            super::super::postgres_method_runtime::PostgresAuthMethodBuildError::PluginRejected {
+                family: ProofFamily::SharedSecretOtp,
+                operation: "challenge_bound_known_subject_active_proof_completion",
+                ..
+            }
+        )
+    ));
+    assert_no_database_operations(
+        &harness.database_operation_observer,
+        "definite TOTP Bloom miss must reject before any database operation",
+    );
+    assert_eq!(
+        count_open_challenges_for_challenge(pool, store_config, &challenge.challenge_id).await,
+        1,
+        "definite Bloom miss must leave the authoritative challenge open"
+    );
+    assert_eq!(
+        count_satisfied_proofs_for_attempt(pool, store_config, &challenge.attempt_id).await,
+        0
+    );
+
+    harness.drop_schema().await;
+}
+
+#[tokio::test]
+async fn postgres_runtime_challenge_bound_totp_bloom_possible_hit_completes_authoritatively() {
+    let _postgres_runtime_test_guard = AUTH_POSTGRES_RUNTIME_TEST_LOCK.lock().await;
+    let harness = PostgresRuntimeTestHarness::connect_required_with_totp_method().await;
+    let pool = &harness.pool;
+    let store_config = &harness.store_config;
+    let runtime = &harness.runtime;
+    let totp_plugin = harness.totp_plugin.as_ref().expect("TOTP method plugin");
+    let email_otp = email_otp_plugin_for_harness(&harness);
+    let subject_id: SubjectId = id("totp-bloom-authoritative-subject");
+    let totp_credential_id: VerifiedProofSourceId = id("totp-bloom-authoritative-credential");
+    let totp_secret = b"totp-bloom-authoritative-secret";
+
+    totp_plugin
+        .store_secret_for_test(pool, &subject_id, &totp_credential_id, totp_secret, at(10))
+        .await
+        .expect("store TOTP verifier state");
+
+    let issued_auth = complete_full_authentication_through_runtime(
+        runtime,
+        pool,
+        store_config,
+        email_otp,
+        "totp-bloom-authoritative-bootstrap",
+        20,
+        subject_id,
+        false,
+    )
+    .await;
+    let challenge = start_current_session_and_issue_challenge_bound_totp_through_runtime(
+        runtime,
+        issued_auth.session_cookie_pair.as_str(),
+        at(70),
+        at(80),
+    )
+    .await;
+    assert!(
+        challenge.challenge_cookie_pair.len() < 2048,
+        "challenge-bound TOTP Bloom cookie pair should stay comfortably below one 4KiB cookie"
+    );
+    let completion_headers = headers_from_cookie_pairs(&[challenge.challenge_cookie_pair.as_str()]);
+    let secret_response = totp_test_method_response_payload(totp_secret, at(85));
+    let weak_proof_gate_response =
+        bound_proof_of_work_gate_response_for_challenge_bound_totp_completion(
+            &completion_headers,
+            &secret_response,
+            at(85),
+        );
+
+    harness.database_operation_observer.clear();
+    let completed = runtime
+        .execute_challenge_bound_known_subject_active_proof_method_response_from_headers(
+            &completion_headers,
+            CompleteChallengeBoundKnownSubjectActiveProofMethodResponse {
+                now: at(85),
+                secret_response,
+                weak_proof_gate_response: Some(weak_proof_gate_response),
+            },
+        )
+        .await
+        .expect("complete challenge-bound TOTP through Bloom lane");
+
+    assert_eq!(
+        completed.outcome(),
+        &Outcome::ActiveProofCompleted {
+            attempt_id: challenge.attempt_id.clone(),
+            proof: ProofSummary::new(ProofFamily::SharedSecretOtp, "totp").expect("proof"),
+        }
+    );
+    assert_database_operations_include_label(
+        &harness.database_operation_observer,
+        "auth_core.totp.verify.fetch_locked_verifier",
+        "possible TOTP Bloom hit must perform authoritative verifier lookup",
+    );
+    assert_eq!(
+        count_open_challenges_for_challenge(pool, store_config, &challenge.challenge_id).await,
+        0
+    );
+    assert_eq!(
+        fetch_satisfied_proof_source_for_attempt(pool, store_config, &challenge.attempt_id).await,
+        Some(VerifiedProofSource::new(
+            VerifiedProofSourceKind::CredentialInstance,
+            totp_credential_id,
+        ))
+    );
+
+    harness.drop_schema().await;
+}
+
+#[tokio::test]
+async fn postgres_runtime_challenge_bound_totp_bloom_possible_hit_rechecks_verifier_version() {
+    let _postgres_runtime_test_guard = AUTH_POSTGRES_RUNTIME_TEST_LOCK.lock().await;
+    let harness = PostgresRuntimeTestHarness::connect_required_with_totp_method().await;
+    let pool = &harness.pool;
+    let store_config = &harness.store_config;
+    let runtime = &harness.runtime;
+    let totp_plugin = harness.totp_plugin.as_ref().expect("TOTP method plugin");
+    let email_otp = email_otp_plugin_for_harness(&harness);
+    let subject_id: SubjectId = id("totp-bloom-stale-verifier-subject");
+    let totp_credential_id: VerifiedProofSourceId = id("totp-bloom-stale-verifier-credential");
+    let old_totp_secret = b"totp-bloom-stale-verifier-old-secret";
+    let new_totp_secret = b"totp-bloom-stale-verifier-new-secret";
+
+    totp_plugin
+        .store_secret_for_test(
+            pool,
+            &subject_id,
+            &totp_credential_id,
+            old_totp_secret,
+            at(10),
+        )
+        .await
+        .expect("store old TOTP verifier state");
+
+    let issued_auth = complete_full_authentication_through_runtime(
+        runtime,
+        pool,
+        store_config,
+        email_otp,
+        "totp-bloom-stale-verifier-bootstrap",
+        20,
+        subject_id.clone(),
+        false,
+    )
+    .await;
+    let challenge = start_current_session_and_issue_challenge_bound_totp_through_runtime(
+        runtime,
+        issued_auth.session_cookie_pair.as_str(),
+        at(70),
+        at(80),
+    )
+    .await;
+    let completion_headers = headers_from_cookie_pairs(&[challenge.challenge_cookie_pair.as_str()]);
+    let secret_response = totp_test_method_response_payload(old_totp_secret, at(85));
+    let weak_proof_gate_response =
+        bound_proof_of_work_gate_response_for_challenge_bound_totp_completion(
+            &completion_headers,
+            &secret_response,
+            at(85),
+        );
+
+    totp_plugin
+        .store_secret_for_test(
+            pool,
+            &subject_id,
+            &totp_credential_id,
+            new_totp_secret,
+            at(82),
+        )
+        .await
+        .expect("rotate TOTP verifier state");
+
+    harness.database_operation_observer.clear();
+    let failed = runtime
+        .execute_challenge_bound_known_subject_active_proof_method_response_from_headers(
+            &completion_headers,
+            CompleteChallengeBoundKnownSubjectActiveProofMethodResponse {
+                now: at(85),
+                secret_response,
+                weak_proof_gate_response: Some(weak_proof_gate_response),
+            },
+        )
+        .await
+        .expect("stale verifier Bloom possible hit should record a proof failure");
+
+    assert_eq!(
+        failed.outcome(),
+        &Outcome::ActiveProofFailureRecorded {
+            attempt_id: challenge.attempt_id.clone(),
+            attempt_was_deleted: false,
+        }
+    );
+    assert_database_operations_include_label(
+        &harness.database_operation_observer,
+        "auth_core.totp.verify.fetch_locked_verifier",
+        "stale TOTP Bloom possible hit must perform authoritative verifier/version recheck",
+    );
+    assert_eq!(
+        count_satisfied_proofs_for_attempt(pool, store_config, &challenge.attempt_id).await,
+        0
+    );
+    assert_eq!(
+        fetch_active_proof_attempt_weak_failures(pool, store_config, &challenge.attempt_id).await,
+        Some(1)
+    );
+
+    harness.drop_schema().await;
+}
+
+#[tokio::test]
+async fn postgres_runtime_challenge_bound_totp_bloom_has_no_false_negative_for_late_window_code() {
+    let _postgres_runtime_test_guard = AUTH_POSTGRES_RUNTIME_TEST_LOCK.lock().await;
+    let harness = PostgresRuntimeTestHarness::connect_required_with_totp_method().await;
+    let pool = &harness.pool;
+    let store_config = &harness.store_config;
+    let runtime = &harness.runtime;
+    let totp_plugin = harness.totp_plugin.as_ref().expect("TOTP method plugin");
+    let email_otp = email_otp_plugin_for_harness(&harness);
+    let subject_id: SubjectId = id("totp-bloom-late-window-subject");
+    let totp_credential_id: VerifiedProofSourceId = id("totp-bloom-late-window-credential");
+    let totp_secret = b"totp-bloom-late-window-secret";
+
+    totp_plugin
+        .store_secret_for_test(pool, &subject_id, &totp_credential_id, totp_secret, at(10))
+        .await
+        .expect("store TOTP verifier state");
+
+    let issued_auth = complete_full_authentication_through_runtime(
+        runtime,
+        pool,
+        store_config,
+        email_otp,
+        "totp-bloom-late-window-bootstrap",
+        20,
+        subject_id,
+        false,
+    )
+    .await;
+    let challenge = start_current_session_and_issue_challenge_bound_totp_through_runtime(
+        runtime,
+        issued_auth.session_cookie_pair.as_str(),
+        at(70),
+        at(80),
+    )
+    .await;
+    let completion_headers = headers_from_cookie_pairs(&[challenge.challenge_cookie_pair.as_str()]);
+    let secret_response = totp_test_method_response_payload(totp_secret, at(115));
+    let weak_proof_gate_response =
+        bound_proof_of_work_gate_response_for_challenge_bound_totp_completion(
+            &completion_headers,
+            &secret_response,
+            at(115),
+        );
+
+    let completed = runtime
+        .execute_challenge_bound_known_subject_active_proof_method_response_from_headers(
+            &completion_headers,
+            CompleteChallengeBoundKnownSubjectActiveProofMethodResponse {
+                now: at(115),
+                secret_response,
+                weak_proof_gate_response: Some(weak_proof_gate_response),
+            },
+        )
+        .await
+        .expect("late-window TOTP code must not be a Bloom false negative");
+
+    assert!(matches!(
+        completed.outcome(),
+        Outcome::ActiveProofCompleted { .. }
+    ));
+    assert_eq!(
+        count_satisfied_proofs_for_attempt(pool, store_config, &challenge.attempt_id).await,
+        1
     );
 
     harness.drop_schema().await;
@@ -2589,14 +3666,22 @@ async fn postgres_runtime_deletes_attempt_after_totp_failure_budget() {
         .expect("store TOTP verifier state");
 
     for (now, attempt_was_deleted) in [(80, false), (81, false), (82, true)] {
+        let secret_response = mismatched_totp_test_method_response_payload();
+        let weak_proof_gate_response =
+            bound_proof_of_work_gate_response_for_known_subject_completion(
+                &continuation_headers,
+                &method,
+                &secret_response,
+                at(now),
+            );
         let failed = runtime
             .execute_known_subject_active_proof_method_response_from_headers(
                 &continuation_headers,
                 CompleteKnownSubjectActiveProofMethodResponse {
                     now: at(now),
                     method: method.clone(),
-                    secret_response: mismatched_totp_test_method_response_payload(),
-                    weak_proof_gate_response: Some(proof_of_work_gate_response()),
+                    secret_response,
+                    weak_proof_gate_response: Some(weak_proof_gate_response),
                 },
             )
             .await
@@ -2650,6 +3735,7 @@ async fn postgres_runtime_rejects_invalid_totp_weak_gate_before_state_load() {
     let continuation_cookie_pair = started.continuation_cookie_pair;
     let continuation_headers = headers_from_cookie_pairs(&[continuation_cookie_pair.as_str()]);
 
+    harness.database_operation_observer.clear();
     let error = runtime
         .execute_known_subject_active_proof_method_response_from_headers(
             &continuation_headers,
@@ -2670,6 +3756,10 @@ async fn postgres_runtime_rejects_invalid_totp_weak_gate_before_state_load() {
             Error::WeakProofGateVerificationFailed
         )
     ));
+    assert_no_database_operations(
+        &harness.database_operation_observer,
+        "invalid TOTP weak gate must reject before any database operation",
+    );
 
     harness.drop_schema().await;
 }
@@ -2745,9 +3835,9 @@ async fn postgres_runtime_completes_recovery_code_through_known_subject_method_r
         ),
         "expected method pre-state rejection, got {pre_state_rejected:?}"
     );
-    assert!(
-        harness.database_operation_observer.records().is_empty(),
-        "malformed sealed recovery code must reject before any database operation"
+    assert_no_database_operations(
+        &harness.database_operation_observer,
+        "malformed sealed recovery code must reject before any database operation",
     );
     assert_eq!(
         recovery_code_plugin
@@ -2791,9 +3881,9 @@ async fn postgres_runtime_completes_recovery_code_through_known_subject_method_r
         ),
         "expected guessed sealed code method pre-state rejection, got {guessed_sealed_rejected:?}"
     );
-    assert!(
-        harness.database_operation_observer.records().is_empty(),
-        "guessed sealed recovery code must reject before any database operation"
+    assert_no_database_operations(
+        &harness.database_operation_observer,
+        "guessed sealed recovery code must reject before any database operation",
     );
     let wrong_subject_sealed_response = recovery_code_plugin
         .sealed_recovery_code_response_for_test(&id("other-recovery-subject"), recovery_code_secret)
@@ -2818,9 +3908,9 @@ async fn postgres_runtime_completes_recovery_code_through_known_subject_method_r
         ),
         "expected wrong-subject method pre-state rejection, got {wrong_subject_rejected:?}"
     );
-    assert!(
-        harness.database_operation_observer.records().is_empty(),
-        "wrong-subject sealed recovery code must reject before any database operation"
+    assert_no_database_operations(
+        &harness.database_operation_observer,
+        "wrong-subject sealed recovery code must reject before any database operation",
     );
     assert_eq!(
         recovery_code_plugin
@@ -2832,6 +3922,52 @@ async fn postgres_runtime_completes_recovery_code_through_known_subject_method_r
     assert_eq!(
         count_satisfied_proofs_for_attempt(pool, store_config, &attempt_id).await,
         0
+    );
+    let unused_sealed_response = recovery_code_plugin
+        .sealed_recovery_code_response_for_test(&subject_id, b"unused-recovery-code")
+        .expect("unused sealed recovery code response");
+    harness.database_operation_observer.clear();
+    let unused_sealed_rejection = runtime
+        .execute_known_subject_active_proof_method_response_from_headers(
+            &continuation_headers,
+            CompleteKnownSubjectActiveProofMethodResponse {
+                now: at(83),
+                method: method.clone(),
+                secret_response: unused_sealed_response,
+                weak_proof_gate_response: None,
+            },
+        )
+        .await
+        .expect("unused sealed recovery code must reject authoritatively");
+    assert_eq!(
+        unused_sealed_rejection.outcome(),
+        &Outcome::ActiveProofFailureRecorded {
+            attempt_id: attempt_id.clone(),
+            attempt_was_deleted: false,
+        }
+    );
+    assert_database_operations_include_label(
+        &harness.database_operation_observer,
+        "auth_core.recovery_code.verify.fetch_locked_unused_code",
+        "well-formed unused recovery code must perform authoritative one-time lookup",
+    );
+    assert_eq!(
+        recovery_code_plugin
+            .count_unused_recovery_codes_for_subject_for_test(pool, &subject_id)
+            .await
+            .expect("count unused recovery codes after unused sealed rejection"),
+        1,
+        "unused sealed recovery code must not consume any stored recovery code"
+    );
+    assert_eq!(
+        count_satisfied_proofs_for_attempt(pool, store_config, &attempt_id).await,
+        0,
+        "unused sealed recovery code must not record a satisfied proof"
+    );
+    assert_eq!(
+        fetch_active_proof_attempt_weak_failures(pool, store_config, &attempt_id).await,
+        Some(0),
+        "unused sealed recovery code must not spend online-guessing weak-failure budget"
     );
     let sealed_response = recovery_code_plugin
         .sealed_recovery_code_response_for_test(&subject_id, recovery_code_secret)
@@ -3012,6 +4148,7 @@ async fn postgres_runtime_rejects_unbound_challenge_issue_preflight_gate_mismatc
                 proof_use: ProofUse::ContributeToFullAuthentication,
                 method: ProofMethodDeclaration::new(ProofFamily::MessageSignature, "ssh_signature")
                     .expect("method declaration"),
+                method_challenge_request_payload: None,
             },
             mismatched_challenge_issue_preflight_response(),
         )
@@ -3068,6 +4205,7 @@ async fn postgres_runtime_rejects_configured_secret_challenge_issue_path() {
                 now: at(80),
                 method: ProofMethodDeclaration::new(ProofFamily::SharedSecretOtp, "totp")
                     .expect("TOTP method"),
+                method_challenge_request_payload: None,
             },
         )
         .await
@@ -3125,6 +4263,7 @@ async fn postgres_runtime_rejects_direct_active_proof_failure_recording() {
     let direct_command = Command::RecordActiveProofFailure(RecordActiveProofFailure {
         now: at(30),
         attempt_id: id("direct-failure-attempt"),
+        challenge_id: None,
         method: ProofMethodDeclaration::new(ProofFamily::SharedSecretOtp, "totp")
             .expect("TOTP method"),
         weak_proof_gate: verified_proof_of_work_gate(),
@@ -4933,7 +6072,7 @@ async fn postgres_runtime_executes_email_otp_method_lifecycle_when_database_is_a
                 ),
                 idempotency_key: "email-otp-method-delivery-1".to_owned(),
             },
-            challenge_issue_preflight_response(),
+            email_otp_challenge_issue_preflight_response_at(at(20)),
         )
         .await
         .expect("issue email otp challenge");
@@ -5011,6 +6150,48 @@ async fn postgres_runtime_executes_email_otp_method_lifecycle_when_database_is_a
         2
     );
 
+    harness.database_operation_observer.clear();
+    let wrong_response = email_otp
+        .complete_challenge_response(EmailOtpCompleteChallengeResponse {
+            now: at(45),
+            secret_response: ActiveProofChallengeResponseSecret::try_from(
+                b"wrong-email-otp-code".as_slice(),
+            )
+            .expect("wrong email otp response secret"),
+            weak_proof_gate_response: None,
+        })
+        .expect("build wrong email otp response completion");
+    let wrong_completion_error = runtime
+        .execute_out_of_band_challenge_response_from_headers(
+            &headers_from_cookie_pairs(&[challenge_cookie_pair.as_str()]),
+            wrong_response,
+        )
+        .await
+        .expect_err("wrong email otp code must reject before state load");
+    assert!(matches!(
+        wrong_completion_error,
+        super::super::postgres_runtime::AuthPostgresWebRuntimeExecutionError::Core(
+            Error::StatelessFastFailVerificationFailed
+        )
+    ));
+    assert_no_database_operations(
+        &harness.database_operation_observer,
+        "wrong email otp code must reject before any database operation",
+    );
+    assert_eq!(
+        count_open_challenges_for_challenge(pool, store_config, &challenge_id).await,
+        1,
+        "wrong email otp code must leave the authoritative challenge open"
+    );
+    assert_eq!(
+        email_otp
+            .count_open_method_challenges_for_test(pool)
+            .await
+            .expect("count open email otp challenges after wrong code"),
+        1,
+        "wrong email otp code must not consume method-owned challenge state"
+    );
+
     let response = email_otp
         .complete_challenge_response(EmailOtpCompleteChallengeResponse {
             now: at(50),
@@ -5085,7 +6266,7 @@ async fn postgres_runtime_derives_email_otp_subject_from_method_state() {
                 recipient_handle: recipient_handle.to_owned(),
                 idempotency_key: "subject-resolving-email-otp-delivery".to_owned(),
             },
-            challenge_issue_preflight_response(),
+            email_otp_challenge_issue_preflight_response_at(at(20)),
         )
         .await
         .expect("issue email otp challenge");
@@ -5174,7 +6355,7 @@ async fn postgres_runtime_rejects_bad_email_otp_before_subject_resolution() {
                 recipient_handle: recipient_handle.to_owned(),
                 idempotency_key: "bad-email-otp-fast-fail-delivery".to_owned(),
             },
-            challenge_issue_preflight_response(),
+            email_otp_challenge_issue_preflight_response_at(at(20)),
         )
         .await
         .expect("issue email otp challenge");
@@ -5238,7 +6419,7 @@ async fn postgres_runtime_executes_session_and_trusted_device_lifecycle_when_dat
                 recipient_handle: recipient_handle_for_test_subject("login", &id("subject")),
                 idempotency_key: "mail-idempotency-key".to_owned(),
             },
-            challenge_issue_preflight_response(),
+            email_otp_challenge_issue_preflight_response_at(at(20)),
         )
         .await
         .expect("issue challenge through Postgres runtime");
@@ -6976,7 +8157,7 @@ async fn postgres_runtime_rejects_method_facades_until_registry_is_configured_wh
         AuthWebRuntime::new(config(), auth_web_transport()),
         pool.clone(),
         no_registry_store,
-        Arc::new(TestWeakProofGateVerifier),
+        Arc::new(hashcash_verifier_for_test()),
     );
     let runtime = &no_registry_runtime;
     let empty_headers = HeaderMap::new();
@@ -7041,7 +8222,7 @@ async fn postgres_runtime_rejects_method_facades_until_registry_is_configured_wh
                 recipient_handle: "method-fused-issue-opaque-email-handle".to_owned(),
                 idempotency_key: "method-fused-issue-mail-idempotency-key".to_owned(),
             },
-            challenge_issue_preflight_response(),
+            email_otp_challenge_issue_preflight_response_at(at(40)),
         )
         .await
         .expect_err("fused unbound start and issue must roll back when method registry is missing");
@@ -7052,6 +8233,7 @@ async fn postgres_runtime_rejects_method_facades_until_registry_is_configured_wh
         0
     );
 
+    harness.database_operation_observer.clear();
     let missing_cookie_resend_error = runtime
         .execute_out_of_band_challenge_resend_from_headers(
             &empty_headers,
@@ -7068,6 +8250,84 @@ async fn postgres_runtime_rejects_method_facades_until_registry_is_configured_wh
             Error::MissingActiveProofChallengeCookie
         )
     ));
+    assert_no_database_operations(
+        &harness.database_operation_observer,
+        "missing out-of-band resend challenge cookie must reject before any database operation",
+    );
+
+    harness.database_operation_observer.clear();
+    let malformed_cookie_resend_error = runtime
+        .execute_out_of_band_challenge_resend_from_headers(
+            &headers_from_cookie_pairs(&[
+                "__Host-__paranoid_auth_active_proof_challenge=not-a-valid-encrypted-cookie",
+            ]),
+            ResendOutOfBandChallengeRequest {
+                now: at(40),
+                idempotency_key: "method-resend-malformed-cookie-mail-idempotency-key".to_owned(),
+            },
+        )
+        .await
+        .expect_err("malformed challenge cookie must fail during transport decode");
+    assert!(matches!(
+        malformed_cookie_resend_error,
+        super::super::postgres_runtime::AuthPostgresWebRuntimeExecutionError::Web(_)
+    ));
+    assert_no_database_operations(
+        &harness.database_operation_observer,
+        "malformed out-of-band resend challenge cookie must reject before any database operation",
+    );
+
+    let message_signature_challenge_cookie =
+        ActiveProofChallengeCookieDraft::new_without_response_mac(
+            ActiveProofChallengeCookieContext::new(
+                id("wrong-family-resend-attempt"),
+                id("wrong-family-resend-challenge"),
+                ProofSummary::new(ProofFamily::MessageSignature, "ssh_signature").expect("proof"),
+                at(30),
+                at(70),
+                ActiveProofChallengeFastFailNonce::from_bytes(
+                    &[88_u8; ACTIVE_PROOF_CHALLENGE_FAST_FAIL_NONCE_BYTES],
+                )
+                .expect("nonce"),
+            )
+            .expect("message-signature challenge-cookie context"),
+        )
+        .expect("message-signature challenge cookie");
+    let message_signature_challenge_effects = MaterializedResponseEffects::from_vec(vec![
+        MaterializedResponseEffect::IssueActiveProofChallengeCookie(
+            message_signature_challenge_cookie,
+        ),
+    ]);
+    let message_signature_challenge_headers = auth_web_transport()
+        .render_set_cookie_headers(at(30), message_signature_challenge_effects)
+        .expect("message-signature challenge set-cookie headers");
+    let message_signature_challenge_cookie_pair = cookie_pair_from_set_cookie(
+        &message_signature_challenge_headers,
+        "__Host-__paranoid_auth_active_proof_challenge=",
+    );
+    harness.database_operation_observer.clear();
+    let wrong_family_resend_error = runtime
+        .execute_out_of_band_challenge_resend_from_headers(
+            &headers_from_cookie_pairs(&[message_signature_challenge_cookie_pair]),
+            ResendOutOfBandChallengeRequest {
+                now: at(40),
+                idempotency_key: "method-resend-wrong-family-mail-idempotency-key".to_owned(),
+            },
+        )
+        .await
+        .expect_err("non-out-of-band challenge cookie must fail before resend state load");
+    assert!(matches!(
+        wrong_family_resend_error,
+        super::super::postgres_runtime::AuthPostgresWebRuntimeExecutionError::Core(
+            Error::ActiveProofChallengeCookieProofFamilyCannotUseResponseSecret {
+                family: ProofFamily::MessageSignature
+            }
+        )
+    ));
+    assert_no_database_operations(
+        &harness.database_operation_observer,
+        "non-out-of-band resend challenge cookie must reject before any database operation",
+    );
 
     let resend = start_and_issue_out_of_band_challenge_through_runtime(
         registry_runtime,
@@ -7103,6 +8363,7 @@ async fn postgres_runtime_rejects_method_facades_until_registry_is_configured_wh
         1
     );
 
+    harness.database_operation_observer.clear();
     let expired_cookie_resend_error = runtime
         .execute_out_of_band_challenge_resend_from_headers(
             &headers_from_cookie_pairs(&[resend.challenge_cookie_pair.as_str()]),
@@ -7119,6 +8380,10 @@ async fn postgres_runtime_rejects_method_facades_until_registry_is_configured_wh
             Error::ActiveProofChallengeCookieExpired
         )
     ));
+    assert_no_database_operations(
+        &harness.database_operation_observer,
+        "expired out-of-band resend challenge cookie must reject before any database operation",
+    );
     assert_eq!(
         fetch_out_of_band_challenge_resend_count(pool, store_config, &resend.challenge_id).await,
         0
@@ -7176,17 +8441,25 @@ async fn postgres_runtime_rejects_method_facades_until_registry_is_configured_wh
     let known_subject_continuation_cookie_pair = known_subject_started.continuation_cookie_pair;
     let known_subject_headers =
         headers_from_cookie_pairs(&[known_subject_continuation_cookie_pair.as_str()]);
+    let known_subject_method =
+        ProofMethodDeclaration::new(ProofFamily::SharedSecretOtp, "totp").expect("TOTP method");
+    let known_subject_secret_response =
+        known_subject_test_method_response_payload(&id("method-known-subject"));
+    let known_subject_weak_proof_gate_response =
+        bound_proof_of_work_gate_response_for_known_subject_completion(
+            &known_subject_headers,
+            &known_subject_method,
+            &known_subject_secret_response,
+            at(140),
+        );
     let known_subject_error = runtime
         .execute_known_subject_active_proof_method_response_from_headers(
             &known_subject_headers,
             CompleteKnownSubjectActiveProofMethodResponse {
                 now: at(140),
-                method: ProofMethodDeclaration::new(ProofFamily::SharedSecretOtp, "totp")
-                    .expect("TOTP method"),
-                secret_response: known_subject_test_method_response_payload(&id(
-                    "method-known-subject",
-                )),
-                weak_proof_gate_response: Some(proof_of_work_gate_response()),
+                method: known_subject_method,
+                secret_response: known_subject_secret_response,
+                weak_proof_gate_response: Some(known_subject_weak_proof_gate_response),
             },
         )
         .await
@@ -7225,7 +8498,7 @@ async fn postgres_runtime_commits_method_work_atomically_with_core_work_when_dat
                 recipient_handle: "method-atomic-success-recipient".to_owned(),
                 idempotency_key: "method-atomic-success-mail-key".to_owned(),
             },
-            challenge_issue_preflight_response(),
+            email_otp_challenge_issue_preflight_response_at(at(20)),
         )
         .await
         .expect("issue challenge with method registry");
@@ -7259,7 +8532,7 @@ async fn postgres_runtime_commits_method_work_atomically_with_core_work_when_dat
                 recipient_handle: "method-atomic-precondition-failure-recipient".to_owned(),
                 idempotency_key: "method-atomic-precondition-failure-mail-key".to_owned(),
             },
-            challenge_issue_preflight_response(),
+            email_otp_challenge_issue_preflight_response_at(at(40)),
         )
         .await
         .expect_err("method precondition failure must abort the whole commit");
@@ -7308,7 +8581,7 @@ async fn postgres_runtime_rolls_back_core_work_when_method_mutation_fails_when_d
                 recipient_handle: "method-mutation-failure-recipient".to_owned(),
                 idempotency_key: "method-mutation-failure-mail-key".to_owned(),
             },
-            challenge_issue_preflight_response(),
+            email_otp_challenge_issue_preflight_response_at(at(20)),
         )
         .await
         .expect_err("method mutation failure must abort the whole commit");
@@ -7357,7 +8630,7 @@ async fn postgres_runtime_rolls_back_core_work_when_method_durable_effect_fails_
                 recipient_handle: "method-effect-failure-recipient".to_owned(),
                 idempotency_key: "method-effect-failure-mail-key".to_owned(),
             },
-            challenge_issue_preflight_response(),
+            email_otp_challenge_issue_preflight_response_at(at(20)),
         )
         .await
         .expect_err("method durable effect failure must abort the whole commit");
@@ -7426,6 +8699,8 @@ fn first_party_postgres_auth_bootstrap_for_test(
         "tests.auth.postgres-bootstrap.recovery-code.v1",
     ))
     .expect("add recovery code method")
+    .with_password_derived_signature_method()
+    .expect("add password-derived signature method")
 }
 
 fn required_auth_postgres_runtime_test_database_url() -> String {
@@ -7519,6 +8794,74 @@ fn headers_from_cookie_pairs(cookie_pairs: &[&str]) -> HeaderMap {
         HeaderValue::from_str(&cookie_pairs.join("; ")).expect("cookie header"),
     );
     headers
+}
+
+fn bound_proof_of_work_gate_response_for_active_method_completion(
+    headers: &HeaderMap,
+    response_payload: &ActiveProofMethodResponsePayload,
+    now: UnixSeconds,
+) -> WeakProofGateResponse {
+    let decoded = auth_web_transport()
+        .decode_presented_cookies_from_headers(headers)
+        .expect("decode active-method challenge cookie for weak-gate binding");
+    let challenge_cookie = decoded
+        .presented_cookies()
+        .active_proof_challenge_cookie
+        .as_ref()
+        .expect("active-method challenge cookie for weak-gate binding");
+    let challenge_material = ActiveProofMethodChallengeMaterial::from_cookie(challenge_cookie)
+        .expect("active-method challenge material for weak-gate binding");
+    let binding =
+        WeakProofGateBinding::for_active_method_response(&challenge_material, response_payload)
+            .expect("active-method weak-gate binding");
+    proof_of_work_gate_response_for_test(now, &challenge_material.proof, &binding)
+}
+
+fn bound_proof_of_work_gate_response_for_challenge_bound_totp_completion(
+    headers: &HeaderMap,
+    secret_response: &KnownSubjectActiveProofSecretResponse,
+    now: UnixSeconds,
+) -> WeakProofGateResponse {
+    let decoded = auth_web_transport()
+        .decode_presented_cookies_from_headers(headers)
+        .expect("decode challenge-bound TOTP cookie for weak-gate binding");
+    let challenge_cookie = decoded
+        .presented_cookies()
+        .active_proof_challenge_cookie
+        .as_ref()
+        .expect("challenge-bound TOTP cookie for weak-gate binding");
+    let challenge_material = ActiveProofMethodChallengeMaterial::from_cookie(challenge_cookie)
+        .expect("challenge-bound TOTP material for weak-gate binding");
+    let binding = WeakProofGateBinding::for_challenge_bound_known_subject_secret_response(
+        &challenge_material,
+        secret_response,
+    )
+    .expect("challenge-bound TOTP weak-gate binding");
+    proof_of_work_gate_response_for_test(now, &challenge_material.proof, &binding)
+}
+
+fn bound_proof_of_work_gate_response_for_known_subject_completion(
+    headers: &HeaderMap,
+    method: &ProofMethodDeclaration,
+    secret_response: &KnownSubjectActiveProofSecretResponse,
+    now: UnixSeconds,
+) -> WeakProofGateResponse {
+    let decoded = auth_web_transport()
+        .decode_presented_cookies_from_headers(headers)
+        .expect("decode continuation cookie for known-subject weak-gate binding");
+    let continuation_cookie = decoded
+        .presented_cookies()
+        .active_proof_continuation_cookie
+        .as_ref()
+        .expect("continuation cookie for known-subject weak-gate binding");
+    let proof = method.verified_proof_summary();
+    let binding = WeakProofGateBinding::for_known_subject_secret_response(
+        continuation_cookie,
+        &proof,
+        secret_response,
+    )
+    .expect("known-subject weak-gate binding");
+    proof_of_work_gate_response_for_test(now, &proof, &binding)
 }
 
 fn set_cookie_headers_contain_deletion(
@@ -7738,6 +9081,12 @@ struct IssuedRuntimeChallenge {
     challenge_cookie_pair: String,
 }
 
+struct IssuedRuntimeChallengeBoundTotpChallenge {
+    attempt_id: ActiveProofAttemptId,
+    challenge_id: ActiveProofChallengeId,
+    challenge_cookie_pair: String,
+}
+
 struct StartedRuntimeAttempt {
     attempt_id: ActiveProofAttemptId,
     continuation_cookie_pair: String,
@@ -7798,7 +9147,7 @@ async fn start_and_issue_out_of_band_challenge_through_runtime(
                 recipient_handle: recipient_handle_for_test_subject(flow_label, &subject_id),
                 idempotency_key: format!("{flow_label}-mail-idempotency-key"),
             },
-            challenge_issue_preflight_response(),
+            email_otp_challenge_issue_preflight_response_at(at(start_at + 10)),
         )
         .await
         .expect("issue challenge through Postgres runtime");
@@ -7888,6 +9237,62 @@ async fn start_current_session_and_issue_out_of_band_challenge_through_runtime(
     }
 }
 
+async fn start_current_session_and_issue_challenge_bound_totp_through_runtime(
+    runtime: &super::super::postgres_runtime::PostgresAuthWebRuntime,
+    session_cookie_pair: &str,
+    attempt_start_at: UnixSeconds,
+    challenge_issue_at: UnixSeconds,
+) -> IssuedRuntimeChallengeBoundTotpChallenge {
+    let started = start_current_session_active_proof_attempt_through_runtime(
+        runtime,
+        session_cookie_pair,
+        attempt_start_at,
+        ProofUse::SatisfyStepUp,
+    )
+    .await;
+    let continuation_headers =
+        headers_from_cookie_pairs(&[started.continuation_cookie_pair.as_str()]);
+    let issued = runtime
+        .execute_challenge_bound_known_subject_active_proof_method_challenge_issue_from_headers(
+            &continuation_headers,
+            IssueChallengeBoundKnownSubjectActiveProofMethodChallengeInput {
+                now: challenge_issue_at,
+                method: ProofMethodDeclaration::new(ProofFamily::SharedSecretOtp, "totp")
+                    .expect("TOTP method"),
+                method_challenge_request_payload: None,
+            },
+        )
+        .await
+        .expect("issue challenge-bound TOTP challenge through Postgres runtime");
+    let challenge_id = match issued.outcome() {
+        Outcome::ActiveProofMethodChallengeIssued {
+            attempt_id,
+            challenge_id,
+            proof,
+            ..
+        } => {
+            assert_eq!(attempt_id, &started.attempt_id);
+            assert_eq!(
+                proof,
+                &ProofSummary::new(ProofFamily::SharedSecretOtp, "totp").expect("proof"),
+            );
+            challenge_id.clone()
+        }
+        outcome => panic!("expected challenge-bound TOTP challenge issue, got {outcome:?}"),
+    };
+    let challenge_cookie_pair = cookie_pair_from_set_cookie(
+        issued.set_cookie_headers(),
+        "__Host-__paranoid_auth_active_proof_challenge=",
+    )
+    .to_owned();
+
+    IssuedRuntimeChallengeBoundTotpChallenge {
+        attempt_id: started.attempt_id,
+        challenge_id,
+        challenge_cookie_pair,
+    }
+}
+
 async fn complete_out_of_band_challenge_response_through_runtime(
     runtime: &super::super::postgres_runtime::PostgresAuthWebRuntime,
     challenge: &IssuedRuntimeChallenge,
@@ -7958,7 +9363,7 @@ async fn complete_full_authentication_through_runtime(
                 recipient_handle: recipient_handle_for_test_subject(flow_label, &subject_id),
                 idempotency_key: format!("{flow_label}-mail-idempotency-key"),
             },
-            challenge_issue_preflight_response(),
+            email_otp_challenge_issue_preflight_response_at(at(start_at)),
         )
         .await
         .expect("issue challenge through Postgres runtime");
