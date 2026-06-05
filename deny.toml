@@ -21,6 +21,14 @@ allow = [
 	"Unlicense",
 	"Zlib",
 ]
+exceptions = [
+	{ allow = [
+		"bzip2-1.0.6",
+	], crate = "libbz2-rs-sys" },
+	{ allow = [
+		"MPL-2.0",
+	], crate = "option-ext" },
+]
 
 [sources]
 unknown-git = "deny"
