@@ -2,7 +2,7 @@
 members = ["fuzz", "playgrounds/local_env_vault", "xtask"]
 
 [workspace.package]
-version = "0.0.0-pre.6"
+version = "0.0.0-pre.7"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 
