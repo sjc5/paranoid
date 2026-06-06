@@ -3,7 +3,10 @@ mod common;
 use common::{
     connect_sqlx_pool_for_harness, drop_test_schema, fetch_table_exists, standard_test_database_url,
 };
-use paranoid::db::{BootstrapConfig, PgSchemaName, PoolConfig, WritePool};
+use paranoid::db::{
+    AuditedSql, BootstrapConfig, PgQualifiedTableName, PgSchemaName, PoolConfig, WritePool,
+    component_schema_instance_key_for_tables, portable_query_as,
+};
 use paranoid::id::SortableId as UniqueTestId;
 use secrecy::SecretString;
 use sqlx::PgPool;
@@ -50,6 +53,12 @@ async fn concurrent_bootstrap_migrates_subsystem_tables_in_one_schema() {
         );
     }
 
+    assert_schema_ledger_self_registration_matches_table_name(
+        &sqlx_pool,
+        &table_names.schema_ledger,
+    )
+    .await;
+
     drop_test_schema(&sqlx_pool, config.schema_name().identifier()).await;
 }
 
@@ -91,6 +100,37 @@ async fn connect_paranoid_pool(database_url: &str) -> WritePool {
 
 async fn connect_sqlx_pool(database_url: &str) -> PgPool {
     connect_sqlx_pool_for_harness(database_url, 2, "paranoid_db_bootstrap_postgres_test").await
+}
+
+async fn assert_schema_ledger_self_registration_matches_table_name(
+    pool: &PgPool,
+    ledger_table: &PgQualifiedTableName,
+) {
+    let table_label = paranoid::db::PgIdentifier::new("table").expect("table label");
+    let expected_instance_key =
+        component_schema_instance_key_for_tables([(&table_label, ledger_table)]);
+    let statement = format!(
+        r#"
+        SELECT instance_key, schema_version, schema_fingerprint
+        FROM {}
+        WHERE component = $1
+        "#,
+        ledger_table.quoted()
+    );
+    let actual = portable_query_as::<(String, i32, String)>(AuditedSql::new(statement))
+        .bind("schema_ledger")
+        .fetch_optional(pool)
+        .await
+        .expect("fetch schema ledger self-registration");
+    assert_eq!(
+        actual,
+        Some((
+            expected_instance_key,
+            1,
+            "paranoid.schema_ledger.v1".to_owned(),
+        )),
+        "schema ledger should register its own exact table instance"
+    );
 }
 
 fn unique_test_schema_name() -> PgSchemaName {

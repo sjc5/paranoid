@@ -20,10 +20,11 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use pg_embed::pg_enums::PgAuthMethod;
+use pg_embed::pg_enums::{PgAuthMethod, PgServerStatus};
 use pg_embed::pg_fetch::{PG_V16, PgFetchSettings};
 use pg_embed::postgres::{PgEmbed, PgSettings};
 use sha2::{Digest, Sha256};
+use tokio::process::Command as TokioCommand;
 use tokio_postgres::NoTls;
 
 const RUN_ROOT: &str = "target/paranoid-isolated-test-db";
@@ -47,6 +48,7 @@ const STATEMENT_TIMEOUT_PASSWORD: &str = "paranoid_statement_timeout";
 const STATEMENT_TIMEOUT: &str = "50ms";
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(30);
 const READINESS_POLL_INTERVAL: Duration = Duration::from_millis(100);
+const EMBEDDED_POSTGRES_LOCALE: &str = "C";
 
 /// Configuration for [`IsolatedPostgresTestHarness`].
 #[derive(Clone, Debug)]
@@ -233,16 +235,23 @@ impl IsolatedPostgresTestHarness {
 
     /// Stops PgBouncer, stops embedded Postgres, and removes the run directory.
     pub async fn shutdown(mut self) -> Result<(), IsolatedPostgresTestHarnessError> {
-        let result = stop_stack(
-            self.pgbouncer.as_mut(),
-            self.postgres.as_mut(),
-            self.run_dir.as_deref(),
-        )
-        .await;
-        self.pgbouncer = None;
-        self.postgres = None;
-        self.run_dir = None;
-        result
+        if let Some(mut pgbouncer) = self.pgbouncer.take() {
+            stop_pgbouncer(&mut pgbouncer).map_err(IsolatedPostgresTestHarnessError::from)?;
+        }
+        if let Some(mut postgres) = self.postgres.take() {
+            stop_embedded_postgres_with_deterministic_locale(&mut postgres)
+                .await
+                .map_err(IsolatedPostgresTestHarnessError::from)?;
+        }
+        if let Some(run_dir) = self.run_dir.take() {
+            fs::remove_dir_all(&run_dir).map_err(|error| {
+                IsolatedPostgresTestHarnessError::new(format!(
+                    "remove isolated DB run directory {}: {error}",
+                    run_dir.display()
+                ))
+            })?;
+        }
+        Ok(())
     }
 }
 
@@ -315,10 +324,13 @@ impl From<&str> for IsolatedPostgresTestHarnessError {
 
 impl Drop for IsolatedPostgresTestHarness {
     fn drop(&mut self) {
-        if let Some(pgbouncer) = self.pgbouncer.as_mut() {
-            let _ = stop_pgbouncer(pgbouncer);
+        if let Some(mut pgbouncer) = self.pgbouncer.take() {
+            let _ = stop_pgbouncer(&mut pgbouncer);
         }
-        if let Some(run_dir) = self.run_dir.as_ref() {
+        if let Some(mut postgres) = self.postgres.take() {
+            let _ = stop_embedded_postgres_sync_with_deterministic_locale(&mut postgres);
+        }
+        if let Some(run_dir) = self.run_dir.take() {
             let _ = fs::remove_dir_all(run_dir);
         }
     }
@@ -740,17 +752,274 @@ async fn start_embedded_postgres(run_dir: &Path, postgres_port: u16) -> Result<P
     .await
     .map_err(|error| format!("create embedded Postgres: {error}"))?;
 
-    postgres
-        .setup()
-        .await
-        .map_err(|error| format!("setup embedded Postgres: {error}"))?;
-    postgres
-        .start_db()
-        .await
-        .map_err(|error| format!("start embedded Postgres: {error}"))?;
+    setup_embedded_postgres_with_deterministic_locale(&mut postgres).await?;
+    start_embedded_postgres_with_deterministic_locale(&mut postgres).await?;
     create_embedded_postgres_test_database(postgres_port).await?;
 
     Ok(postgres)
+}
+
+async fn setup_embedded_postgres_with_deterministic_locale(
+    postgres: &mut PgEmbed,
+) -> Result<(), String> {
+    postgres
+        .pg_access
+        .maybe_acquire_postgres()
+        .await
+        .map_err(|error| format!("acquire embedded Postgres binaries: {error}"))?;
+    postgres
+        .pg_access
+        .create_password_file(postgres.pg_settings.password.as_bytes())
+        .await
+        .map_err(|error| format!("create embedded Postgres password file: {error}"))?;
+    if postgres
+        .pg_access
+        .db_files_exist()
+        .await
+        .map_err(|error| format!("check embedded Postgres data directory: {error}"))?
+    {
+        let mut server_status = postgres.server_status.lock().await;
+        *server_status = PgServerStatus::Initialized;
+    } else {
+        init_embedded_postgres_with_deterministic_locale(postgres).await?;
+    }
+    Ok(())
+}
+
+async fn init_embedded_postgres_with_deterministic_locale(
+    postgres: &mut PgEmbed,
+) -> Result<(), String> {
+    {
+        let mut server_status = postgres.server_status.lock().await;
+        *server_status = PgServerStatus::Initializing;
+    }
+
+    let password_file = postgres
+        .pg_access
+        .pw_file_path
+        .to_str()
+        .ok_or_else(|| "embedded Postgres password file path is not valid UTF-8".to_owned())?;
+    let database_dir =
+        postgres.pg_access.database_dir.to_str().ok_or_else(|| {
+            "embedded Postgres database directory path is not valid UTF-8".to_owned()
+        })?;
+    let args = vec![
+        "-A".to_owned(),
+        postgres_auth_method_name(&postgres.pg_settings.auth_method).to_owned(),
+        "-U".to_owned(),
+        postgres.pg_settings.user.clone(),
+        "-E=UTF8".to_owned(),
+        "-D".to_owned(),
+        database_dir.to_owned(),
+        format!("--pwfile={password_file}"),
+    ];
+    if let Err(error) = run_embedded_postgres_lifecycle_command(
+        &postgres.pg_access.init_db_exe,
+        &args,
+        postgres.pg_settings.timeout,
+        "initialize embedded Postgres",
+    )
+    .await
+    {
+        let mut server_status = postgres.server_status.lock().await;
+        *server_status = PgServerStatus::Failure;
+        return Err(error);
+    }
+
+    let mut server_status = postgres.server_status.lock().await;
+    *server_status = PgServerStatus::Initialized;
+    Ok(())
+}
+
+async fn start_embedded_postgres_with_deterministic_locale(
+    postgres: &mut PgEmbed,
+) -> Result<(), String> {
+    {
+        let mut server_status = postgres.server_status.lock().await;
+        *server_status = PgServerStatus::Starting;
+    }
+    postgres.shutting_down = false;
+
+    let database_dir =
+        postgres.pg_access.database_dir.to_str().ok_or_else(|| {
+            "embedded Postgres database directory path is not valid UTF-8".to_owned()
+        })?;
+    let args = vec![
+        "-o".to_owned(),
+        format!("-F -p {}", postgres.pg_settings.port),
+        "start".to_owned(),
+        "-w".to_owned(),
+        "-D".to_owned(),
+        database_dir.to_owned(),
+    ];
+    if let Err(error) = run_embedded_postgres_lifecycle_status_command(
+        &postgres.pg_access.pg_ctl_exe,
+        &args,
+        postgres.pg_settings.timeout,
+        "start embedded Postgres",
+    )
+    .await
+    {
+        let mut server_status = postgres.server_status.lock().await;
+        *server_status = PgServerStatus::Failure;
+        return Err(error);
+    }
+
+    let mut server_status = postgres.server_status.lock().await;
+    *server_status = PgServerStatus::Started;
+    Ok(())
+}
+
+async fn stop_embedded_postgres_with_deterministic_locale(
+    postgres: &mut PgEmbed,
+) -> Result<(), String> {
+    {
+        let mut server_status = postgres.server_status.lock().await;
+        *server_status = PgServerStatus::Stopping;
+    }
+    postgres.shutting_down = true;
+
+    let database_dir =
+        postgres.pg_access.database_dir.to_str().ok_or_else(|| {
+            "embedded Postgres database directory path is not valid UTF-8".to_owned()
+        })?;
+    let args = embedded_postgres_stop_args(database_dir);
+    if let Err(error) = run_embedded_postgres_lifecycle_command(
+        &postgres.pg_access.pg_ctl_exe,
+        &args,
+        postgres.pg_settings.timeout,
+        "stop embedded Postgres",
+    )
+    .await
+    {
+        let mut server_status = postgres.server_status.lock().await;
+        *server_status = PgServerStatus::Failure;
+        return Err(error);
+    }
+
+    let mut server_status = postgres.server_status.lock().await;
+    *server_status = PgServerStatus::Stopped;
+    Ok(())
+}
+
+fn stop_embedded_postgres_sync_with_deterministic_locale(
+    postgres: &mut PgEmbed,
+) -> Result<(), String> {
+    postgres.shutting_down = true;
+    let database_dir =
+        postgres.pg_access.database_dir.to_str().ok_or_else(|| {
+            "embedded Postgres database directory path is not valid UTF-8".to_owned()
+        })?;
+    run_embedded_postgres_lifecycle_command_sync(
+        &postgres.pg_access.pg_ctl_exe,
+        &embedded_postgres_stop_args(database_dir),
+        "stop embedded Postgres",
+    )
+}
+
+fn embedded_postgres_stop_args(database_dir: &str) -> Vec<String> {
+    vec![
+        "stop".to_owned(),
+        "-w".to_owned(),
+        "-D".to_owned(),
+        database_dir.to_owned(),
+    ]
+}
+
+fn postgres_auth_method_name(auth_method: &PgAuthMethod) -> &'static str {
+    match auth_method {
+        PgAuthMethod::Plain => "password",
+        PgAuthMethod::MD5 => "md5",
+        PgAuthMethod::ScramSha256 => "scram-sha-256",
+    }
+}
+
+async fn run_embedded_postgres_lifecycle_command(
+    program: &Path,
+    args: &[String],
+    timeout_duration: Option<Duration>,
+    label: &str,
+) -> Result<(), String> {
+    let mut command = TokioCommand::new(program);
+    command
+        .args(args)
+        .env("LC_ALL", EMBEDDED_POSTGRES_LOCALE)
+        .env("LANG", EMBEDDED_POSTGRES_LOCALE)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    let output_future = command.output();
+    let output = match timeout_duration {
+        Some(duration) => tokio::time::timeout(duration, output_future)
+            .await
+            .map_err(|_| format!("{label} timed out after {duration:?}"))?,
+        None => output_future.await,
+    }
+    .map_err(|error| format!("{label}: {error}"))?;
+
+    if output.status.success() {
+        return Ok(());
+    }
+
+    Err(format!(
+        "{label} failed with {}\nstdout:\n{}\nstderr:\n{}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    ))
+}
+
+async fn run_embedded_postgres_lifecycle_status_command(
+    program: &Path,
+    args: &[String],
+    timeout_duration: Option<Duration>,
+    label: &str,
+) -> Result<(), String> {
+    let mut command = TokioCommand::new(program);
+    command
+        .args(args)
+        .env("LC_ALL", EMBEDDED_POSTGRES_LOCALE)
+        .env("LANG", EMBEDDED_POSTGRES_LOCALE)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .kill_on_drop(true);
+    let status_future = command.status();
+    let status = match timeout_duration {
+        Some(duration) => tokio::time::timeout(duration, status_future)
+            .await
+            .map_err(|_| format!("{label} timed out after {duration:?}"))?,
+        None => status_future.await,
+    }
+    .map_err(|error| format!("{label}: {error}"))?;
+
+    if status.success() {
+        return Ok(());
+    }
+
+    Err(format!("{label} failed with {status}"))
+}
+
+fn run_embedded_postgres_lifecycle_command_sync(
+    program: &Path,
+    args: &[String],
+    label: &str,
+) -> Result<(), String> {
+    let output = Command::new(program)
+        .args(args)
+        .env("LC_ALL", EMBEDDED_POSTGRES_LOCALE)
+        .env("LANG", EMBEDDED_POSTGRES_LOCALE)
+        .output()
+        .map_err(|error| format!("{label}: {error}"))?;
+    if output.status.success() {
+        return Ok(());
+    }
+
+    Err(format!(
+        "{label} failed with {}\nstdout:\n{}\nstderr:\n{}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    ))
 }
 
 async fn create_embedded_postgres_test_database(postgres_port: u16) -> Result<(), String> {
@@ -913,31 +1182,6 @@ async fn wait_for_pgbouncer(dsn: &str, child: &mut Child) -> Result<(), String> 
         }
         tokio::time::sleep(READINESS_POLL_INTERVAL).await;
     }
-}
-
-async fn stop_stack(
-    pgbouncer: Option<&mut Child>,
-    postgres: Option<&mut PgEmbed>,
-    run_dir: Option<&Path>,
-) -> Result<(), IsolatedPostgresTestHarnessError> {
-    if let Some(pgbouncer) = pgbouncer {
-        stop_pgbouncer(pgbouncer)?;
-    }
-    if let Some(postgres) = postgres {
-        postgres
-            .stop_db()
-            .await
-            .map_err(|error| format!("stop embedded Postgres: {error}"))?;
-    }
-    if let Some(run_dir) = run_dir {
-        fs::remove_dir_all(run_dir).map_err(|error| {
-            format!(
-                "remove isolated DB run directory {}: {error}",
-                run_dir.display()
-            )
-        })?;
-    }
-    Ok(())
 }
 
 fn stop_pgbouncer(child: &mut Child) -> Result<(), String> {
@@ -1141,5 +1385,37 @@ mod tests {
                 .iter()
                 .any(|(key, _)| *key == "PARANOID_TEST_DATABASE_DIRECT_URL")
         );
+    }
+
+    #[tokio::test]
+    async fn embedded_postgres_lifecycle_command_forces_c_locale_for_child_process() {
+        let assert_locale_args = [
+            "-c".to_owned(),
+            r#"[ "$LC_ALL" = "C" ] && [ "$LANG" = "C" ]"#.to_owned(),
+        ];
+        run_embedded_postgres_lifecycle_command(
+            Path::new("sh"),
+            &assert_locale_args,
+            Some(Duration::from_secs(5)),
+            "assert deterministic child locale",
+        )
+        .await
+        .expect("child process should receive deterministic locale");
+
+        run_embedded_postgres_lifecycle_status_command(
+            Path::new("sh"),
+            &assert_locale_args,
+            Some(Duration::from_secs(5)),
+            "assert deterministic status child locale",
+        )
+        .await
+        .expect("status child process should receive deterministic locale");
+
+        run_embedded_postgres_lifecycle_command_sync(
+            Path::new("sh"),
+            &assert_locale_args,
+            "assert deterministic sync child locale",
+        )
+        .expect("sync child process should receive deterministic locale");
     }
 }

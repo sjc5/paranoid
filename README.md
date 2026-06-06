@@ -204,9 +204,12 @@ application wants its own queries to keep the same portable execution style
 (transaction-pooler safety), it can use `paranoid::db::portable_query`,
 `portable_query_as`, or `portable_query_scalar`.
 
-Crates and applications can also use Paranoid's component schema ledger for their own
-Postgres table families. Migration SQL is separate from validation checks: validation
-checks must return boolean `true` before Paranoid records the component version.
+Code that already bootstraps Paranoid can register additional schema families under the
+same DB foundation. Paranoid owns the shared schema ledger, migration transaction, and
+multi-process coordination. Callers provide only the schema family's stable identity,
+fresh-install statements, ordered upgrade statements, and physical validation checks.
+Validation checks must return boolean `true` before Paranoid records the version, and
+dynamic SQL should be built only from validated Postgres identifiers.
 
 ```rust,no_run
 # #[cfg(feature = "db")]
@@ -214,22 +217,23 @@ checks must return boolean `true` before Paranoid records the component version.
 #     pool: &paranoid::db::WritePool,
 # ) -> Result<(), Box<dyn std::error::Error>> {
 use paranoid::db::{
-    component_schema_instance_key_for_tables, migrate_component_schema_in_current_transaction,
-    AuditedSql, ComponentSchema, ComponentSchemaStatement, ComponentSchemaValidationCheck,
-    ComponentSchemaVersion, PgIdentifier, PgQualifiedTableName,
+    component_schema_instance_key_for_tables, AuditedSql, BootstrapConfig, ComponentSchema,
+    ComponentSchemaStatement, ComponentSchemaValidationCheck, ComponentSchemaVersion,
+    PgIdentifier, PgQualifiedTableName,
 };
 
-let ledger_table = PgQualifiedTableName::with_schema("__app", "schema_ledger")?;
 let pages_table = PgQualifiedTableName::with_schema("__app", "md_pages")?;
 let pages_label = PgIdentifier::new("pages")?;
 let instance_key = component_schema_instance_key_for_tables([(&pages_label, &pages_table)]);
 
-let install = [ComponentSchemaStatement::from_audited_dynamic_sql(AuditedSql::new(
-    format!(
+let stores = BootstrapConfig::default().migrate_schema(pool).await?;
+let install = [
+    ComponentSchemaStatement::from_static_sql(r#"CREATE SCHEMA IF NOT EXISTS "__app""#)?,
+    ComponentSchemaStatement::from_audited_dynamic_sql(AuditedSql::new(format!(
         "CREATE TABLE {} (id BYTEA PRIMARY KEY, body BYTEA NOT NULL)",
         pages_table.quoted()
-    ),
-))?];
+    )))?,
+];
 let validation = [ComponentSchemaValidationCheck::from_audited_dynamic_boolean_expression(
     AuditedSql::new(format!(
         "NOT EXISTS (SELECT id, body FROM {} WHERE false)",
@@ -248,10 +252,7 @@ let schema = ComponentSchema::new(
     &validation,
 )?;
 
-let mut tx = pool.begin_transaction().await?;
-let _outcome =
-    migrate_component_schema_in_current_transaction(&mut tx, &ledger_table, &schema).await?;
-tx.commit().await?;
+let _outcome = stores.migrate_component_schema(pool, &schema).await?;
 # Ok(())
 # }
 ```

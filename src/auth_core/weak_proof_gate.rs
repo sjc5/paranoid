@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 
 use super::*;
 
@@ -157,6 +158,211 @@ impl WeakProofGateVerifier for HashcashProofOfWorkVerifier {
             resource_digest,
         )
     }
+}
+
+type WeakProofGateAdapterVerificationFn =
+    dyn for<'a> Fn(WeakProofGateAdapterVerificationRequest<'a>) -> Result<(), Error> + Send + Sync;
+
+/// Runtime-owned verification adapter for non-native weak gates.
+#[derive(Clone)]
+pub(crate) struct WeakProofGateAdapter {
+    summary: WeakProofGateSummary,
+    verifier: Arc<WeakProofGateAdapterVerificationFn>,
+}
+
+impl WeakProofGateAdapter {
+    /// Creates an adapter-backed weak-gate verifier.
+    pub(crate) fn new(
+        summary: WeakProofGateSummary,
+        verifier: impl for<'a> Fn(WeakProofGateAdapterVerificationRequest<'a>) -> Result<(), Error>
+        + Send
+        + Sync
+        + 'static,
+    ) -> Result<Self, Error> {
+        if summary.kind() == WeakProofGateKind::ProofOfWork {
+            return Err(Error::InvalidConfig(
+                "weak gate adapters cannot use the native proof-of-work kind",
+            ));
+        }
+        Ok(Self {
+            summary,
+            verifier: Arc::new(verifier),
+        })
+    }
+
+    /// Returns the exact weak-gate summary this adapter accepts.
+    pub(crate) fn summary(&self) -> &WeakProofGateSummary {
+        &self.summary
+    }
+
+    fn verify(&self, request: WeakProofGateAdapterVerificationRequest<'_>) -> Result<(), Error> {
+        (self.verifier)(request)
+    }
+}
+
+impl std::fmt::Debug for WeakProofGateAdapter {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WeakProofGateAdapter")
+            .field("summary", &self.summary)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Registry that dispatches non-native weak gates by exact summary.
+#[derive(Clone, Debug)]
+pub(crate) struct WeakProofGateAdapterRegistry {
+    adapters: Vec<WeakProofGateAdapter>,
+}
+
+impl WeakProofGateAdapterRegistry {
+    /// Creates a registry from validated adapter-backed weak gates.
+    pub(crate) fn new(
+        adapters: impl IntoIterator<Item = WeakProofGateAdapter>,
+    ) -> Result<Self, Error> {
+        let adapters = adapters.into_iter().collect::<Vec<_>>();
+        if adapters.is_empty() {
+            return Err(Error::InvalidConfig(
+                "weak gate adapter registry must not be empty",
+            ));
+        }
+        for (index, adapter) in adapters.iter().enumerate() {
+            if adapters[index + 1..]
+                .iter()
+                .any(|other| other.summary() == adapter.summary())
+            {
+                return Err(Error::InvalidConfig(
+                    "weak gate adapter registry must not contain duplicate summaries",
+                ));
+            }
+        }
+        Ok(Self { adapters })
+    }
+
+    fn adapter_for(&self, summary: &WeakProofGateSummary) -> Result<&WeakProofGateAdapter, Error> {
+        self.adapters
+            .iter()
+            .find(|adapter| adapter.summary() == summary)
+            .ok_or(Error::WeakProofGateVerificationFailed)
+    }
+}
+
+impl WeakProofGateVerifier for WeakProofGateAdapterRegistry {
+    fn verify_weak_proof_gate_before_state_load(
+        &self,
+        request: WeakProofGateVerificationRequest<'_>,
+    ) -> Result<(), Error> {
+        let adapter = self.adapter_for(request.response().summary())?;
+        let binding = request
+            .binding()
+            .ok_or(Error::WeakProofGateVerificationFailed)?;
+        adapter.verify(WeakProofGateAdapterVerificationRequest::strong_proof(
+            request.now(),
+            request.proof(),
+            request.response().summary(),
+            request.response().payload(),
+            binding,
+        ))
+    }
+
+    fn verify_challenge_issue_preflight_before_state_load(
+        &self,
+        request: ChallengeIssuePreflightVerificationRequest<'_>,
+    ) -> Result<(), Error> {
+        let adapter = self.adapter_for(request.response().summary())?;
+        adapter.verify(
+            WeakProofGateAdapterVerificationRequest::challenge_issue_preflight(
+                request.now(),
+                request.proof_use(),
+                request.proof(),
+                request.response().summary(),
+                request.response().payload(),
+            ),
+        )
+    }
+}
+
+/// Runtime-derived context supplied to adapter-backed weak gates.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct WeakProofGateAdapterVerificationRequest<'a> {
+    now: UnixSeconds,
+    proof: &'a ProofSummary,
+    response_summary: &'a WeakProofGateSummary,
+    response_payload: &'a [u8],
+    context: WeakProofGateAdapterVerificationContext<'a>,
+}
+
+impl<'a> WeakProofGateAdapterVerificationRequest<'a> {
+    fn strong_proof(
+        now: UnixSeconds,
+        proof: &'a ProofSummary,
+        response_summary: &'a WeakProofGateSummary,
+        response_payload: &'a [u8],
+        binding: &'a WeakProofGateBinding,
+    ) -> Self {
+        Self {
+            now,
+            proof,
+            response_summary,
+            response_payload,
+            context: WeakProofGateAdapterVerificationContext::StrongProof { binding },
+        }
+    }
+
+    fn challenge_issue_preflight(
+        now: UnixSeconds,
+        proof_use: ProofUse,
+        proof: &'a ProofSummary,
+        response_summary: &'a WeakProofGateSummary,
+        response_payload: &'a [u8],
+    ) -> Self {
+        Self {
+            now,
+            proof,
+            response_summary,
+            response_payload,
+            context: WeakProofGateAdapterVerificationContext::ChallengeIssuePreflight { proof_use },
+        }
+    }
+
+    /// Returns the verification time.
+    pub(crate) fn now(&self) -> UnixSeconds {
+        self.now
+    }
+
+    /// Returns the proof whose gate is being verified.
+    pub(crate) fn proof(&self) -> &ProofSummary {
+        self.proof
+    }
+
+    /// Returns the exact configured gate summary.
+    pub(crate) fn response_summary(&self) -> &WeakProofGateSummary {
+        self.response_summary
+    }
+
+    /// Returns the opaque provider or risk-engine response bytes.
+    pub(crate) fn response_payload(&self) -> &[u8] {
+        self.response_payload
+    }
+
+    /// Returns the runtime-derived gate context.
+    pub(crate) fn context(&self) -> WeakProofGateAdapterVerificationContext<'a> {
+        self.context
+    }
+}
+
+/// Runtime-derived context for a non-native weak-gate verification.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum WeakProofGateAdapterVerificationContext<'a> {
+    /// The gate protects a specific strong-proof response.
+    StrongProof {
+        /// Digest binding the gate to exact runtime-owned proof material.
+        binding: &'a WeakProofGateBinding,
+    },
+    /// The gate protects unauthenticated challenge issue before any attempt row exists.
+    ChallengeIssuePreflight {
+        /// Transition the challenge issue is trying to satisfy.
+        proof_use: ProofUse,
+    },
 }
 
 /// Configuration for native Hashcash-style proof-of-work verification.

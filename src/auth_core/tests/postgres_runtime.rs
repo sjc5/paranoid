@@ -2377,6 +2377,118 @@ async fn postgres_runtime_rejects_wrong_password_derived_signature_before_databa
 }
 
 #[tokio::test]
+async fn postgres_runtime_rejects_invalid_password_derived_weak_gate_before_database_work() {
+    let _postgres_runtime_test_guard = AUTH_POSTGRES_RUNTIME_TEST_LOCK.lock().await;
+    let harness =
+        PostgresRuntimeTestHarness::connect_required_with_password_derived_signature_method().await;
+    let pool = &harness.pool;
+    let store_config = &harness.store_config;
+    let runtime = &harness.runtime;
+    let plugin = password_derived_signature_plugin_for_harness(&harness);
+    let empty_headers = HeaderMap::new();
+    let subject_id: SubjectId = id("invalid-gate-password-signature-subject");
+    let password_credential_id: VerifiedProofSourceId =
+        id("invalid-gate-password-signature-credential");
+    let lookup_handle = b"invalid-gate-password-signature-lookup";
+    let salt = PasswordKdfSalt::from_bytes(&[17_u8; PASSWORD_KDF_SALT_SIZE]).expect("KDF salt");
+    let params = minimum_accepted_password_kdf_params_for_tests();
+
+    plugin
+        .store_verifier_for_test(
+            pool,
+            PasswordDerivedSignatureVerifierForTest {
+                subject_id: &subject_id,
+                password_credential_id: &password_credential_id,
+                lookup_handle,
+                password: b"correct-password",
+                salt,
+                params,
+                now: at(10),
+            },
+        )
+        .await
+        .expect("store password-derived verifier");
+
+    let issued = runtime
+        .execute_unbound_active_proof_attempt_start_and_active_proof_method_challenge_issue_from_headers(
+            &empty_headers,
+            StartAndIssueActiveProofMethodChallengeInput {
+                now: at(20),
+                proof_use: ProofUse::ContributeToFullAuthentication,
+                method: plugin.method().clone(),
+                method_challenge_request_payload: Some(
+                    PostgresPasswordDerivedSignatureMethodPlugin::challenge_request_payload_for_test(
+                        lookup_handle,
+                    )
+                    .expect("password-derived challenge request payload"),
+                ),
+            },
+            challenge_issue_preflight_response_for_test(
+                at(20),
+                ProofUse::ContributeToFullAuthentication,
+                plugin.method(),
+            ),
+        )
+        .await
+        .expect("issue password-derived signature challenge");
+    let (attempt_id, challenge_id, method_challenge) = match issued.outcome() {
+        Outcome::ActiveProofMethodChallengeIssued {
+            attempt_id,
+            challenge_id,
+            method_challenge,
+            ..
+        } => (attempt_id.clone(), challenge_id.clone(), method_challenge),
+        outcome => panic!("expected password-derived signature challenge issue, got {outcome:?}"),
+    };
+    let challenge_cookie_pair = cookie_pair_from_set_cookie(
+        issued.set_cookie_headers(),
+        "__Host-__paranoid_auth_active_proof_challenge=",
+    )
+    .to_owned();
+    let completion_headers = headers_from_cookie_pairs(&[challenge_cookie_pair.as_str()]);
+    let response_payload = PostgresPasswordDerivedSignatureMethodPlugin::response_payload_for_test(
+        b"correct-password",
+        method_challenge,
+    )
+    .expect("valid password-derived signature response");
+
+    harness.database_operation_observer.clear();
+    let error = runtime
+        .execute_active_proof_method_response_from_headers(
+            &completion_headers,
+            CompleteActiveProofMethodResponse {
+                now: at(30),
+                response_payload,
+                weak_proof_gate_response: Some(invalid_proof_of_work_gate_response()),
+            },
+        )
+        .await
+        .expect_err("invalid password-derived weak gate must reject before state load");
+
+    assert!(matches!(
+        error,
+        super::super::postgres_runtime::AuthPostgresWebRuntimeExecutionError::Core(
+            Error::WeakProofGateVerificationFailed
+        )
+    ));
+    assert_no_database_operations(
+        &harness.database_operation_observer,
+        "invalid password-derived weak gate must reject before any database operation",
+    );
+    assert_eq!(
+        count_open_challenges_for_challenge(pool, store_config, &challenge_id).await,
+        1,
+        "invalid password-derived weak gate must leave the authoritative challenge open",
+    );
+    assert_eq!(
+        count_satisfied_proofs_for_attempt(pool, store_config, &attempt_id).await,
+        0
+    );
+
+    harness.drop_schema().await;
+}
+
+#[tokio::test]
 async fn postgres_runtime_rejects_reused_password_derived_weak_gate_for_different_signature_before_database_work()
  {
     let _postgres_runtime_test_guard = AUTH_POSTGRES_RUNTIME_TEST_LOCK.lock().await;
@@ -3361,6 +3473,81 @@ async fn postgres_runtime_challenge_bound_totp_bloom_rejects_definite_miss_befor
 }
 
 #[tokio::test]
+async fn postgres_runtime_rejects_invalid_challenge_bound_totp_weak_gate_before_database_work() {
+    let _postgres_runtime_test_guard = AUTH_POSTGRES_RUNTIME_TEST_LOCK.lock().await;
+    let harness = PostgresRuntimeTestHarness::connect_required_with_totp_method().await;
+    let pool = &harness.pool;
+    let store_config = &harness.store_config;
+    let runtime = &harness.runtime;
+    let totp_plugin = harness.totp_plugin.as_ref().expect("TOTP method plugin");
+    let email_otp = email_otp_plugin_for_harness(&harness);
+    let subject_id: SubjectId = id("totp-bloom-invalid-gate-subject");
+    let totp_credential_id: VerifiedProofSourceId = id("totp-bloom-invalid-gate-credential");
+    let totp_secret = b"totp-bloom-invalid-gate-secret";
+
+    totp_plugin
+        .store_secret_for_test(pool, &subject_id, &totp_credential_id, totp_secret, at(10))
+        .await
+        .expect("store TOTP verifier state");
+
+    let issued_auth = complete_full_authentication_through_runtime(
+        runtime,
+        pool,
+        store_config,
+        email_otp,
+        "totp-bloom-invalid-gate-bootstrap",
+        20,
+        subject_id,
+        false,
+    )
+    .await;
+    let challenge = start_current_session_and_issue_challenge_bound_totp_through_runtime(
+        runtime,
+        issued_auth.session_cookie_pair.as_str(),
+        at(70),
+        at(80),
+    )
+    .await;
+    let completion_headers = headers_from_cookie_pairs(&[challenge.challenge_cookie_pair.as_str()]);
+    let secret_response = totp_test_method_response_payload(totp_secret, at(85));
+
+    harness.database_operation_observer.clear();
+    let error = runtime
+        .execute_challenge_bound_known_subject_active_proof_method_response_from_headers(
+            &completion_headers,
+            CompleteChallengeBoundKnownSubjectActiveProofMethodResponse {
+                now: at(85),
+                secret_response,
+                weak_proof_gate_response: Some(invalid_proof_of_work_gate_response()),
+            },
+        )
+        .await
+        .expect_err("invalid challenge-bound TOTP weak gate must reject before state load");
+
+    assert!(matches!(
+        error,
+        super::super::postgres_runtime::AuthPostgresWebRuntimeExecutionError::Core(
+            Error::WeakProofGateVerificationFailed
+        )
+    ));
+    assert_no_database_operations(
+        &harness.database_operation_observer,
+        "invalid challenge-bound TOTP weak gate must reject before any database operation",
+    );
+    assert_eq!(
+        count_open_challenges_for_challenge(pool, store_config, &challenge.challenge_id).await,
+        1,
+        "invalid challenge-bound TOTP weak gate must leave the authoritative challenge open",
+    );
+    assert_eq!(
+        count_satisfied_proofs_for_attempt(pool, store_config, &challenge.attempt_id).await,
+        0
+    );
+
+    harness.drop_schema().await;
+}
+
+#[tokio::test]
 async fn postgres_runtime_challenge_bound_totp_bloom_possible_hit_completes_authoritatively() {
     let _postgres_runtime_test_guard = AUTH_POSTGRES_RUNTIME_TEST_LOCK.lock().await;
     let harness = PostgresRuntimeTestHarness::connect_required_with_totp_method().await;
@@ -3702,6 +3889,35 @@ async fn postgres_runtime_deletes_attempt_after_totp_failure_budget() {
     assert_eq!(
         count_satisfied_proofs_for_attempt(pool, store_config, &attempt_id).await,
         0
+    );
+    assert_eq!(
+        totp_plugin
+            .count_verifiers_for_subject_for_test(pool, &subject_id)
+            .await
+            .expect("count TOTP verifier after weak-proof budget exhaustion"),
+        1,
+        "exhausting a TOTP proof ceremony must not consume or delete the configured TOTP verifier",
+    );
+    assert_eq!(count_all_sessions(pool, store_config).await, 1);
+    let resolved_existing_session = runtime
+        .execute_request_resolution_from_headers(
+            &headers_from_cookie_pairs(&[issued_auth.session_cookie_pair.as_str()]),
+            ResolveRequestInput {
+                now: at(83),
+                request_kind: RequestKind::StateChanging,
+            },
+        )
+        .await
+        .expect("resolve existing session after weak-proof budget exhaustion");
+    assert_eq!(
+        resolved_existing_session.outcome(),
+        &Outcome::Authenticated(Authenticated {
+            subject_id,
+            session_id: issued_auth.session_id,
+            source: AuthenticationSource::AuthoritativeSession,
+            step_up_is_fresh: false,
+        }),
+        "exhausting a TOTP proof ceremony must not lock or revoke the live session",
     );
 
     harness.drop_schema().await;
@@ -4094,7 +4310,10 @@ async fn postgres_runtime_rejects_unbound_challenge_issue_preflight_before_write
     let pool = &harness.pool;
     let store_config = &harness.store_config;
     let runtime = &harness.runtime;
+    let email_otp = email_otp_plugin_for_harness(&harness);
     let empty_headers = HeaderMap::new();
+
+    harness.database_operation_observer.clear();
     let error = runtime
         .execute_unbound_active_proof_attempt_start_and_out_of_band_challenge_issue_from_headers(
             &empty_headers,
@@ -4118,6 +4337,10 @@ async fn postgres_runtime_rejects_unbound_challenge_issue_preflight_before_write
             Error::WeakProofGateVerificationFailed
         )
     ));
+    assert_no_database_operations(
+        &harness.database_operation_observer,
+        "invalid challenge issue preflight must reject before any database operation",
+    );
     assert_eq!(count_all_active_proof_attempts(pool, store_config).await, 0);
     assert_eq!(
         count_all_active_proof_challenges(pool, store_config).await,
@@ -4126,6 +4349,14 @@ async fn postgres_runtime_rejects_unbound_challenge_issue_preflight_before_write
     assert_eq!(
         count_core_durable_effect_commands(pool, store_config).await,
         0
+    );
+    assert_eq!(
+        email_otp
+            .count_delivery_commands_for_test(pool)
+            .await
+            .expect("count email otp delivery commands after rejected preflight"),
+        0,
+        "invalid challenge issue preflight must not enqueue method-owned delivery commands",
     );
 
     harness.drop_schema().await;
@@ -4140,6 +4371,7 @@ async fn postgres_runtime_rejects_unbound_challenge_issue_preflight_gate_mismatc
     let runtime = &harness.runtime;
     let empty_headers = HeaderMap::new();
 
+    harness.database_operation_observer.clear();
     let error = runtime
         .execute_unbound_active_proof_attempt_start_and_active_proof_method_challenge_issue_from_headers(
             &empty_headers,
@@ -4161,6 +4393,10 @@ async fn postgres_runtime_rejects_unbound_challenge_issue_preflight_gate_mismatc
             Error::ChallengeIssuePreflightGateMismatch
         )
     ));
+    assert_no_database_operations(
+        &harness.database_operation_observer,
+        "mismatched challenge issue preflight gate must reject before any database operation",
+    );
     assert_eq!(count_all_active_proof_attempts(pool, store_config).await, 0);
     assert_eq!(
         count_all_active_proof_challenges(pool, store_config).await,

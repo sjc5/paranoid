@@ -854,7 +854,7 @@ operation-count test, first-party plugin, public API, or lifecycle policy is fin
 | Start step-up active-proof attempt                                   | Live and covered.                                                                                                                                                               | Runtime derives subject from validated session state; tests cover missing-session starts without writes.                                                                                                                                                                                                                                                                   |
 | Start trusted-device active-revival proof attempt                    | Live and covered.                                                                                                                                                               | Runtime derives subject/device from the trusted-device cookie and authoritative device state.                                                                                                                                                                                                                                                                              |
 | Trusted-device active revival                                        | Live and covered.                                                                                                                                                               | Postgres tests cover revival through continuation cookies and trusted-device rotation.                                                                                                                                                                                                                                                                                     |
-| Start unauthenticated active-proof attempt and issue first challenge | Live and covered for runtime-owned preflight and fused atomic start/issue.                                                                                                      | Final anti-abuse policy still needs concrete progressive-friction and delivery-cooldown design.                                                                                                                                                                                                                                                                            |
+| Start unauthenticated active-proof attempt and issue first challenge | Live and covered for runtime-owned preflight and fused atomic start/issue.                                                                                                      | Progressive-friction and delivery-cooldown policy is structurally defined; final mounted-runtime tests still need to pin dedupe, cooldown, and no-lockout behavior.                                                                                                                                                                                                        |
 | Issue out-of-band challenge on an existing attempt                   | Live and covered for continuation-cookie derivation and runtime-owned challenge-cookie construction.                                                                            | Final operation-count tests should prove invalid continuation material avoids state work.                                                                                                                                                                                                                                                                                  |
 | Resend out-of-band challenge                                         | Live and covered for missing, malformed, wrong-family, and expired challenge-cookie rejection before storage work.                                                              | Postgres runtime tests assert the database operation observer is empty for these resend rejection shapes.                                                                                                                                                                                                                                                                  |
 | Complete out-of-band challenge                                       | Live and covered for wrong submitted response rejection before storage work.                                                                                                    | Generic runtime tests assert bad response MAC causes zero load/commit; Postgres email OTP tests assert wrong OTP leaves the database operation observer empty.                                                                                                                                                                                                             |
@@ -1128,6 +1128,46 @@ have durable dedupe and resend/cooldown rules so attackers cannot cheaply harass
 identifier or drain delivery budget. Those rules should bound sends and ceremonies without
 making the named subject permanently or globally unable to log in.
 
+Progressive friction means increasing the cost or ceremony burden for the current
+untrusted flow, not disabling a subject, credential, or identifier. Its rules are:
+
+- the runtime may require a stronger configured weak gate, a higher proof-of-work
+  difficulty, a human challenge, a risk-adapter pass, a new ceremony, or a longer delivery
+  cooldown after repeated failures;
+- progression must be derived from Paranoid-owned ceremony state, challenge state, or
+  privacy-preserving delivery state, not from application-provided "bad user" facts;
+- before state load, invalid weak-gate evidence must remain a pure rejection and must not
+  create a database write;
+- after a valid continuation or challenge cookie, failure accounting may close only the
+  current active-proof attempt or challenge ceremony;
+- progression must be bound to the proof use, method, challenge context, and submitted
+  strong-proof payload where applicable, so one solved gate cannot amortize many guesses;
+- progression must never become account-level lockout, identifier-level lockout, or a
+  permanent block on legitimate recovery.
+
+Out-of-band delivery controls must bound harassment and provider spend without becoming
+identity enumeration or account denial. The structural policy is:
+
+- challenge issue and resend may enqueue delivery only from committed auth transitions;
+- delivery dedupe keys must be runtime or method generated from canonical,
+  privacy-preserving handles, not raw email addresses, phone numbers, OTPs, or app-owned
+  strings;
+- delivery cooldown and resend budget state is scoped to an active ceremony, verified
+  recipient binding, or other privacy-preserving delivery bucket, not to a globally locked
+  subject or identifier;
+- repeated resend should continue the same open ceremony when possible instead of creating
+  unbounded new active-proof attempts or proof shapes;
+- user-facing responses must not reveal whether a recipient, subject, method, or
+  identifier exists;
+- idempotency keys for external delivery must be generated or validated by Paranoid and
+  committed with the durable delivery command;
+- exhausting a delivery budget may close the ceremony or require a fresh weak gate, but
+  must not make the named subject or identifier unable to authenticate through other valid
+  ceremonies;
+- exact cooldown durations, resend counts, and friction thresholds are configurable policy
+  values, but the no-lockout, no-enumeration, durable-effect, and
+  privacy-preserving-keying rules are fixed invariants.
+
 Weak gates are configurable method/policy components. Paranoid provides a native
 Hashcash-style proof-of-work backend verifier because it is app-owned, providerless, and
 fits the fast-fail philosophy. Paranoid should also support human/risk gates through clear
@@ -1135,6 +1175,14 @@ runtime-owned integrations: Cloudflare Turnstile, Google reCAPTCHA, self-hosted 
 or an application risk engine can be adapters that verify provider evidence and mint a
 Paranoid-owned `VerifiedWeakProofGateBeforeStateLoad`-style fact. Applications choose the
 gate policy in config; they should not hand the core a naked "captcha passed" boolean.
+
+The lower-core adapter contract for human and risk gates is intentionally narrow. A
+configured adapter receives the opaque response payload plus Paranoid-derived context: the
+proof being protected and either the exact strong-proof binding digest or the
+challenge-issue proof-use context. The adapter returns only verification success or
+failure. It cannot return a subject id, a satisfied proof, lifecycle authority, method
+work, or any other positive auth fact. Native Hashcash remains first-party proof-of-work;
+adapter callbacks cannot masquerade as that gate family.
 
 The first public mounted API should make weak-gate policy explicit but hard to misuse:
 methods declare whether they are online-guessable, transition policy chooses the required

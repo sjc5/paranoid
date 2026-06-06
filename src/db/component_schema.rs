@@ -1,27 +1,31 @@
+#[cfg(feature = "__auth_wip")]
+use super::validate_component_schema_version_in_current_transaction;
 use super::{
-    AuditedSql, ComponentSchemaMigrationPlan, ComponentSchemaMigrationStep, ComponentSchemaVersion,
-    DatabaseOperationKind, Error, PgQualifiedTableName, Tx, WriteTx,
+    AuditedSql, BootstrapStores, ComponentSchemaMigrationPlan, ComponentSchemaMigrationStep,
+    ComponentSchemaVersion, DatabaseOperationKind, Error, PgQualifiedTableName, Tx, WritePool,
+    WriteTx, finish_pool_owned_write_transaction_and_preserve_rollback_error,
     plan_component_schema_migration_in_current_transaction,
     record_component_schema_migration_completion_in_current_transaction,
     unparameterized_simple_query, validate_component_schema_version,
-    validate_component_schema_version_in_current_transaction,
 };
 use std::borrow::Cow;
 
 use sqlx::Row;
 
-const COMPONENT_SCHEMA_OPERATION_EXECUTE_FRESH_INSTALL_STATEMENT: &str =
+pub(crate) const COMPONENT_SCHEMA_OPERATION_EXECUTE_FRESH_INSTALL_STATEMENT: &str =
     "component_schema.execute_fresh_install_statement";
-const COMPONENT_SCHEMA_OPERATION_EXECUTE_UPGRADE_STATEMENT: &str =
+pub(crate) const COMPONENT_SCHEMA_OPERATION_EXECUTE_UPGRADE_STATEMENT: &str =
     "component_schema.execute_upgrade_statement";
-const COMPONENT_SCHEMA_OPERATION_EXECUTE_VALIDATION_CHECK: &str =
+pub(crate) const COMPONENT_SCHEMA_OPERATION_EXECUTE_VALIDATION_CHECK: &str =
     "component_schema.execute_validation_check";
+const COMPONENT_SCHEMA_OPERATION_MIGRATE: &str = "component_schema.migrate";
 
 /// One unparameterized SQL statement owned by a component schema migration.
 ///
-/// Statements run through Postgres simple-query protocol. Use this type for
-/// DDL or migration SQL whose dynamic identifiers have already been validated
-/// and quoted through Paranoid's Postgres identifier types.
+/// Statements run through Postgres simple-query protocol and must be a single
+/// statement. Use this type for DDL or migration SQL whose dynamic identifiers
+/// have already been validated and quoted through Paranoid's Postgres
+/// identifier types.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ComponentSchemaStatement<'a> {
     sql: Cow<'a, str>,
@@ -32,20 +36,26 @@ pub struct ComponentSchemaStatement<'a> {
 /// A validation check is a single SQL boolean expression. Paranoid wraps it as
 /// `SELECT (<expression>)` and requires the result to decode as exactly one
 /// boolean `true`. A false, null, non-boolean, non-scalar, or failing expression
-/// makes schema validation fail.
+/// makes schema validation fail. Dynamic identifiers inside the expression must
+/// already be validated and quoted through Paranoid's Postgres identifier types.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ComponentSchemaValidationCheck<'a> {
     boolean_expression: Cow<'a, str>,
 }
 
-/// One physical migration attached to a component schema migration step.
+/// One ordered physical migration step for a component schema instance.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ComponentSchemaMigration<'a> {
     step: ComponentSchemaMigrationStep<'a>,
     statements: &'a [ComponentSchemaStatement<'a>],
 }
 
-/// Complete schema description for one app-owned or Paranoid-owned component instance.
+/// Complete schema description for one schema-family instance registered with Paranoid bootstrap.
+///
+/// `ComponentSchema` describes the latest supported version of a schema family
+/// plus the physical work needed to fresh-install or upgrade to that version.
+/// It does not choose the schema ledger table or transaction boundary; callers
+/// run it through [`BootstrapStores::migrate_component_schema`](crate::db::BootstrapStores::migrate_component_schema).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ComponentSchema<'a> {
     current_version: ComponentSchemaVersion<'a>,
@@ -54,7 +64,7 @@ pub struct ComponentSchema<'a> {
     validation_checks: &'a [ComponentSchemaValidationCheck<'a>],
 }
 
-/// Result of applying a component schema migration.
+/// Result of applying or validating a component schema migration.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ComponentSchemaMigrationOutcome {
     /// The ledger had no row for this component instance, so fresh-install
@@ -108,6 +118,11 @@ impl<'a> ComponentSchemaStatement<'a> {
 
     fn from_cow(sql: Cow<'a, str>) -> Result<Self, Error> {
         validate_component_schema_sql(sql.as_ref(), "component schema SQL statement")?;
+        if sql.as_bytes().contains(&b';') {
+            return Err(Error::schema_mismatch(
+                "component schema SQL statement must not contain semicolons",
+            ));
+        }
         Ok(Self { sql })
     }
 }
@@ -180,6 +195,9 @@ impl<'a> ComponentSchema<'a> {
     ///
     /// Validation checks are required because the schema ledger must never
     /// become the only proof that physical tables match the claimed version.
+    /// Fresh-install statements may be empty for schemas that are only valid as
+    /// upgrades from earlier versions, but validation checks must always prove
+    /// the final physical shape.
     pub fn new(
         current_version: ComponentSchemaVersion<'a>,
         fresh_install_statements: &'a [ComponentSchemaStatement<'a>],
@@ -221,13 +239,45 @@ impl<'a> ComponentSchema<'a> {
     }
 }
 
-/// Migrates or validates one component schema instance inside the current write transaction.
+/// Migrates or validates one component schema instance through Paranoid bootstrap state.
 ///
-/// The ledger table may be schema-qualified. Physical migration statements and
-/// validation checks may target tables in any schema. The ledger is recorded
-/// only after the selected physical work succeeds and every validation check
-/// returns true.
-pub async fn migrate_component_schema_in_current_transaction(
+/// The DB foundation must be migrated first with [`BootstrapConfig`](crate::db::BootstrapConfig).
+/// This function owns the transaction boundary. Physical migration
+/// statements and validation checks may target tables in any Postgres schema.
+/// The shared Paranoid schema ledger serializes migration planning for the
+/// schema instance and is recorded only after selected physical work succeeds
+/// and every validation check returns true.
+pub(crate) async fn migrate_component_schema(
+    pool: &WritePool,
+    stores: &BootstrapStores,
+    schema: &ComponentSchema<'_>,
+) -> Result<ComponentSchemaMigrationOutcome, Error> {
+    let mut tx = pool.begin_transaction().await?;
+    let result = async {
+        migrate_component_schema_in_current_transaction(
+            &mut tx,
+            stores.schema_ledger_table_name(),
+            schema,
+        )
+        .await
+    }
+    .await;
+
+    finish_pool_owned_write_transaction_and_preserve_rollback_error(
+        COMPONENT_SCHEMA_OPERATION_MIGRATE,
+        tx,
+        result,
+        std::convert::identity,
+        |operation, error, rollback_error| Error::DatabaseOperationRollbackFailed {
+            operation,
+            operation_error: Box::new(error),
+            rollback_error: Box::new(rollback_error),
+        },
+    )
+    .await
+}
+
+pub(crate) async fn migrate_component_schema_in_current_transaction(
     tx: &mut WriteTx<'_>,
     ledger_table: &PgQualifiedTableName,
     schema: &ComponentSchema<'_>,
@@ -302,7 +352,8 @@ pub async fn migrate_component_schema_in_current_transaction(
 ///
 /// This checks both the schema ledger row and the caller-provided physical
 /// validation checks.
-pub async fn validate_component_schema_in_current_transaction(
+#[cfg(feature = "__auth_wip")]
+pub(crate) async fn validate_component_schema_in_current_transaction(
     tx: &mut Tx<'_>,
     ledger_table: &PgQualifiedTableName,
     schema: &ComponentSchema<'_>,

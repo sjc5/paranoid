@@ -41,6 +41,9 @@ tradeoff. They need a concrete design before implementation continues downstream
   work, idempotency, and operator visibility?
 - What are the auth operation-count invariants for hot paths once schema and runtime are
   stable enough to pin them?
+- How should public unauthenticated out-of-band challenge dedupe bound delivery harassment
+  without letting one browser create an unusable challenge that blocks another browser
+  from starting a usable ceremony for the same recipient/window?
 - What is the immutable audit-event coverage matrix?
 - What are the public mounted-API input limits and cookie-size budgets?
 - What is the client WASM/TypeScript package boundary for password-derived signing,

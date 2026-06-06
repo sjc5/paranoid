@@ -154,18 +154,18 @@ spreads those assumptions across the system.
 - [x] Implement native Hashcash-style proof-of-work weak gate.
 - [x] Bind proof-of-work evidence to the exact protected ceremony material so one solved
       gate cannot be reused across many password or TOTP guesses.
-- [ ] Implement callback/adaptor shape for Turnstile, reCAPTCHA, self-hosted CAPTCHA, or
+- [x] Implement callback/adaptor shape for Turnstile, reCAPTCHA, self-hosted CAPTCHA, or
       other human challenges.
-- [ ] Implement callback/adaptor shape for application risk engines.
-- [ ] Define progressive friction rules.
-- [ ] Define out-of-band delivery cooldown and dedupe policy.
+- [x] Implement callback/adaptor shape for application risk engines.
+- [x] Define progressive friction rules.
+- [x] Define out-of-band delivery cooldown and dedupe policy.
 - [ ] Add tests proving there are no account-level lockouts.
 - [ ] Add tests proving identifier-level controls cannot let attackers deny legitimate
       users access.
-- [ ] Add tests proving exhausted weak budgets invalidate only the ceremony, not the
+- [x] Add tests proving exhausted weak budgets invalidate only the ceremony, not the
       subject or identifier.
-- [ ] Add tests proving weak-gate failures do not create write amplification.
-- [ ] Add tests proving weak failures do not consume strong proof material.
+- [x] Add tests proving weak-gate failures do not create write amplification.
+- [x] Add tests proving weak failures do not consume strong proof material.
 - [x] Add tests proving failed recovery-code submissions do not consume recovery codes.
 - [ ] Add tests proving out-of-band delivery dedupe and cooldown bound harassment without
       revealing identifier existence.

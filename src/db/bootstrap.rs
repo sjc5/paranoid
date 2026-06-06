@@ -81,6 +81,7 @@ pub struct BootstrapStores {
     pub fleet: fleet::Store,
     /// Queue store configured in the bootstrap schema.
     pub queue: queue::Store,
+    schema_ledger_table_name: PgQualifiedTableName,
 }
 
 /// Error returned by Paranoid DB bootstrap.
@@ -184,7 +185,7 @@ impl BootstrapConfig {
             table_name: table_names.queue_jobs,
             dead_letter_table_name: table_names.queue_dead_letters,
             pause_table_name: table_names.queue_pauses,
-            schema_ledger_table_name,
+            schema_ledger_table_name: schema_ledger_table_name.clone(),
             payload_json_limit_bytes: queue::DEFAULT_QUEUE_PAYLOAD_JSON_LIMIT_BYTES,
         };
 
@@ -192,6 +193,7 @@ impl BootstrapConfig {
             kv: kv::Store::new_inner(kv_config)?,
             fleet: fleet::Store::new_inner(fleet_config)?,
             queue: queue::Store::new_inner(queue_config)?,
+            schema_ledger_table_name,
         })
     }
 
@@ -236,6 +238,11 @@ impl BootstrapConfig {
             let stores = self.stores_for_already_migrated_schema()?;
             acquire_bootstrap_transaction_lock(&mut tx).await?;
             create_bootstrap_schema_if_needed(&mut tx, self.schema_name()).await?;
+            super::migrate_schema_ledger_schema_in_current_transaction(
+                &mut tx,
+                stores.schema_ledger_table_name(),
+            )
+            .await?;
             stores
                 .kv
                 .migrate_schema_in_current_transaction_inner(&mut tx)
@@ -272,6 +279,27 @@ impl BootstrapConfig {
             PgIdentifier::new(table_name)
                 .expect("Paranoid bootstrap table name must be a valid Postgres identifier"),
         )
+    }
+}
+
+impl BootstrapStores {
+    /// Migrates or validates a component schema under this bootstrapped DB foundation.
+    ///
+    /// This is the public component-schema migration entrypoint. Paranoid uses
+    /// the bootstrapped schema ledger for coordination, owns the transaction
+    /// boundary, runs the selected physical SQL, validates the resulting
+    /// physical schema, and records the component version only after validation
+    /// succeeds.
+    pub async fn migrate_component_schema(
+        &self,
+        pool: &WritePool,
+        schema: &super::ComponentSchema<'_>,
+    ) -> Result<super::ComponentSchemaMigrationOutcome, Error> {
+        super::component_schema::migrate_component_schema(pool, self, schema).await
+    }
+
+    pub(crate) fn schema_ledger_table_name(&self) -> &PgQualifiedTableName {
+        &self.schema_ledger_table_name
     }
 }
 

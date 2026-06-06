@@ -6,8 +6,9 @@ use crate::db::lease::{LEASE_OPERATION_CLAIM, LEASE_OPERATION_RELEASE};
 use crate::db::postgres_test_support::{connect_sqlx_pool_for_harness, standard_test_database_url};
 use crate::db::{
     DatabaseOperationKind, DatabaseOperationObserver, DatabaseOperationRecord, PoolConfig,
-    SCHEMA_LEDGER_OPERATION_CREATE_SAVEPOINT, SCHEMA_LEDGER_OPERATION_CREATE_TABLE,
-    SCHEMA_LEDGER_OPERATION_FETCH_COMPONENT_VERSION,
+    SCHEMA_LEDGER_OPERATION_CLAIM_COMPONENT_VERSION, SCHEMA_LEDGER_OPERATION_CREATE_SAVEPOINT,
+    SCHEMA_LEDGER_OPERATION_CREATE_TABLE, SCHEMA_LEDGER_OPERATION_FETCH_COMPONENT_VERSION,
+    SCHEMA_LEDGER_OPERATION_LOCK_COMPONENT_VERSION,
     SCHEMA_LEDGER_OPERATION_RECORD_COMPONENT_VERSION, SCHEMA_LEDGER_OPERATION_RELEASE_SAVEPOINT,
     SCHEMA_LEDGER_OPERATION_VALIDATE_CHECK_CONSTRAINTS, SCHEMA_LEDGER_OPERATION_VALIDATE_COLUMNS,
     SCHEMA_LEDGER_OPERATION_VALIDATE_PRIMARY_KEY,
@@ -158,7 +159,7 @@ fn worker_database_operation_shapes(inner: Vec<OperationShape>) -> Vec<Operation
 
 fn queue_migrate_schema_in_current_transaction_shapes() -> Vec<OperationShape> {
     [
-        schema_ledger_plan_component_migration_shapes(),
+        schema_ledger_claim_component_migration_shapes(),
         vec![
             (
                 DatabaseOperationKind::Execute,
@@ -174,7 +175,7 @@ fn queue_migrate_schema_in_current_transaction_shapes() -> Vec<OperationShape> {
 
 fn queue_migrate_already_current_schema_in_current_transaction_shapes() -> Vec<OperationShape> {
     [
-        schema_ledger_plan_component_migration_shapes(),
+        schema_ledger_lock_component_migration_shapes(),
         vec![
             (
                 DatabaseOperationKind::Execute,
@@ -252,12 +253,23 @@ fn queue_constraint_probe_shapes(count: usize) -> Vec<OperationShape> {
     shapes
 }
 
-fn schema_ledger_plan_component_migration_shapes() -> Vec<OperationShape> {
+fn schema_ledger_claim_component_migration_shapes() -> Vec<OperationShape> {
     [
         schema_ledger_ensure_and_validate_shapes(),
         vec![(
+            DatabaseOperationKind::Execute,
+            SCHEMA_LEDGER_OPERATION_CLAIM_COMPONENT_VERSION,
+        )],
+    ]
+    .concat()
+}
+
+fn schema_ledger_lock_component_migration_shapes() -> Vec<OperationShape> {
+    [
+        schema_ledger_claim_component_migration_shapes(),
+        vec![(
             DatabaseOperationKind::FetchOptional,
-            SCHEMA_LEDGER_OPERATION_FETCH_COMPONENT_VERSION,
+            SCHEMA_LEDGER_OPERATION_LOCK_COMPONENT_VERSION,
         )],
     ]
     .concat()

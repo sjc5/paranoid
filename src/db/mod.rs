@@ -29,12 +29,12 @@
 //! protocol. Use [`AuditedSql`] for generated SQL text after validating and
 //! quoting every dynamic identifier.
 //!
-//! For app-owned or crate-owned table families that want Paranoid's schema
-//! version ledger and loud drift detection, use
-//! [`migrate_component_schema_in_current_transaction`] and
-//! [`validate_component_schema_in_current_transaction`]. Component schemas use
-//! validated [`PgQualifiedTableName`] values, so ledger tables and component
-//! tables may live in any Postgres schema.
+//! For table families registered by code that already uses Paranoid's DB
+//! foundation, use [`BootstrapStores::migrate_component_schema`] after
+//! [`BootstrapConfig::migrate_schema`]. Component schemas use validated
+//! [`PgQualifiedTableName`] values, so component tables may live in any
+//! Postgres schema while Paranoid owns the shared schema ledger and migration
+//! coordination.
 //!
 //! For crates and applications that want the same isolated Postgres plus
 //! transaction-mode PgBouncer test substrate Paranoid uses internally, enable
@@ -94,8 +94,6 @@ pub use bootstrap::{
 pub use component_schema::{
     ComponentSchema, ComponentSchemaMigration, ComponentSchemaMigrationOutcome,
     ComponentSchemaStatement, ComponentSchemaValidationCheck,
-    migrate_component_schema_in_current_transaction,
-    validate_component_schema_in_current_transaction,
 };
 pub use error::Error;
 pub use identifier::{
@@ -111,6 +109,17 @@ pub use schema_ledger::{ComponentSchemaVersion, component_schema_instance_key_fo
 pub use schema_migration::{ComponentSchemaMigrationStep, ComponentSchemaMigrationTarget};
 pub use sql_state::PgSqlState;
 
+#[cfg(test)]
+pub(crate) use component_schema::{
+    COMPONENT_SCHEMA_OPERATION_EXECUTE_FRESH_INSTALL_STATEMENT,
+    COMPONENT_SCHEMA_OPERATION_EXECUTE_UPGRADE_STATEMENT,
+    COMPONENT_SCHEMA_OPERATION_EXECUTE_VALIDATION_CHECK,
+};
+#[cfg(feature = "__auth_wip")]
+pub(crate) use component_schema::{
+    migrate_component_schema_in_current_transaction,
+    validate_component_schema_in_current_transaction,
+};
 pub(crate) use error::Error as DbError;
 pub(crate) use error::sql_state_from_sqlx_error;
 pub(crate) use identifier::pg_table_name_set_could_contain_same_relation;
@@ -126,14 +135,17 @@ pub(crate) use portable_query::{
 pub(crate) use schema::normalize_check_constraint_expression;
 #[cfg(test)]
 pub(crate) use schema_ledger::{
-    SCHEMA_LEDGER_OPERATION_CREATE_SAVEPOINT, SCHEMA_LEDGER_OPERATION_CREATE_TABLE,
-    SCHEMA_LEDGER_OPERATION_FETCH_COMPONENT_VERSION,
+    SCHEMA_LEDGER_OPERATION_CLAIM_COMPONENT_VERSION, SCHEMA_LEDGER_OPERATION_CREATE_SAVEPOINT,
+    SCHEMA_LEDGER_OPERATION_CREATE_TABLE, SCHEMA_LEDGER_OPERATION_FETCH_COMPONENT_VERSION,
+    SCHEMA_LEDGER_OPERATION_LOCK_COMPONENT_VERSION,
     SCHEMA_LEDGER_OPERATION_RECORD_COMPONENT_VERSION, SCHEMA_LEDGER_OPERATION_RELEASE_SAVEPOINT,
+    SCHEMA_LEDGER_OPERATION_UPDATE_COMPONENT_VERSION,
     SCHEMA_LEDGER_OPERATION_VALIDATE_CHECK_CONSTRAINTS, SCHEMA_LEDGER_OPERATION_VALIDATE_COLUMNS,
     SCHEMA_LEDGER_OPERATION_VALIDATE_PRIMARY_KEY, test_schema_ledger_config,
     test_schema_ledger_table_name,
 };
 pub(crate) use schema_ledger::{
+    migrate_schema_ledger_schema_in_current_transaction,
     plan_component_schema_migration_in_current_transaction,
     record_component_schema_migration_completion_in_current_transaction,
     schema_instance_key_for_parts, validate_component_schema_version,

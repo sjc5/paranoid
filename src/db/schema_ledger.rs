@@ -17,6 +17,10 @@ pub(crate) const SCHEMA_LEDGER_OPERATION_VALIDATE_PRIMARY_KEY: &str =
     "schema_ledger.validate_primary_key";
 pub(crate) const SCHEMA_LEDGER_OPERATION_VALIDATE_CHECK_CONSTRAINTS: &str =
     "schema_ledger.validate_check_constraints";
+pub(crate) const SCHEMA_LEDGER_OPERATION_CLAIM_COMPONENT_VERSION: &str =
+    "schema_ledger.claim_component_version";
+pub(crate) const SCHEMA_LEDGER_OPERATION_LOCK_COMPONENT_VERSION: &str =
+    "schema_ledger.lock_component_version";
 pub(crate) const SCHEMA_LEDGER_OPERATION_RECORD_COMPONENT_VERSION: &str =
     "schema_ledger.record_component_version";
 pub(crate) const SCHEMA_LEDGER_OPERATION_UPDATE_COMPONENT_VERSION: &str =
@@ -28,6 +32,10 @@ pub(crate) const MAX_SCHEMA_LEDGER_COMPONENT_BYTES: usize = 128;
 pub(crate) const MAX_SCHEMA_LEDGER_INSTANCE_KEY_BYTES: usize = 1024;
 pub(crate) const MAX_SCHEMA_LEDGER_FINGERPRINT_BYTES: usize = 256;
 const SCHEMA_LEDGER_C_COLLATION: &str = "C";
+const SCHEMA_LEDGER_SCHEMA_COMPONENT: &str = "schema_ledger";
+const SCHEMA_LEDGER_SCHEMA_VERSION: i32 = 1;
+const SCHEMA_LEDGER_SCHEMA_FINGERPRINT: &str = "paranoid.schema_ledger.v1";
+const SCHEMA_LEDGER_SCHEMA_MIGRATION_STEPS: &[ComponentSchemaMigrationStep<'static>] = &[];
 
 const SCHEMA_LEDGER_REQUIRED_COLUMNS: [SchemaLedgerColumn; 5] = [
     SchemaLedgerColumn::Component,
@@ -53,10 +61,10 @@ pub(crate) struct SchemaLedgerConfig {
     pub(crate) table_name: PgQualifiedTableName,
 }
 
-/// Current schema version identity for one component schema instance.
+/// Current schema version identity for one registered schema-family instance.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ComponentSchemaVersion<'a> {
-    /// Stable component name, such as `paranoid.kv` or an app-owned component id.
+    /// Stable schema-family name, such as `paranoid.kv` or `cook.md_pages`.
     pub component: &'a str,
     /// Stable instance key for the concrete physical schema instance.
     ///
@@ -190,7 +198,7 @@ impl<'a> SchemaLedgerCatalog<'a> {
         )
     }
 
-    fn record_component_version_statement(&self) -> String {
+    fn claim_component_version_statement(&self) -> String {
         let component = SchemaLedgerColumn::Component.name();
         let instance_key = SchemaLedgerColumn::InstanceKey.name();
         let schema_version = SchemaLedgerColumn::SchemaVersion.name();
@@ -210,6 +218,24 @@ impl<'a> SchemaLedgerCatalog<'a> {
         VALUES ($1, $2, $3, $4, statement_timestamp())
         ON CONFLICT ({primary_key_columns})
         DO NOTHING
+        "#,
+            self.table_name.quoted()
+        )
+    }
+
+    fn lock_component_version_statement(&self) -> String {
+        let component = SchemaLedgerColumn::Component.name();
+        let instance_key = SchemaLedgerColumn::InstanceKey.name();
+        let schema_version = SchemaLedgerColumn::SchemaVersion.name();
+        let schema_fingerprint = SchemaLedgerColumn::SchemaFingerprint.name();
+
+        format!(
+            r#"
+        SELECT {schema_version}, {schema_fingerprint}
+        FROM {}
+        WHERE {component} = $1
+          AND {instance_key} = $2
+        FOR UPDATE
         "#,
             self.table_name.quoted()
         )
@@ -254,6 +280,26 @@ impl<'a> SchemaLedgerCatalog<'a> {
             self.table_name.quoted()
         )
     }
+
+    fn complete_fresh_component_version_statement(&self) -> String {
+        let component = SchemaLedgerColumn::Component.name();
+        let instance_key = SchemaLedgerColumn::InstanceKey.name();
+        let schema_version = SchemaLedgerColumn::SchemaVersion.name();
+        let schema_fingerprint = SchemaLedgerColumn::SchemaFingerprint.name();
+        let applied_at = SchemaLedgerColumn::AppliedAt.name();
+
+        format!(
+            r#"
+        UPDATE {}
+        SET {applied_at} = statement_timestamp()
+        WHERE {component} = $1
+          AND {instance_key} = $2
+          AND {schema_version} = $3
+          AND {schema_fingerprint} = $4
+        "#,
+            self.table_name.quoted()
+        )
+    }
 }
 
 fn schema_ledger_column_list(columns: &[SchemaLedgerColumn]) -> String {
@@ -290,7 +336,7 @@ pub(crate) async fn plan_component_schema_migration_in_current_transaction<'a>(
 ) -> Result<ComponentSchemaMigrationPlan<'a>, DbError> {
     validate_component_schema_version(component_schema_version)?;
     execute_schema_ledger_migration_in_current_transaction(tx, table_name).await?;
-    let recorded = fetch_component_schema_version_row_in_current_transaction(
+    let recorded = claim_or_lock_component_schema_version_row_in_current_transaction(
         tx,
         table_name,
         component_schema_version,
@@ -333,20 +379,27 @@ pub(crate) async fn record_component_schema_migration_completion_in_current_tran
             )));
         }
     } else {
-        let statement = catalog.record_component_version_statement();
+        let statement = catalog.complete_fresh_component_version_statement();
         tx.record_database_operation(
             DatabaseOperationKind::Execute,
             SCHEMA_LEDGER_OPERATION_RECORD_COMPONENT_VERSION,
             Some(statement.as_str()),
         );
-        pooler_safe_query(sqlx::AssertSqlSafe(statement.as_str()))
+        let rows_affected = pooler_safe_query(sqlx::AssertSqlSafe(statement.as_str()))
             .bind(component_schema_version.component)
             .bind(component_schema_version.instance_key)
             .bind(component_schema_version.version)
             .bind(component_schema_version.fingerprint)
             .execute(tx.inner.as_mut())
             .await
-            .map_err(DbError::query)?;
+            .map_err(DbError::query)?
+            .rows_affected();
+        if rows_affected != 1 {
+            return Err(DbError::schema_mismatch(format!(
+                "schema ledger row for component {:?} instance {:?} was not claimed before migration completion",
+                component_schema_version.component, component_schema_version.instance_key
+            )));
+        }
     }
 
     validate_component_schema_version_row_in_current_transaction(
@@ -355,6 +408,49 @@ pub(crate) async fn record_component_schema_migration_completion_in_current_tran
         component_schema_version,
     )
     .await
+}
+
+pub(crate) async fn migrate_schema_ledger_schema_in_current_transaction(
+    tx: &mut Tx<'_>,
+    table_name: &PgQualifiedTableName,
+) -> Result<(), DbError> {
+    let instance_key = schema_ledger_schema_instance_key(table_name);
+    let component_schema_version = schema_ledger_component_schema_version(&instance_key);
+    match plan_component_schema_migration_in_current_transaction(
+        tx,
+        table_name,
+        component_schema_version,
+        SCHEMA_LEDGER_SCHEMA_MIGRATION_STEPS,
+    )
+    .await?
+    {
+        ComponentSchemaMigrationPlan::FreshInstall => {
+            validate_schema_ledger_with_transaction_table(tx, table_name).await?;
+            record_component_schema_migration_completion_in_current_transaction(
+                tx,
+                table_name,
+                component_schema_version,
+                None,
+            )
+            .await
+        }
+        ComponentSchemaMigrationPlan::AlreadyCurrent => {
+            validate_schema_ledger_with_transaction_table(tx, table_name).await
+        }
+        ComponentSchemaMigrationPlan::Upgrade { from: _, steps } => {
+            debug_assert!(
+                steps.is_empty(),
+                "schema ledger has no executable schema upgrade steps yet"
+            );
+            if steps.is_empty() {
+                validate_schema_ledger_with_transaction_table(tx, table_name).await
+            } else {
+                Err(DbError::schema_mismatch(
+                    "schema ledger schema upgrade steps were planned but no schema ledger upgrade executor exists",
+                ))
+            }
+        }
+    }
 }
 
 pub(crate) async fn validate_component_schema_version_in_current_transaction(
@@ -443,6 +539,61 @@ async fn fetch_component_schema_version_row_in_current_transaction(
     )
 }
 
+async fn claim_or_lock_component_schema_version_row_in_current_transaction(
+    tx: &mut Tx<'_>,
+    table_name: &PgQualifiedTableName,
+    component_schema_version: ComponentSchemaVersion<'_>,
+) -> Result<Option<RecordedComponentSchemaVersion>, DbError> {
+    let catalog = SchemaLedgerCatalog::new(table_name);
+    let claim_statement = catalog.claim_component_version_statement();
+
+    tx.record_database_operation(
+        DatabaseOperationKind::Execute,
+        SCHEMA_LEDGER_OPERATION_CLAIM_COMPONENT_VERSION,
+        Some(claim_statement.as_str()),
+    );
+    let rows_affected = pooler_safe_query(sqlx::AssertSqlSafe(claim_statement.as_str()))
+        .bind(component_schema_version.component)
+        .bind(component_schema_version.instance_key)
+        .bind(component_schema_version.version)
+        .bind(component_schema_version.fingerprint)
+        .execute(tx.inner.as_mut())
+        .await
+        .map_err(DbError::query)?
+        .rows_affected();
+
+    if rows_affected == 1 {
+        return Ok(None);
+    }
+
+    let lock_statement = catalog.lock_component_version_statement();
+    tx.record_database_operation(
+        DatabaseOperationKind::FetchOptional,
+        SCHEMA_LEDGER_OPERATION_LOCK_COMPONENT_VERSION,
+        Some(lock_statement.as_str()),
+    );
+    let actual =
+        pooler_safe_query_as::<(i32, String)>(sqlx::AssertSqlSafe(lock_statement.as_str()))
+            .bind(component_schema_version.component)
+            .bind(component_schema_version.instance_key)
+            .fetch_optional(tx.inner.as_mut())
+            .await
+            .map_err(DbError::query)?;
+
+    actual
+        .map(|(version, fingerprint)| RecordedComponentSchemaVersion {
+            version,
+            fingerprint,
+        })
+        .ok_or_else(|| {
+            DbError::schema_mismatch(format!(
+                "schema ledger row for component {:?} instance {:?} disappeared before migration planning",
+                component_schema_version.component, component_schema_version.instance_key
+            ))
+        })
+        .map(Some)
+}
+
 /// Builds a stable schema instance key from labeled qualified table names.
 ///
 /// Labels are validated Postgres identifiers. The returned key includes quoted
@@ -468,6 +619,19 @@ where
         .map(|(label, table_name)| format!("{label}={}", table_name.quoted()))
         .collect::<Vec<_>>()
         .join(";")
+}
+
+fn schema_ledger_schema_instance_key(table_name: &PgQualifiedTableName) -> String {
+    schema_instance_key_for_parts([("table", table_name)])
+}
+
+fn schema_ledger_component_schema_version(instance_key: &str) -> ComponentSchemaVersion<'_> {
+    ComponentSchemaVersion {
+        component: SCHEMA_LEDGER_SCHEMA_COMPONENT,
+        instance_key,
+        version: SCHEMA_LEDGER_SCHEMA_VERSION,
+        fingerprint: SCHEMA_LEDGER_SCHEMA_FINGERPRINT,
+    }
 }
 
 async fn execute_schema_ledger_migration_in_current_transaction(
