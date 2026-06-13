@@ -1,4 +1,4 @@
-use super::*;
+use super::prelude::*;
 
 /// Storage-boundary contract before a command is reduced.
 #[derive(Clone, Debug, Eq, PartialEq)]

@@ -206,6 +206,35 @@ fn active_proof_load_contract_names_attempt_challenge_and_resolved_subject_requi
 }
 
 #[test]
+fn identifier_change_candidate_binding_load_contract_names_attempt_and_challenge_requirements() {
+    let mut expected = active_attempt_requirements();
+    expected.push(LoadedStateRequirement::ActiveProofChallenge {
+        challenge_id: id("challenge"),
+    });
+
+    assert_eq!(
+        required_for(
+            Command::ReserveOutOfBandIdentifierChangeCandidateBinding(
+                ReserveOutOfBandIdentifierChangeCandidateBinding {
+                    now: at(40),
+                    attempt_id: id("attempt"),
+                    challenge_id: id("challenge"),
+                    candidate_identifier_source: VerifiedProofSource::new(
+                        VerifiedProofSourceKind::OutOfBandIdentifier,
+                        id("candidate-email-source"),
+                    ),
+                    stateless_fast_fail: verified_stateless_fast_fail(),
+                    weak_proof_gate: WeakProofGateStatus::NotRequired,
+                    method_commit_work: Vec::new(),
+                },
+            ),
+            PresentedAuthCookies::default(),
+        ),
+        expected
+    );
+}
+
+#[test]
 fn active_proof_load_contract_names_attempt_only_for_stateless_failure_and_issue_paths() {
     assert_eq!(
         required_for(

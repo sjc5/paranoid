@@ -1,4 +1,4 @@
-use super::*;
+use super::prelude::*;
 
 /// Loaded state snapshot supplied by the storage and transport adapters.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -310,6 +310,17 @@ pub struct TrustedDeviceCookieDraft {
     pub silent_revival_fast_fail_until: UnixSeconds,
 }
 
+/// How an active-proof continuation cookie became subject-bound.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum ActiveProofContinuationSubjectBinding {
+    /// The continuation does not carry a subject.
+    NoSubject,
+    /// The continuation was started from an already-known runtime subject context.
+    RuntimeBoundSubject,
+    /// The continuation was reissued after a proof bound or confirmed the subject.
+    VerifiedProofBoundSubject,
+}
+
 /// Decoded active-proof continuation cookie payload before encryption is applied by the web adapter.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ActiveProofContinuationCookieDraft {
@@ -319,11 +330,22 @@ pub struct ActiveProofContinuationCookieDraft {
     pub proof_use: ProofUse,
     /// Subject copied into the encrypted cookie when the attempt is already subject-bound.
     pub subject_id: Option<SubjectId>,
+    /// Whether the subject binding came from a verified proof or ambient runtime context.
+    pub subject_binding: ActiveProofContinuationSubjectBinding,
     /// Fast-fail attempt expiry copied from the authoritative record.
     pub attempt_fast_fail_until: UnixSeconds,
 }
 
 impl ActiveProofContinuationCookieDraft {
+    pub(crate) fn validate_subject_binding(&self) -> Result<(), Error> {
+        match (&self.subject_id, self.subject_binding) {
+            (None, ActiveProofContinuationSubjectBinding::NoSubject)
+            | (Some(_), ActiveProofContinuationSubjectBinding::RuntimeBoundSubject)
+            | (Some(_), ActiveProofContinuationSubjectBinding::VerifiedProofBoundSubject) => Ok(()),
+            _ => Err(Error::InvalidActiveProofContinuationCookiePayload),
+        }
+    }
+
     pub(crate) fn validate_unexpired_before_state_load(
         &self,
         now: UnixSeconds,

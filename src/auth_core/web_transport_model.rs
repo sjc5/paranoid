@@ -5,12 +5,14 @@ use crate::web::{
     CookieManager, CookieMaxAgeSeconds, CsrfBinding, CsrfProtector, SecureCookie,
     SecureCookieConfig,
 };
-use http::HeaderMap;
 use http::header::{HeaderValue, SET_COOKIE};
+use http::{HeaderMap, Request};
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroize;
 
-use super::*;
+use super::prelude::*;
+
+pub(crate) const AUTH_SET_COOKIE_HEADER_MAX_BYTES: usize = 4096;
 
 /// Default encrypted session cookie suffix.
 pub const DEFAULT_AUTH_SESSION_COOKIE_NAME: &str = "__paranoid_auth_session";
@@ -186,6 +188,28 @@ impl AuthWebTransport {
         &self.active_proof_challenge_fast_fail_keyset
     }
 
+    pub(crate) fn verify_csrf_request<B>(
+        &self,
+        request: &Request<B>,
+    ) -> Result<(), AuthWebTransportError> {
+        self.csrf_protector
+            .verify_request(request)
+            .map_err(AuthWebTransportError::from)
+    }
+
+    pub(crate) fn issue_csrf_token_cookie_if_needed_for_request<B>(
+        &self,
+        request: &Request<B>,
+    ) -> Result<Option<AuthSetCookieHeader>, AuthWebTransportError> {
+        self.csrf_protector
+            .issue_token_cookie_if_needed_for_request(request)
+            .map(|cookie| {
+                cookie
+                    .map(|cookie| AuthSetCookieHeader::from_cookie_string(cookie.to_string()))
+                    .transpose()
+            })?
+    }
+
     /// Renders materialized response effects into `Set-Cookie` header values.
     pub fn render_set_cookie_headers(
         &self,
@@ -341,6 +365,10 @@ impl AuthSetCookieHeaders {
         self.0 = headers.0;
     }
 
+    pub(crate) fn push(&mut self, header: AuthSetCookieHeader) {
+        self.0.push(header);
+    }
+
     /// Returns whether there are no headers.
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
@@ -372,6 +400,12 @@ pub struct AuthSetCookieHeader {
 
 impl AuthSetCookieHeader {
     fn from_cookie_string(value: String) -> Result<Self, AuthWebTransportError> {
+        if value.len() > AUTH_SET_COOKIE_HEADER_MAX_BYTES {
+            return Err(AuthWebTransportError::Core(Error::InputTooLong {
+                input_name: "auth Set-Cookie header",
+                max_bytes: AUTH_SET_COOKIE_HEADER_MAX_BYTES,
+            }));
+        }
         Ok(Self {
             value: HeaderValue::from_str(&value)?,
         })
@@ -649,6 +683,7 @@ struct AuthActiveProofContinuationCookiePayload {
     attempt_id: Vec<u8>,
     proof_use: u8,
     subject_id: Option<Vec<u8>>,
+    subject_binding: u8,
     credential_secret: Vec<u8>,
     attempt_fast_fail_until: u64,
 }
@@ -665,6 +700,9 @@ impl AuthActiveProofContinuationCookiePayload {
                 .subject_id
                 .as_ref()
                 .map(|subject_id| subject_id.as_bytes().to_vec()),
+            subject_binding: active_proof_continuation_subject_binding_wire_id(
+                cookie.draft().subject_binding,
+            ),
             credential_secret: cookie.credential_secret().expose_secret().to_vec(),
             attempt_fast_fail_until: cookie.draft().attempt_fast_fail_until.get(),
         }
@@ -698,8 +736,12 @@ impl TryFrom<AuthActiveProofContinuationCookiePayload> for DecodedActiveProofCon
             attempt_id: attempt_id.clone(),
             proof_use: proof_use_from_wire_id(payload.proof_use)?,
             subject_id,
+            subject_binding: active_proof_continuation_subject_binding_from_wire_id(
+                payload.subject_binding,
+            )?,
             attempt_fast_fail_until: UnixSeconds::new(payload.attempt_fast_fail_until),
         };
+        draft.validate_subject_binding()?;
         let secret = PresentedActiveProofContinuationCookieSecret::new(
             attempt_id,
             AuthCredentialSecret::try_from(std::mem::take(&mut payload.credential_secret))?,

@@ -52,6 +52,18 @@ fn set_cookie_pair(header: &AuthSetCookieHeader) -> &str {
         .expect("Set-Cookie starts with name=value")
 }
 
+fn assert_auth_set_cookie_header_fits_budget(header: &AuthSetCookieHeader) {
+    assert!(
+        header.as_str().len() <= AUTH_SET_COOKIE_HEADER_MAX_BYTES,
+        "auth Set-Cookie header must fit the single-cookie browser budget; header had {} bytes",
+        header.as_str().len(),
+    );
+}
+
+fn credential_secret(bytes: &'static [u8]) -> AuthCredentialSecret {
+    AuthCredentialSecret::try_from(bytes).expect("credential secret")
+}
+
 #[test]
 fn auth_web_transport_renders_session_cookie_and_csrf_set_cookie_headers() {
     let loaded = loaded_session(100);
@@ -122,6 +134,103 @@ fn auth_web_transport_renders_session_cookie_and_csrf_set_cookie_headers() {
     assert_eq!(session_cookie.session_id, id("session"));
     assert_eq!(session_cookie.secret_version, version(4));
     assert_eq!(session_secret.secret().expose_secret(), b"fresh-session");
+}
+
+#[test]
+fn auth_web_transport_cookie_families_fit_single_cookie_budget() {
+    let transport = auth_web_transport();
+    let cases = [
+        (
+            "session",
+            MaterializedResponseEffect::IssueSessionCookie(MaterializedSessionCookieResponse::new(
+                session_cookie(100),
+                credential_secret(b"session-cookie-secret"),
+            )),
+        ),
+        (
+            "trusted device",
+            MaterializedResponseEffect::IssueTrustedDeviceCookie(
+                MaterializedTrustedDeviceCookieResponse::new(
+                    trusted_device_cookie(90, 100),
+                    credential_secret(b"trusted-device-cookie-secret"),
+                ),
+            ),
+        ),
+        (
+            "active proof challenge",
+            MaterializedResponseEffect::IssueActiveProofChallengeCookie(
+                active_proof_challenge_cookie(),
+            ),
+        ),
+        (
+            "active proof continuation",
+            MaterializedResponseEffect::IssueActiveProofContinuationCookie(
+                MaterializedActiveProofContinuationCookieResponse::new(
+                    ActiveProofContinuationCookieDraft {
+                        attempt_id: id("active-proof-continuation-attempt"),
+                        proof_use: ProofUse::RecoverOrReplaceCredential,
+                        subject_id: Some(id("active-proof-continuation-subject")),
+                        subject_binding:
+                            ActiveProofContinuationSubjectBinding::VerifiedProofBoundSubject,
+                        attempt_fast_fail_until: at(100),
+                    },
+                    credential_secret(b"active-proof-continuation-secret"),
+                ),
+            ),
+        ),
+    ];
+
+    for (case_name, effect) in cases {
+        let headers = transport
+            .render_set_cookie_headers(at(10), MaterializedResponseEffects::from_vec(vec![effect]))
+            .unwrap_or_else(|error| panic!("{case_name}: render Set-Cookie header: {error}"));
+        assert_eq!(headers.as_slice().len(), 1, "{case_name}");
+        assert_auth_set_cookie_header_fits_budget(&headers.as_slice()[0]);
+    }
+}
+
+#[test]
+fn auth_web_transport_rejects_over_budget_active_proof_challenge_cookie() {
+    let transport = auth_web_transport();
+    let method_challenge_state = ActiveProofMethodChallengeState::try_from_bytes(vec![
+        7_u8;
+        ACTIVE_PROOF_METHOD_CHALLENGE_STATE_MAX_BYTES
+    ])
+    .expect("oversized-for-cookie but method-bounded challenge state");
+    let challenge_cookie = ActiveProofChallengeCookieDraft::new_with_method_challenge_state(
+        ActiveProofChallengeCookieContext::new(
+            id("over-budget-attempt"),
+            id("over-budget-challenge"),
+            ProofSummary::new(ProofFamily::MessageSignature, "password_derived_signature")
+                .expect("proof"),
+            at(30),
+            at(70),
+            ActiveProofChallengeFastFailNonce::from_bytes(
+                &[29_u8; ACTIVE_PROOF_CHALLENGE_FAST_FAIL_NONCE_BYTES],
+            )
+            .expect("nonce"),
+        )
+        .expect("challenge cookie context"),
+        method_challenge_state,
+    )
+    .expect("challenge cookie");
+
+    let error = transport
+        .render_set_cookie_headers(
+            at(30),
+            MaterializedResponseEffects::from_vec(vec![
+                MaterializedResponseEffect::IssueActiveProofChallengeCookie(challenge_cookie),
+            ]),
+        )
+        .expect_err("over-budget challenge cookie must reject before header emission");
+
+    assert!(matches!(
+        error,
+        AuthWebTransportError::Core(Error::InputTooLong {
+            input_name: "auth Set-Cookie header",
+            max_bytes: AUTH_SET_COOKIE_HEADER_MAX_BYTES,
+        })
+    ));
 }
 
 #[test]

@@ -4,15 +4,16 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::db::{
     BootstrapConfig, PgIdentifier, PgSchemaName, Pool, PoolConfig, WritePool, pooler_safe_query,
-    pooler_safe_query_scalar, unparameterized_simple_query,
+    pooler_safe_query_as, pooler_safe_query_scalar, unparameterized_simple_query,
 };
 use secrecy::SecretString;
 
 static AUTH_POSTGRES_TEST_COUNTER: AtomicU64 = AtomicU64::new(1);
 
 #[test]
-fn default_auth_store_config_uses_db_bootstrap_schema_and_ledger() {
-    let bootstrap_config = BootstrapConfig::default();
+fn auth_store_config_for_db_bootstrap_uses_db_bootstrap_schema_and_ledger() {
+    let bootstrap_config =
+        BootstrapConfig::from_schema_name_text("__paranoid").expect("bootstrap config");
     let store_config =
         super::super::postgres_store::PostgresAuthStoreConfig::for_db_bootstrap_config(
             &bootstrap_config,
@@ -36,10 +37,6 @@ fn default_auth_store_config_uses_db_bootstrap_schema_and_ledger() {
         "dedicated-schema auth tables must not repeat the global Paranoid namespace prefix"
     );
 
-    assert_eq!(
-        super::super::postgres_store::PostgresAuthStoreConfig::default(),
-        store_config
-    );
     assert!(
         super::super::postgres_store::schema_instance_key(&store_config).len() <= 1024,
         "auth schema ledger instance key must fit the DB schema-ledger domain"
@@ -69,8 +66,12 @@ fn postgres_store_persists_stable_wire_mappings() {
         super::super::postgres_store::proof_use_from_i32(7).expect("recover or replace"),
         ProofUse::RecoverOrReplaceCredential
     );
+    assert_eq!(
+        super::super::postgres_store::proof_use_from_i32(8).expect("identifier change candidate"),
+        ProofUse::ProveOutOfBandIdentifierChangeCandidate
+    );
     assert!(
-        super::super::postgres_store::proof_use_from_i32(8).is_err(),
+        super::super::postgres_store::proof_use_from_i32(9).is_err(),
         "invalid stored proof-use ids must not be accepted"
     );
 
@@ -106,6 +107,21 @@ fn postgres_store_persists_stable_wire_mappings() {
             .expect("trusted device credential kind"),
         CredentialInstanceKind::TrustedDeviceCredential
     );
+    assert_eq!(
+        super::super::postgres_store::i32_from_credential_reset_policy_role(
+            CredentialResetPolicyRole::SecondFactorCredential,
+        ),
+        2
+    );
+    assert_eq!(
+        super::super::postgres_store::credential_reset_policy_role_from_i32(1)
+            .expect("ordinary credential reset policy role"),
+        CredentialResetPolicyRole::OrdinaryCredential
+    );
+    assert!(
+        super::super::postgres_store::credential_reset_policy_role_from_i32(3).is_err(),
+        "invalid stored credential reset policy role ids must not be accepted"
+    );
 
     assert_eq!(
         super::super::postgres_store::i32_from_credential_lifecycle_state(
@@ -118,6 +134,17 @@ fn postgres_store_persists_stable_wire_mappings() {
             .expect("active lifecycle state"),
         CredentialLifecycleState::Active
     );
+    assert_eq!(
+        super::super::postgres_store::i32_from_out_of_band_identifier_binding_lifecycle_state(
+            OutOfBandIdentifierBindingLifecycleState::Active,
+        ),
+        2
+    );
+    assert_eq!(
+        super::super::postgres_store::out_of_band_identifier_binding_lifecycle_state_from_i32(1)
+            .expect("pending out-of-band identifier binding state"),
+        OutOfBandIdentifierBindingLifecycleState::PendingActivation
+    );
 
     assert_eq!(
         super::super::postgres_store::i32_from_credential_lifecycle_action(
@@ -129,6 +156,17 @@ fn postgres_store_persists_stable_wire_mappings() {
         super::super::postgres_store::credential_lifecycle_action_from_i32(7)
             .expect("recover subject access action"),
         CredentialLifecycleAction::RecoverSubjectAccess
+    );
+    assert_eq!(
+        super::super::postgres_store::i32_from_credential_lifecycle_action(
+            CredentialLifecycleAction::Rotate,
+        ),
+        8
+    );
+    assert_eq!(
+        super::super::postgres_store::credential_lifecycle_action_from_i32(8)
+            .expect("credential rotation action"),
+        CredentialLifecycleAction::Rotate
     );
 
     assert_eq!(
@@ -173,6 +211,12 @@ fn postgres_store_persists_stable_wire_mappings() {
         ),
         4
     );
+    assert_eq!(
+        super::super::postgres_store::i32_from_security_notification_kind(
+            SecurityNotificationKind::CredentialAdded,
+        ),
+        21
+    );
 }
 
 #[test]
@@ -210,16 +254,8 @@ fn credential_secret_macs_are_bound_to_storage_target() {
 }
 
 #[tokio::test]
-async fn postgres_store_migrates_and_validates_schema_when_database_is_available() {
-    let database_url = std::env::var("PARANOID_TEST_DATABASE_URL")
-        .ok()
-        .filter(|value| !value.trim().is_empty())
-        .or_else(|| {
-            std::env::var("TEST_DSN")
-                .ok()
-                .filter(|value| !value.trim().is_empty())
-        })
-        .expect("auth Postgres store test requires TEST_DSN or PARANOID_TEST_DATABASE_URL");
+async fn postgres_store_migrates_and_validates_schema() {
+    let database_url = required_auth_postgres_store_test_database_url();
 
     let write_pool = WritePool::connect(PoolConfig::new(SecretString::from(database_url.clone())))
         .await
@@ -227,19 +263,18 @@ async fn postgres_store_migrates_and_validates_schema_when_database_is_available
     let pool = Pool::connect(PoolConfig::new(SecretString::from(database_url)))
         .await
         .expect("connect test database");
-    let schema_name = unique_test_schema_name();
-    let schema = PgSchemaName::new(schema_name.clone());
-    let create_schema = format!("CREATE SCHEMA {}", schema_name.quoted());
-    unparameterized_simple_query(sqlx::AssertSqlSafe(create_schema.as_str()))
-        .execute(pool.sqlx_pool())
+    let db_bootstrap_config = BootstrapConfig::new(PgSchemaName::new(unique_test_schema_name()));
+    let schema = db_bootstrap_config.schema_name().clone();
+    db_bootstrap_config
+        .migrate_schema(&write_pool)
         .await
-        .expect("create auth test schema");
+        .expect("migrate DB foundation before auth schema");
 
-    let store_config = super::super::postgres_store::PostgresAuthStoreConfig::new(
-        Some(schema.clone()),
-        PgIdentifier::new("__paranoid_auth_").expect("table prefix"),
-    )
-    .expect("store config");
+    let store_config =
+        super::super::postgres_store::PostgresAuthStoreConfig::for_db_bootstrap_config(
+            &db_bootstrap_config,
+        )
+        .expect("store config");
     let store = super::super::postgres_store::PostgresAuthStore::new(
         store_config.clone(),
         test_keyset("tests.auth.postgres-store.credentials.v1"),
@@ -290,16 +325,371 @@ async fn postgres_store_migrates_and_validates_schema_when_database_is_available
 }
 
 #[tokio::test]
-async fn postgres_store_loads_persisted_recovery_authority_policy_when_database_is_available() {
-    let database_url = std::env::var("PARANOID_TEST_DATABASE_URL")
-        .ok()
-        .filter(|value| !value.trim().is_empty())
-        .or_else(|| {
-            std::env::var("TEST_DSN")
-                .ok()
-                .filter(|value| !value.trim().is_empty())
-        })
-        .expect("auth Postgres store test requires TEST_DSN or PARANOID_TEST_DATABASE_URL");
+async fn postgres_store_validate_schema_rejects_missing_column_check_constraints() {
+    let (pool, schema, store_config, store) =
+        migrated_auth_store_for_test("tests.auth.postgres-store.schema-checks.v1").await;
+    store
+        .validate_schema(&pool)
+        .await
+        .expect("validate migrated auth schema before constraint drift");
+
+    let secret_mac_table = store_config
+        .table_name(PostgresAuthCoreTable::SessionCredentialSecretMac)
+        .expect("session secret mac table");
+    let find_constraint_statement = r#"
+        SELECT con.conname
+        FROM pg_constraint con
+        WHERE con.conrelid = to_regclass($1)
+          AND con.contype = 'c'
+          AND pg_get_expr(con.conbin, con.conrelid) LIKE '%secret_mac%'
+        LIMIT 1
+        "#;
+    let mut find_constraint_tx = pool
+        .begin_transaction()
+        .await
+        .expect("begin find constraint tx");
+    let constraint_name = pooler_safe_query_scalar::<String>(find_constraint_statement)
+        .bind(secret_mac_table.quoted().to_string())
+        .fetch_one(find_constraint_tx.sqlx_transaction().as_mut())
+        .await
+        .expect("find secret MAC check constraint");
+    find_constraint_tx
+        .rollback()
+        .await
+        .expect("rollback find constraint tx");
+
+    let constraint_name = PgIdentifier::new(constraint_name).expect("constraint identifier");
+    let drop_constraint_statement = format!(
+        "ALTER TABLE {} DROP CONSTRAINT {}",
+        secret_mac_table.quoted(),
+        constraint_name.quoted()
+    );
+    unparameterized_simple_query(sqlx::AssertSqlSafe(drop_constraint_statement.as_str()))
+        .execute(pool.sqlx_pool())
+        .await
+        .expect("drop generated secret MAC check constraint");
+
+    let validate_error = store
+        .validate_schema(&pool)
+        .await
+        .expect_err("auth schema validation must reject missing generated check constraints");
+    let validate_error = validate_error.to_string();
+    assert!(
+        validate_error.contains("secret_mac") && validate_error.contains("CHECK"),
+        "unexpected validation error: {validate_error}"
+    );
+
+    drop_auth_test_schema(&pool, &schema).await;
+}
+
+#[tokio::test]
+async fn postgres_store_migrate_schema_does_not_record_component_version_after_physical_validation_failure()
+ {
+    let database_url = required_auth_postgres_store_test_database_url();
+    let write_pool = WritePool::connect(PoolConfig::new(SecretString::from(database_url.clone())))
+        .await
+        .expect("connect write test database");
+    let pool = Pool::connect(PoolConfig::new(SecretString::from(database_url)))
+        .await
+        .expect("connect test database");
+    let db_bootstrap_config = BootstrapConfig::new(PgSchemaName::new(unique_test_schema_name()));
+    let schema = db_bootstrap_config.schema_name().clone();
+    db_bootstrap_config
+        .migrate_schema(&write_pool)
+        .await
+        .expect("migrate DB foundation before auth schema");
+
+    let store_config =
+        super::super::postgres_store::PostgresAuthStoreConfig::for_db_bootstrap_config(
+            &db_bootstrap_config,
+        )
+        .expect("store config");
+    let store = super::super::postgres_store::PostgresAuthStore::new(
+        store_config.clone(),
+        test_keyset("tests.auth.postgres-store.failed-migration-ledger.v1"),
+    );
+    let trusted_device_table = store_config
+        .table_name(PostgresAuthCoreTable::TrustedDeviceCredential)
+        .expect("trusted device table");
+    let create_malformed_table_statement = format!(
+        "CREATE TABLE {} (device_credential_id BYTEA NOT NULL)",
+        trusted_device_table.quoted()
+    );
+    unparameterized_simple_query(sqlx::AssertSqlSafe(
+        create_malformed_table_statement.as_str(),
+    ))
+    .execute(pool.sqlx_pool())
+    .await
+    .expect("create malformed adopted trusted-device table");
+
+    let migrate_error = store
+        .migrate_schema(&write_pool)
+        .await
+        .expect_err("auth migration must reject adopted malformed physical auth tables");
+    let migrate_error = migrate_error.to_string();
+    assert!(
+        migrate_error.contains("auth_trusted_device_credentials")
+            || migrate_error.contains("trusted_device"),
+        "unexpected migration error: {migrate_error}"
+    );
+
+    let ledger_table = store_config
+        .schema_ledger_table_name()
+        .expect("auth schema ledger table name");
+    let instance_key = super::super::postgres_store::schema_instance_key(&store_config);
+    let count_statement = format!(
+        "SELECT count(*) FROM {} WHERE component = $1 AND instance_key = $2",
+        ledger_table.quoted()
+    );
+    let mut count_tx = pool
+        .begin_transaction()
+        .await
+        .expect("begin auth ledger count transaction");
+    let recorded_rows =
+        pooler_safe_query_scalar::<i64>(sqlx::AssertSqlSafe(count_statement.as_str()))
+            .bind("auth_core")
+            .bind(instance_key.as_str())
+            .fetch_one(count_tx.sqlx_transaction().as_mut())
+            .await
+            .expect("count auth schema ledger rows after failed migration");
+    count_tx
+        .rollback()
+        .await
+        .expect("rollback auth ledger count transaction");
+    assert_eq!(
+        recorded_rows, 0,
+        "failed auth physical validation must not record a trusted component schema version"
+    );
+
+    drop_auth_test_schema(&pool, &schema).await;
+}
+
+#[tokio::test]
+async fn postgres_store_validate_schema_rejects_missing_unique_indexes() {
+    let (pool, schema, store_config, store) =
+        migrated_auth_store_for_test("tests.auth.postgres-store.unique-indexes.v1").await;
+    store
+        .validate_schema(&pool)
+        .await
+        .expect("validate migrated auth schema before index drift");
+
+    let challenge_table = store_config
+        .table_name(PostgresAuthCoreTable::ActiveProofChallenge)
+        .expect("active proof challenge table");
+    let find_index_statement = r#"
+        SELECT cls.relname
+        FROM pg_index idx
+        JOIN pg_class cls ON cls.oid = idx.indexrelid
+        WHERE idx.indrelid = to_regclass($1)
+          AND idx.indisunique
+          AND idx.indexprs IS NULL
+          AND pg_get_expr(idx.indpred, idx.indrelid) IS NOT NULL
+          AND ARRAY(
+              SELECT attr.attname::text
+              FROM unnest(idx.indkey) WITH ORDINALITY AS key(attnum, ordinality)
+              JOIN pg_attribute attr
+                ON attr.attrelid = idx.indrelid
+               AND attr.attnum = key.attnum
+               AND NOT attr.attisdropped
+              WHERE key.ordinality <= idx.indnkeyatts
+              ORDER BY key.ordinality
+          ) = ARRAY['challenge_dedupe_key']
+        LIMIT 1
+        "#;
+    let mut find_index_tx = pool.begin_transaction().await.expect("begin find index tx");
+    let index_name = pooler_safe_query_scalar::<String>(find_index_statement)
+        .bind(challenge_table.quoted().to_string())
+        .fetch_one(find_index_tx.sqlx_transaction().as_mut())
+        .await
+        .expect("find open challenge dedupe index");
+    find_index_tx
+        .rollback()
+        .await
+        .expect("rollback find index tx");
+
+    let index_name = PgIdentifier::new(index_name).expect("index identifier");
+    let qualified_index = crate::db::PgQualifiedTableName::new(Some(schema.clone()), index_name);
+    let drop_index_statement = format!("DROP INDEX {}", qualified_index.quoted());
+    unparameterized_simple_query(sqlx::AssertSqlSafe(drop_index_statement.as_str()))
+        .execute(pool.sqlx_pool())
+        .await
+        .expect("drop generated open challenge dedupe index");
+
+    let validate_error = store
+        .validate_schema(&pool)
+        .await
+        .expect_err("auth schema validation must reject missing unique indexes");
+    let validate_error = validate_error.to_string();
+    assert!(
+        validate_error.contains("unique contract")
+            && validate_error.contains("challenge_dedupe_key"),
+        "unexpected validation error: {validate_error}"
+    );
+
+    drop_auth_test_schema(&pool, &schema).await;
+}
+
+#[tokio::test]
+async fn postgres_store_validate_schema_rejects_default_collation_core_text_columns() {
+    let (pool, schema, store_config, store) =
+        migrated_auth_store_for_test("tests.auth.postgres-store.core-text-collation.v1").await;
+    store
+        .validate_schema(&pool)
+        .await
+        .expect("validate migrated auth schema before core text collation drift");
+
+    let trusted_device_table = store_config
+        .table_name(PostgresAuthCoreTable::TrustedDeviceCredential)
+        .expect("trusted device table");
+    let alter_collation_statement = format!(
+        "ALTER TABLE {} ALTER COLUMN display_label TYPE text COLLATE \"default\"",
+        trusted_device_table.quoted()
+    );
+    unparameterized_simple_query(sqlx::AssertSqlSafe(alter_collation_statement.as_str()))
+        .execute(pool.sqlx_pool())
+        .await
+        .expect("change core text column to database-default collation");
+
+    let validate_error = store
+        .validate_schema(&pool)
+        .await
+        .expect_err("auth schema validation must reject default-collation core text columns");
+    let validate_error = validate_error.to_string();
+    assert!(
+        validate_error.contains("display_label") && validate_error.contains("collation"),
+        "unexpected validation error: {validate_error}"
+    );
+
+    drop_auth_test_schema(&pool, &schema).await;
+}
+
+#[tokio::test]
+async fn postgres_store_validate_schema_rejects_unexpected_core_columns() {
+    let (pool, schema, store_config, store) =
+        migrated_auth_store_for_test("tests.auth.postgres-store.unexpected-column.v1").await;
+    store
+        .validate_schema(&pool)
+        .await
+        .expect("validate migrated auth schema before unexpected column drift");
+
+    let session_table = store_config
+        .table_name(PostgresAuthCoreTable::Session)
+        .expect("session table");
+    let alter_statement = format!(
+        "ALTER TABLE {} ADD COLUMN unexpected_extra BYTEA",
+        session_table.quoted()
+    );
+    unparameterized_simple_query(sqlx::AssertSqlSafe(alter_statement.as_str()))
+        .execute(pool.sqlx_pool())
+        .await
+        .expect("add unexpected core auth table column");
+
+    let validate_error = store
+        .validate_schema(&pool)
+        .await
+        .expect_err("auth schema validation must reject unexpected core columns");
+    let validate_error = validate_error.to_string();
+    assert!(
+        validate_error.contains("unexpected_extra") && validate_error.contains("unexpected column"),
+        "unexpected validation error: {validate_error}"
+    );
+
+    drop_auth_test_schema(&pool, &schema).await;
+}
+
+#[tokio::test]
+async fn postgres_store_migrate_schema_upgrades_previous_auth_schema_ledger_version() {
+    let (pool, write_pool, schema, store_config, store) =
+        migrated_auth_store_with_write_pool_for_test("tests.auth.postgres-store.schema-upgrade.v1")
+            .await;
+    store
+        .validate_schema(&pool)
+        .await
+        .expect("validate current auth schema before recorded downgrade");
+
+    let ledger_table = store_config
+        .schema_ledger_table_name()
+        .expect("auth schema ledger table name");
+    let instance_key = super::super::postgres_store::schema_instance_key(&store_config);
+    let downgrade_statement = format!(
+        r#"
+        UPDATE {}
+        SET schema_version = 3,
+            schema_fingerprint = 'auth-core-postgres-v3'
+        WHERE component = $1
+          AND instance_key = $2
+        "#,
+        ledger_table.quoted()
+    );
+    let mut downgrade_tx = pool
+        .begin_transaction()
+        .await
+        .expect("begin auth schema ledger downgrade transaction");
+    let downgraded_rows = pooler_safe_query(sqlx::AssertSqlSafe(downgrade_statement.as_str()))
+        .bind("auth_core")
+        .bind(instance_key.as_str())
+        .execute(downgrade_tx.sqlx_transaction().as_mut())
+        .await
+        .expect("downgrade recorded auth schema ledger row")
+        .rows_affected();
+    assert_eq!(downgraded_rows, 1);
+    downgrade_tx
+        .commit()
+        .await
+        .expect("commit recorded auth schema ledger downgrade");
+
+    let stale_ledger_error = store
+        .validate_schema(&pool)
+        .await
+        .expect_err("auth validation must reject previous recorded schema version");
+    let stale_ledger_error = stale_ledger_error.to_string();
+    assert!(
+        stale_ledger_error.contains("recorded version 3")
+            && stale_ledger_error.contains("expected 4"),
+        "unexpected stale ledger validation error: {stale_ledger_error}"
+    );
+
+    store
+        .migrate_schema(&write_pool)
+        .await
+        .expect("auth migration must upgrade previous recorded schema version");
+    store
+        .validate_schema(&pool)
+        .await
+        .expect("validate auth schema after recorded upgrade");
+
+    let fetch_statement = format!(
+        r#"
+        SELECT schema_version, schema_fingerprint
+        FROM {}
+        WHERE component = $1
+          AND instance_key = $2
+        "#,
+        ledger_table.quoted()
+    );
+    let mut fetch_tx = pool
+        .begin_transaction()
+        .await
+        .expect("begin fetch upgraded auth schema ledger transaction");
+    let recorded =
+        pooler_safe_query_as::<(i32, String)>(sqlx::AssertSqlSafe(fetch_statement.as_str()))
+            .bind("auth_core")
+            .bind(instance_key.as_str())
+            .fetch_one(fetch_tx.sqlx_transaction().as_mut())
+            .await
+            .expect("fetch upgraded auth schema ledger row");
+    fetch_tx
+        .rollback()
+        .await
+        .expect("rollback fetch upgraded auth schema ledger transaction");
+    assert_eq!(recorded, (4, "auth-core-postgres-v4".to_owned()));
+
+    drop_auth_test_schema(&pool, &schema).await;
+}
+
+#[tokio::test]
+async fn postgres_store_loads_persisted_recovery_authority_policy() {
+    let database_url = required_auth_postgres_store_test_database_url();
 
     let write_pool = WritePool::connect(PoolConfig::new(SecretString::from(database_url.clone())))
         .await
@@ -307,19 +697,18 @@ async fn postgres_store_loads_persisted_recovery_authority_policy_when_database_
     let pool = Pool::connect(PoolConfig::new(SecretString::from(database_url)))
         .await
         .expect("connect test database");
-    let schema_name = unique_test_schema_name();
-    let schema = PgSchemaName::new(schema_name.clone());
-    let create_schema = format!("CREATE SCHEMA {}", schema_name.quoted());
-    unparameterized_simple_query(sqlx::AssertSqlSafe(create_schema.as_str()))
-        .execute(pool.sqlx_pool())
+    let db_bootstrap_config = BootstrapConfig::new(PgSchemaName::new(unique_test_schema_name()));
+    let schema = db_bootstrap_config.schema_name().clone();
+    db_bootstrap_config
+        .migrate_schema(&write_pool)
         .await
-        .expect("create auth test schema");
+        .expect("migrate DB foundation before auth schema");
 
-    let store_config = super::super::postgres_store::PostgresAuthStoreConfig::new(
-        Some(schema.clone()),
-        PgIdentifier::new("__paranoid_auth_").expect("table prefix"),
-    )
-    .expect("store config");
+    let store_config =
+        super::super::postgres_store::PostgresAuthStoreConfig::for_db_bootstrap_config(
+            &db_bootstrap_config,
+        )
+        .expect("store config");
     let store = super::super::postgres_store::PostgresAuthStore::new(
         store_config,
         test_keyset("tests.auth.postgres-store.lifecycle-policy.v1"),
@@ -332,11 +721,13 @@ async fn postgres_store_loads_persisted_recovery_authority_policy_when_database_
     let password_credential_id: VerifiedProofSourceId = id("password-credential");
     let email_authority: RecoveryAuthorityId = id("primary-email-authority");
     let device_authority: RecoveryAuthorityId = id("trusted-device-authority");
+    let support_authority: RecoveryAuthorityId = id("support-team-authority");
     let password_metadata = CredentialInstanceMetadata::new(
         password_credential_id.clone(),
         id("subject"),
         CredentialInstanceKind::MessageSignatureVerifier,
         "password_signature",
+        CredentialResetPolicyRole::OrdinaryCredential,
         CredentialLifecycleState::Active,
     )
     .expect("password credential metadata");
@@ -356,17 +747,42 @@ async fn postgres_store_loads_persisted_recovery_authority_policy_when_database_
         [device_authority],
     )
     .expect("device lifecycle evidence");
+    let support_source = LifecycleAuthorityEvidence::admin_support_intervention(
+        VerifiedAdminSupportCredentialLifecycleIntervention::new(
+            id("support-intervention"),
+            password_metadata.subject_id().clone(),
+            password_credential_id.clone(),
+            CredentialLifecycleAction::Replace,
+            at(10),
+            at(30),
+        )
+        .expect("support intervention"),
+        [support_authority.clone()],
+    )
+    .expect("support lifecycle evidence");
     store
         .store_credential_lifecycle_metadata_for_test(
             &pool,
             &[password_metadata],
-            &[CredentialRecoveryAuthority::new(
-                password_credential_id.clone(),
-                CredentialLifecycleAction::Reset,
-                email_authority,
-                RecoveryAuthorityTiming::Immediate,
-            )],
-            &[email_source.clone(), device_source.clone()],
+            &[
+                CredentialRecoveryAuthority::new(
+                    password_credential_id.clone(),
+                    CredentialLifecycleAction::Reset,
+                    email_authority,
+                    RecoveryAuthorityTiming::Immediate,
+                ),
+                CredentialRecoveryAuthority::new(
+                    password_credential_id.clone(),
+                    CredentialLifecycleAction::Replace,
+                    support_authority,
+                    RecoveryAuthorityTiming::Immediate,
+                ),
+            ],
+            &[
+                email_source.clone(),
+                device_source.clone(),
+                support_source.clone(),
+            ],
             at(10),
         )
         .await
@@ -376,6 +792,7 @@ async fn postgres_store_loads_persisted_recovery_authority_policy_when_database_
     let email_only = store
         .load_and_evaluate_credential_lifecycle_action_in_current_transaction(
             &mut tx,
+            at(20),
             &password_credential_id,
             &[email_source.source().clone()],
             CredentialLifecycleAction::Reset,
@@ -392,6 +809,7 @@ async fn postgres_store_loads_persisted_recovery_authority_policy_when_database_
     let email_without_independence_required = store
         .load_and_evaluate_credential_lifecycle_action_in_current_transaction(
             &mut tx,
+            at(20),
             &password_credential_id,
             &[email_source.source().clone()],
             CredentialLifecycleAction::Reset,
@@ -408,6 +826,7 @@ async fn postgres_store_loads_persisted_recovery_authority_policy_when_database_
     let email_plus_device = store
         .load_and_evaluate_credential_lifecycle_action_in_current_transaction(
             &mut tx,
+            at(20),
             &password_credential_id,
             &[
                 email_source.source().clone(),
@@ -427,6 +846,7 @@ async fn postgres_store_loads_persisted_recovery_authority_policy_when_database_
     let device_only = store
         .load_and_evaluate_credential_lifecycle_action_in_current_transaction(
             &mut tx,
+            at(20),
             &password_credential_id,
             &[device_source.source().clone()],
             CredentialLifecycleAction::Reset,
@@ -440,9 +860,61 @@ async fn postgres_store_loads_persisted_recovery_authority_policy_when_database_
         "independent evidence alone cannot reset a target unless a configured authority authorizes the action"
     );
 
+    let support_replace = store
+        .load_and_evaluate_credential_lifecycle_action_in_current_transaction(
+            &mut tx,
+            at(20),
+            &password_credential_id,
+            &[support_source.source().clone()],
+            CredentialLifecycleAction::Replace,
+            CredentialLifecycleIndependentEvidenceRequirement::NotRequired,
+        )
+        .await
+        .expect("load support replace decision");
+    assert_eq!(
+        support_replace,
+        Some(CredentialLifecycleActionDecision::AuthorizedImmediate),
+        "support intervention should authorize only its scoped credential action while live"
+    );
+
+    let support_wrong_action = store
+        .load_and_evaluate_credential_lifecycle_action_in_current_transaction(
+            &mut tx,
+            at(20),
+            &password_credential_id,
+            &[support_source.source().clone()],
+            CredentialLifecycleAction::Reset,
+            CredentialLifecycleIndependentEvidenceRequirement::NotRequired,
+        )
+        .await
+        .expect("load support wrong-action decision");
+    assert_eq!(
+        support_wrong_action,
+        Some(CredentialLifecycleActionDecision::Rejected),
+        "support intervention scoped to replacement must not authorize reset"
+    );
+
+    let support_expired = store
+        .load_and_evaluate_credential_lifecycle_action_in_current_transaction(
+            &mut tx,
+            at(30),
+            &password_credential_id,
+            &[support_source.source().clone()],
+            CredentialLifecycleAction::Replace,
+            CredentialLifecycleIndependentEvidenceRequirement::NotRequired,
+        )
+        .await
+        .expect("load support expired decision");
+    assert_eq!(
+        support_expired,
+        Some(CredentialLifecycleActionDecision::Rejected),
+        "support intervention must stop authorizing at its expiry instant"
+    );
+
     let missing_target = store
         .load_and_evaluate_credential_lifecycle_action_in_current_transaction(
             &mut tx,
+            at(20),
             &id("missing-password-credential"),
             &[email_source.source().clone()],
             CredentialLifecycleAction::Reset,
@@ -461,7 +933,396 @@ async fn postgres_store_loads_persisted_recovery_authority_policy_when_database_
 }
 
 #[tokio::test]
-async fn postgres_store_commits_credential_reset_planning_when_database_is_available() {
+async fn postgres_store_loads_persisted_out_of_band_identifier_change_context() {
+    let (pool, schema, _store_config, store) =
+        migrated_auth_store_for_test("tests.auth.postgres-store.identifier-change.v1").await;
+    let subject_id: SubjectId = id("subject");
+    let current_source = VerifiedProofSource::new(
+        VerifiedProofSourceKind::OutOfBandIdentifier,
+        id("primary-email-source"),
+    );
+    let candidate_source = VerifiedProofSource::new(
+        VerifiedProofSourceKind::OutOfBandIdentifier,
+        id("candidate-email-source"),
+    );
+    let current_authority: RecoveryAuthorityId = id("primary-email-authority");
+    let candidate_authority: RecoveryAuthorityId = id("candidate-email-authority");
+    let device_authority: RecoveryAuthorityId = id("trusted-device-authority");
+    let current_evidence = out_of_band_identifier_lifecycle_evidence(
+        "primary-email-source",
+        [current_authority.clone()],
+    );
+    let candidate_evidence = out_of_band_identifier_lifecycle_evidence(
+        "candidate-email-source",
+        [candidate_authority.clone()],
+    );
+    let device_evidence =
+        credential_instance_lifecycle_evidence("trusted-device", [device_authority.clone()]);
+    store
+        .store_subject_lifecycle_metadata_for_test(
+            &pool,
+            &[
+                SubjectLifecycleAuthority::new(
+                    subject_id.clone(),
+                    SubjectLifecycleAction::ChangeOutOfBandIdentifier,
+                    current_authority,
+                    RecoveryAuthorityTiming::Immediate,
+                ),
+                SubjectLifecycleAuthority::new(
+                    subject_id.clone(),
+                    SubjectLifecycleAction::ChangeOutOfBandIdentifier,
+                    candidate_authority,
+                    RecoveryAuthorityTiming::Immediate,
+                ),
+            ],
+            &[
+                current_evidence.clone(),
+                candidate_evidence.clone(),
+                device_evidence.clone(),
+            ],
+            at(10),
+        )
+        .await
+        .expect("seed subject lifecycle metadata");
+    store
+        .store_out_of_band_identifier_bindings_for_test(
+            &pool,
+            &[
+                OutOfBandIdentifierBindingRecord::new(
+                    current_source.clone(),
+                    subject_id.clone(),
+                    "email_otp",
+                    OutOfBandIdentifierBindingLifecycleState::Active,
+                )
+                .expect("current binding"),
+                OutOfBandIdentifierBindingRecord::new(
+                    candidate_source.clone(),
+                    subject_id.clone(),
+                    "email_otp",
+                    OutOfBandIdentifierBindingLifecycleState::PendingActivation,
+                )
+                .expect("candidate binding"),
+            ],
+            at(10),
+        )
+        .await
+        .expect("seed out-of-band identifier bindings");
+
+    let mut tx = pool.begin_transaction().await.expect("begin load tx");
+    let current_only_context = store
+        .load_out_of_band_identifier_change_context_in_current_transaction(
+            &mut tx,
+            &subject_id,
+            current_source.clone(),
+            candidate_source.clone(),
+            &[current_evidence.source().clone()],
+        )
+        .await
+        .expect("load current-only identifier-change context")
+        .expect("current-only identifier-change context should load");
+    assert_eq!(
+        current_only_context.evaluate_action_at(
+            at(20),
+            SubjectLifecycleIndependentEvidenceRequirement::Required,
+        ),
+        SubjectLifecycleActionDecision::RequiresDelayedAction,
+        "current identifier proof alone may schedule but must not immediately change the binding when independent evidence is required"
+    );
+
+    let current_plus_device_context = store
+        .load_out_of_band_identifier_change_context_in_current_transaction(
+            &mut tx,
+            &subject_id,
+            current_source.clone(),
+            candidate_source.clone(),
+            &[
+                current_evidence.source().clone(),
+                device_evidence.source().clone(),
+            ],
+        )
+        .await
+        .expect("load current plus device identifier-change context")
+        .expect("current plus device identifier-change context should load");
+    assert_eq!(
+        current_plus_device_context.evaluate_action_at(
+            at(20),
+            SubjectLifecycleIndependentEvidenceRequirement::Required,
+        ),
+        SubjectLifecycleActionDecision::AuthorizedImmediate,
+        "independent device evidence prevents the current identifier authority from collapsing into itself"
+    );
+
+    let candidate_authority_error = store
+        .load_out_of_band_identifier_change_context_in_current_transaction(
+            &mut tx,
+            &subject_id,
+            current_source,
+            candidate_source,
+            &[candidate_evidence.source().clone()],
+        )
+        .await
+        .expect_err("candidate identifier proof must not authorize its own binding");
+    assert!(
+        matches!(
+            candidate_authority_error,
+            super::super::postgres_store::PostgresAuthStoreError::Core(Error::InvalidConfig(
+                "candidate identifier proof cannot authorize its own binding"
+            ))
+        ),
+        "unexpected candidate-authority error: {candidate_authority_error:?}"
+    );
+    tx.rollback().await.expect("rollback load tx");
+
+    drop_auth_test_schema(&pool, &schema).await;
+}
+
+#[tokio::test]
+async fn postgres_store_commits_immediate_out_of_band_identifier_change() {
+    let (pool, schema, store_config, store) =
+        migrated_auth_store_for_test("tests.auth.postgres-store.identifier-change-commit.v1").await;
+    let subject_id: SubjectId = id("subject");
+    let current_source = VerifiedProofSource::new(
+        VerifiedProofSourceKind::OutOfBandIdentifier,
+        id("primary-email-source"),
+    );
+    let candidate_source = VerifiedProofSource::new(
+        VerifiedProofSourceKind::OutOfBandIdentifier,
+        id("candidate-email-source"),
+    );
+    let current_authority: RecoveryAuthorityId = id("primary-email-authority");
+    let candidate_authority: RecoveryAuthorityId = id("candidate-email-authority");
+    let stale_candidate_authority: RecoveryAuthorityId = id("stale-candidate-email-authority");
+    let device_authority: RecoveryAuthorityId = id("trusted-device-authority");
+    let current_evidence = out_of_band_identifier_lifecycle_evidence(
+        "primary-email-source",
+        [current_authority.clone()],
+    );
+    let device_evidence =
+        credential_instance_lifecycle_evidence("trusted-device", [device_authority]);
+    store
+        .store_subject_lifecycle_metadata_for_test(
+            &pool,
+            &[SubjectLifecycleAuthority::new(
+                subject_id.clone(),
+                SubjectLifecycleAction::ChangeOutOfBandIdentifier,
+                current_authority,
+                RecoveryAuthorityTiming::Immediate,
+            )],
+            &[current_evidence.clone(), device_evidence.clone()],
+            at(10),
+        )
+        .await
+        .expect("seed subject lifecycle metadata");
+    store
+        .store_subject_lifecycle_metadata_for_test(
+            &pool,
+            &[],
+            &[out_of_band_identifier_lifecycle_evidence(
+                "candidate-email-source",
+                [stale_candidate_authority.clone()],
+            )],
+            at(11),
+        )
+        .await
+        .expect("seed stale candidate source authority metadata");
+    store
+        .store_out_of_band_identifier_bindings_for_test(
+            &pool,
+            &[
+                OutOfBandIdentifierBindingRecord::new(
+                    current_source.clone(),
+                    subject_id.clone(),
+                    "email_otp",
+                    OutOfBandIdentifierBindingLifecycleState::Active,
+                )
+                .expect("current binding"),
+                OutOfBandIdentifierBindingRecord::new(
+                    candidate_source.clone(),
+                    subject_id.clone(),
+                    "email_otp",
+                    OutOfBandIdentifierBindingLifecycleState::PendingActivation,
+                )
+                .expect("candidate binding"),
+            ],
+            at(10),
+        )
+        .await
+        .expect("seed out-of-band identifier bindings");
+
+    let mut load_tx = pool
+        .begin_transaction()
+        .await
+        .expect("begin identifier-change load tx");
+    let change_context = store
+        .load_out_of_band_identifier_change_context_in_current_transaction(
+            &mut load_tx,
+            &subject_id,
+            current_source.clone(),
+            candidate_source.clone(),
+            &[
+                current_evidence.source().clone(),
+                device_evidence.source().clone(),
+            ],
+        )
+        .await
+        .expect("load identifier-change context")
+        .expect("identifier-change context should load");
+    load_tx
+        .rollback()
+        .await
+        .expect("rollback identifier-change load tx");
+    let transition = reduce_command(
+        &config(),
+        Command::ExecuteOutOfBandIdentifierChange(ExecuteOutOfBandIdentifierChange {
+            now: at(100),
+            change_context,
+            independent_evidence_required: SubjectLifecycleIndependentEvidenceRequirement::Required,
+            candidate_authority_ids: vec![candidate_authority.clone()],
+        }),
+        &LoadedState::default(),
+    )
+    .expect("identifier-change transition");
+    let replay_transition = transition.clone();
+    commit_transition_to_postgres(&pool, &store, transition).await;
+
+    let binding_table = store_config
+        .table_name(PostgresAuthCoreTable::OutOfBandIdentifierBinding)
+        .expect("binding table");
+    let authority_source_table = store_config
+        .table_name(PostgresAuthCoreTable::LifecycleAuthoritySource)
+        .expect("authority source table");
+    let subject_state_table = store_config
+        .table_name(PostgresAuthCoreTable::SubjectAuthState)
+        .expect("subject state table");
+    let durable_effect_table = store_config
+        .table_name(PostgresAuthCoreTable::CoreDurableEffectCommand)
+        .expect("durable effect table");
+
+    let current_state =
+        out_of_band_identifier_binding_state(&pool, &binding_table, current_source.source_id())
+            .await;
+    let candidate_state =
+        out_of_band_identifier_binding_state(&pool, &binding_table, candidate_source.source_id())
+            .await;
+    assert_eq!(
+        current_state,
+        OutOfBandIdentifierBindingLifecycleState::Superseded
+    );
+    assert_eq!(
+        candidate_state,
+        OutOfBandIdentifierBindingLifecycleState::Active
+    );
+
+    let mut read_authority_tx = pool
+        .begin_transaction()
+        .await
+        .expect("begin authority-source read tx");
+    let candidate_authority_count = pooler_safe_query_scalar::<i64>(sqlx::AssertSqlSafe(
+        format!(
+            r#"
+            SELECT count(*)
+            FROM {}
+            WHERE source_kind = $1
+              AND source_id = $2
+              AND authority_id = $3
+            "#,
+            authority_source_table.quoted(),
+        )
+        .as_str(),
+    ))
+    .bind(
+        super::super::postgres_store::i32_from_lifecycle_authority_source_kind(
+            LifecycleAuthoritySourceKind::OutOfBandIdentifier,
+        ),
+    )
+    .bind(candidate_source.source_id().as_bytes())
+    .bind(candidate_authority.as_bytes())
+    .fetch_one(read_authority_tx.sqlx_transaction().as_mut())
+    .await
+    .expect("candidate authority source count");
+    let stale_candidate_authority_count = pooler_safe_query_scalar::<i64>(sqlx::AssertSqlSafe(
+        format!(
+            r#"
+            SELECT count(*)
+            FROM {}
+            WHERE source_kind = $1
+              AND source_id = $2
+              AND authority_id = $3
+            "#,
+            authority_source_table.quoted(),
+        )
+        .as_str(),
+    ))
+    .bind(
+        super::super::postgres_store::i32_from_lifecycle_authority_source_kind(
+            LifecycleAuthoritySourceKind::OutOfBandIdentifier,
+        ),
+    )
+    .bind(candidate_source.source_id().as_bytes())
+    .bind(stale_candidate_authority.as_bytes())
+    .fetch_one(read_authority_tx.sqlx_transaction().as_mut())
+    .await
+    .expect("stale candidate authority source count");
+    read_authority_tx
+        .rollback()
+        .await
+        .expect("rollback authority-source read tx");
+    assert_eq!(
+        candidate_authority_count, 1,
+        "identifier change must bind the activated candidate source to its recovery authority"
+    );
+    assert_eq!(
+        stale_candidate_authority_count, 0,
+        "identifier change must replace stale candidate-source recovery-authority mappings"
+    );
+
+    let mut read_subject_state_tx = pool
+        .begin_transaction()
+        .await
+        .expect("begin subject state read tx");
+    let stored_subject_cutoff = pooler_safe_query_scalar::<i64>(sqlx::AssertSqlSafe(
+        format!(
+            r#"SELECT revoke_records_created_at_or_before FROM {} WHERE subject_id = $1"#,
+            subject_state_table.quoted(),
+        )
+        .as_str(),
+    ))
+    .bind(subject_id.as_bytes())
+    .fetch_one(read_subject_state_tx.sqlx_transaction().as_mut())
+    .await
+    .expect("subject revocation cutoff");
+    read_subject_state_tx
+        .rollback()
+        .await
+        .expect("rollback subject state read tx");
+    assert_eq!(
+        stored_subject_cutoff, 100,
+        "identifier change must revoke existing subject auth state"
+    );
+    assert_eq!(
+        security_notification_count(
+            &pool,
+            &durable_effect_table,
+            SecurityNotificationKind::OutOfBandIdentifierChanged,
+        )
+        .await,
+        1,
+        "identifier change must schedule a security notice"
+    );
+
+    let replay_error = try_commit_transition_to_postgres(&pool, &store, replay_transition)
+        .await
+        .expect_err("replayed identifier-change commit must fail stale binding precondition");
+    assert!(matches!(
+        replay_error,
+        super::super::postgres_store::PostgresAuthStoreError::PreconditionFailed(_)
+    ));
+
+    drop_auth_test_schema(&pool, &schema).await;
+}
+
+#[tokio::test]
+async fn postgres_store_commits_credential_reset_planning() {
     let (pool, schema, store_config, store) =
         migrated_auth_store_for_test("tests.auth.postgres-store.credential-reset.v1").await;
 
@@ -478,6 +1339,7 @@ async fn postgres_store_commits_credential_reset_planning_when_database_is_avail
                     id("subject"),
                     CredentialInstanceKind::MessageSignatureVerifier,
                     "password_signature",
+                    CredentialResetPolicyRole::OrdinaryCredential,
                     CredentialLifecycleState::Active,
                 )
                 .expect("immediate credential metadata"),
@@ -486,6 +1348,7 @@ async fn postgres_store_commits_credential_reset_planning_when_database_is_avail
                     id("subject"),
                     CredentialInstanceKind::MessageSignatureVerifier,
                     "password_signature",
+                    CredentialResetPolicyRole::OrdinaryCredential,
                     CredentialLifecycleState::Active,
                 )
                 .expect("delayed credential metadata"),
@@ -507,6 +1370,7 @@ async fn postgres_store_commits_credential_reset_planning_when_database_is_avail
                     id("subject"),
                     CredentialInstanceKind::MessageSignatureVerifier,
                     "password_signature",
+                    CredentialResetPolicyRole::OrdinaryCredential,
                     CredentialLifecycleState::Active,
                 )
                 .expect("immediate credential metadata"),
@@ -531,8 +1395,6 @@ async fn postgres_store_commits_credential_reset_planning_when_database_is_avail
             independent_evidence_required:
                 CredentialLifecycleIndependentEvidenceRequirement::Required,
             pending_action: None,
-            immediate_subject_auth_revocation:
-                CredentialResetSubjectAuthRevocation::RevokeSubjectAuthState,
         }),
         &LoadedState::default(),
     )
@@ -591,6 +1453,7 @@ async fn postgres_store_commits_credential_reset_planning_when_database_is_avail
                     id("subject"),
                     CredentialInstanceKind::MessageSignatureVerifier,
                     "password_signature",
+                    CredentialResetPolicyRole::OrdinaryCredential,
                     CredentialLifecycleState::Active,
                 )
                 .expect("delayed credential metadata"),
@@ -613,8 +1476,6 @@ async fn postgres_store_commits_credential_reset_planning_when_database_is_avail
                 earliest_execute_at: at(200),
                 expires_at: at(300),
             }),
-            immediate_subject_auth_revocation:
-                CredentialResetSubjectAuthRevocation::RevokeSubjectAuthState,
         }),
         &LoadedState::default(),
     )
@@ -687,6 +1548,7 @@ async fn postgres_store_commits_credential_reset_planning_when_database_is_avail
                     id("subject"),
                     CredentialInstanceKind::MessageSignatureVerifier,
                     "password_signature",
+                    CredentialResetPolicyRole::OrdinaryCredential,
                     CredentialLifecycleState::Active,
                 )
                 .expect("delayed credential metadata"),
@@ -709,8 +1571,6 @@ async fn postgres_store_commits_credential_reset_planning_when_database_is_avail
                 earliest_execute_at: at(220),
                 expires_at: at(320),
             }),
-            immediate_subject_auth_revocation:
-                CredentialResetSubjectAuthRevocation::RevokeSubjectAuthState,
         }),
         &LoadedState::default(),
     )
@@ -823,6 +1683,177 @@ async fn postgres_store_commits_credential_reset_planning_when_database_is_avail
     drop_auth_test_schema(&pool, &schema).await;
 }
 
+#[tokio::test]
+async fn postgres_store_commits_credential_addition_core_rows() {
+    let (pool, schema, store_config, store) =
+        migrated_auth_store_for_test("tests.auth.postgres-store.credential-addition.v1").await;
+
+    let new_credential = message_signature_credential_metadata("new-password-credential");
+    let new_credential_id = new_credential.credential_instance_id().clone();
+    let email_authority: RecoveryAuthorityId = id("primary-email-authority");
+    let new_password_authority: RecoveryAuthorityId = id("new-password-authority");
+    let create_authority = CredentialRecoveryAuthority::new(
+        new_credential_id.clone(),
+        CredentialLifecycleAction::Create,
+        email_authority.clone(),
+        RecoveryAuthorityTiming::Immediate,
+    );
+    let reset_authority = CredentialRecoveryAuthority::new(
+        new_credential_id.clone(),
+        CredentialLifecycleAction::Reset,
+        email_authority,
+        RecoveryAuthorityTiming::Delayed,
+    );
+    let remove_authority = CredentialRecoveryAuthority::new(
+        new_credential_id.clone(),
+        CredentialLifecycleAction::Remove,
+        new_password_authority.clone(),
+        RecoveryAuthorityTiming::Immediate,
+    );
+    let new_credential_source =
+        LifecycleAuthoritySource::VerifiedProofSource(new_credential.verified_proof_source());
+    let addition_work = AtomicCommitWork {
+        mutations: vec![
+            Mutation::CreateCredentialInstanceMetadata {
+                metadata: new_credential.clone(),
+                created_at: at(100),
+            },
+            Mutation::CreateCredentialRecoveryAuthority {
+                authority: create_authority.clone(),
+                created_at: at(100),
+            },
+            Mutation::CreateCredentialRecoveryAuthority {
+                authority: reset_authority.clone(),
+                created_at: at(100),
+            },
+            Mutation::CreateCredentialRecoveryAuthority {
+                authority: remove_authority.clone(),
+                created_at: at(100),
+            },
+            Mutation::CreateLifecycleAuthoritySource {
+                source: new_credential_source.clone(),
+                authority_id: new_password_authority.clone(),
+                created_at: at(100),
+            },
+            Mutation::RecordCredentialLifecycleActionExecuted {
+                target_credential_instance_id: new_credential_id.clone(),
+                action: CredentialLifecycleAction::Create,
+                executed_at: at(100),
+            },
+            Mutation::RaiseSubjectAuthRevocationCutoff {
+                subject_id: id("subject"),
+                revoke_records_created_at_or_before: at(100),
+                reason: RevocationReason::SubjectAuthStateChanged,
+            },
+        ],
+        audit_events: vec![AuditEvent {
+            kind: AuditEventKind::CredentialAdded,
+            subject_id: Some(id("subject")),
+            session_id: None,
+            device_credential_id: None,
+            attempt_id: None,
+            challenge_id: None,
+            weak_proof_gate: None,
+            occurred_at: at(100),
+        }],
+        durable_effects: vec![DurableEffectCommand::NotifySecurityEvent(
+            SecurityNotificationCommand {
+                kind: SecurityNotificationKind::CredentialAdded,
+                subject_id: id("subject"),
+            },
+        )],
+        ..AtomicCommitWork::default()
+    };
+    try_commit_atomic_work_to_postgres(&pool, &store, addition_work)
+        .await
+        .expect("commit credential addition core rows");
+
+    let mut load_tx = pool
+        .begin_transaction()
+        .await
+        .expect("begin credential addition read tx");
+    let loaded_context = store
+        .load_credential_lifecycle_action_context_in_current_transaction(
+            &mut load_tx,
+            &new_credential_id,
+            &[new_credential_source.clone()],
+        )
+        .await
+        .expect("load credential addition lifecycle context")
+        .expect("new credential metadata");
+    assert_eq!(loaded_context.target_credential(), &new_credential);
+    assert_eq!(
+        loaded_context.recovery_authority_graph().authorities(),
+        &[
+            create_authority.clone(),
+            reset_authority.clone(),
+            remove_authority.clone(),
+        ]
+    );
+    assert_eq!(
+        loaded_context.presented_evidence(),
+        &[
+            LifecycleAuthorityEvidence::new(new_credential_source, [new_password_authority])
+                .expect("new credential authority evidence")
+        ]
+    );
+    assert_eq!(
+        loaded_context.evaluate_action_at(
+            at(101),
+            CredentialLifecycleAction::Remove,
+            CredentialLifecycleIndependentEvidenceRequirement::NotRequired,
+        ),
+        CredentialLifecycleActionDecision::AuthorizedImmediate
+    );
+    load_tx
+        .rollback()
+        .await
+        .expect("rollback credential addition read tx");
+
+    let subject_state_table = store_config
+        .table_name(PostgresAuthCoreTable::SubjectAuthState)
+        .expect("subject state table");
+    let mut read_subject_state_tx = pool
+        .begin_transaction()
+        .await
+        .expect("begin subject state read tx");
+    let stored_subject_cutoff = pooler_safe_query_scalar::<i64>(sqlx::AssertSqlSafe(
+        format!(
+            r#"SELECT revoke_records_created_at_or_before FROM {} WHERE subject_id = $1"#,
+            subject_state_table.quoted(),
+        )
+        .as_str(),
+    ))
+    .bind(id::<SubjectId>("subject").as_bytes())
+    .fetch_one(read_subject_state_tx.sqlx_transaction().as_mut())
+    .await
+    .expect("subject revocation cutoff");
+    read_subject_state_tx
+        .rollback()
+        .await
+        .expect("rollback subject state read tx");
+    assert_eq!(
+        stored_subject_cutoff, 100,
+        "credential addition must atomically raise subject auth revocation cutoff"
+    );
+
+    let durable_effect_table = store_config
+        .table_name(PostgresAuthCoreTable::CoreDurableEffectCommand)
+        .expect("durable effect table");
+    let added_notice_count = security_notification_count(
+        &pool,
+        &durable_effect_table,
+        SecurityNotificationKind::CredentialAdded,
+    )
+    .await;
+    assert_eq!(
+        added_notice_count, 1,
+        "credential addition must atomically schedule a security notice"
+    );
+
+    drop_auth_test_schema(&pool, &schema).await;
+}
+
 fn unique_test_schema_name() -> PgIdentifier {
     let counter = AUTH_POSTGRES_TEST_COUNTER.fetch_add(1, Ordering::Relaxed);
     PgIdentifier::new(format!(
@@ -831,6 +1862,18 @@ fn unique_test_schema_name() -> PgIdentifier {
         counter
     ))
     .expect("test schema name")
+}
+
+fn required_auth_postgres_store_test_database_url() -> String {
+    std::env::var("PARANOID_TEST_DATABASE_URL")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| {
+            std::env::var("TEST_DSN")
+                .ok()
+                .filter(|value| !value.trim().is_empty())
+        })
+        .expect("required auth Postgres store test database URL missing; run through the isolated DB harness so TEST_DSN or PARANOID_TEST_DATABASE_URL is set")
 }
 
 fn test_keyset(purpose: &str) -> crate::crypto::Keyset {
@@ -847,33 +1890,38 @@ async fn migrated_auth_store_for_test(
     super::super::postgres_store::PostgresAuthStoreConfig,
     super::super::postgres_store::PostgresAuthStore,
 ) {
-    let database_url = std::env::var("PARANOID_TEST_DATABASE_URL")
-        .ok()
-        .filter(|value| !value.trim().is_empty())
-        .or_else(|| {
-            std::env::var("TEST_DSN")
-                .ok()
-                .filter(|value| !value.trim().is_empty())
-        })
-        .expect("auth Postgres store test requires TEST_DSN or PARANOID_TEST_DATABASE_URL");
+    let (pool, _write_pool, schema, store_config, store) =
+        migrated_auth_store_with_write_pool_for_test(purpose).await;
+    (pool, schema, store_config, store)
+}
+
+async fn migrated_auth_store_with_write_pool_for_test(
+    purpose: &str,
+) -> (
+    Pool,
+    WritePool,
+    PgSchemaName,
+    super::super::postgres_store::PostgresAuthStoreConfig,
+    super::super::postgres_store::PostgresAuthStore,
+) {
+    let database_url = required_auth_postgres_store_test_database_url();
     let write_pool = WritePool::connect(PoolConfig::new(SecretString::from(database_url.clone())))
         .await
         .expect("connect write test database");
     let pool = Pool::connect(PoolConfig::new(SecretString::from(database_url)))
         .await
         .expect("connect test database");
-    let schema_name = unique_test_schema_name();
-    let schema = PgSchemaName::new(schema_name.clone());
-    let create_schema = format!("CREATE SCHEMA {}", schema_name.quoted());
-    unparameterized_simple_query(sqlx::AssertSqlSafe(create_schema.as_str()))
-        .execute(pool.sqlx_pool())
+    let db_bootstrap_config = BootstrapConfig::new(PgSchemaName::new(unique_test_schema_name()));
+    let schema = db_bootstrap_config.schema_name().clone();
+    db_bootstrap_config
+        .migrate_schema(&write_pool)
         .await
-        .expect("create auth test schema");
-    let store_config = super::super::postgres_store::PostgresAuthStoreConfig::new(
-        Some(schema.clone()),
-        PgIdentifier::new("__paranoid_auth_").expect("table prefix"),
-    )
-    .expect("store config");
+        .expect("migrate DB foundation before auth schema");
+    let store_config =
+        super::super::postgres_store::PostgresAuthStoreConfig::for_db_bootstrap_config(
+            &db_bootstrap_config,
+        )
+        .expect("store config");
     let store = super::super::postgres_store::PostgresAuthStore::new(
         store_config.clone(),
         test_keyset(purpose),
@@ -882,7 +1930,7 @@ async fn migrated_auth_store_for_test(
         .migrate_schema(&write_pool)
         .await
         .expect("migrate auth schema");
-    (pool, schema, store_config, store)
+    (pool, write_pool, schema, store_config, store)
 }
 
 async fn commit_transition_to_postgres(
@@ -978,6 +2026,33 @@ async fn security_notification_count(
         .await
         .expect("rollback security notification read tx");
     count
+}
+
+async fn out_of_band_identifier_binding_state(
+    pool: &Pool,
+    binding_table: &crate::db::PgQualifiedTableName,
+    source_id: &VerifiedProofSourceId,
+) -> OutOfBandIdentifierBindingLifecycleState {
+    let mut tx = pool
+        .begin_transaction()
+        .await
+        .expect("begin out-of-band identifier binding read tx");
+    let state = pooler_safe_query_scalar::<i32>(sqlx::AssertSqlSafe(
+        format!(
+            r#"SELECT lifecycle_state FROM {} WHERE source_id = $1"#,
+            binding_table.quoted(),
+        )
+        .as_str(),
+    ))
+    .bind(source_id.as_bytes())
+    .fetch_one(tx.sqlx_transaction().as_mut())
+    .await
+    .expect("out-of-band identifier binding state");
+    tx.rollback()
+        .await
+        .expect("rollback out-of-band identifier binding read tx");
+    super::super::postgres_store::out_of_band_identifier_binding_lifecycle_state_from_i32(state)
+        .expect("out-of-band identifier binding lifecycle state")
 }
 
 async fn drop_auth_test_schema(pool: &Pool, schema: &PgSchemaName) {

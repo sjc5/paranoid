@@ -12,7 +12,9 @@
 //! use paranoid::fleet::{ClaimDuration, MutexGuardConfig, MutexKey, MutexTryRunTaskResult};
 //! use std::time::Duration;
 //!
-//! let stores = BootstrapConfig::default().migrate_schema(&pool).await?;
+//! let stores = BootstrapConfig::from_schema_name_text("__paranoid")?
+//!     .migrate_schema(&pool)
+//!     .await?;
 //! let store = stores.fleet;
 //!
 //! let mutex = store.new_mutex(

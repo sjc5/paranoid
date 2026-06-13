@@ -1,4 +1,4 @@
-use super::*;
+use super::prelude::*;
 
 /// Postgres migration and validation contract for auth-core storage.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -151,6 +151,7 @@ impl PostgresColumnValidationContract {
                 if matches!(
                     contract.value(),
                     PostgresColumnValueContract::MacOverSecretBytes { .. }
+                        | PostgresColumnValueContract::FixedOpaqueBytes { .. }
                 ) {
                     checks.push(PostgresColumnValidationCheck::ByteaLengthConstraintMatches);
                 }
@@ -472,10 +473,15 @@ impl PostgresPreconditionExecutionContract {
                     },
                 ]
             }
-            Precondition::NoOpenOutOfBandChallengeForDedupeKey { now, .. } => {
+            Precondition::NoOpenOutOfBandChallengeForDedupeKey {
+                now,
+                replaceable_created_at_or_before,
+                ..
+            } => {
                 vec![
-                    PostgresPreconditionValidationStep::CloseExpiredOpenOutOfBandChallengesBeforeDedupeCheck {
+                    PostgresPreconditionValidationStep::CloseReplaceableOpenOutOfBandChallengesBeforeDedupeCheck {
                         now: *now,
+                        replaceable_created_at_or_before: *replaceable_created_at_or_before,
                     },
                     PostgresPreconditionValidationStep::TreatOpenChallengeDedupeUniqueViolationAsPreconditionFailure,
                 ]
@@ -484,6 +490,47 @@ impl PostgresPreconditionExecutionContract {
                 vec![
                     PostgresPreconditionValidationStep::CredentialInstanceStillActiveWithSubject {
                         subject_id: subject_id.clone(),
+                    },
+                ]
+            }
+            Precondition::SubjectRetainsRequiredCredentialPostureAfterRemoval {
+                subject_id,
+                removed_credential_instance_id,
+                removed_credential_reset_policy_role,
+            } => {
+                vec![
+                    PostgresPreconditionValidationStep::SubjectRetainsRequiredCredentialPostureAfterRemoval {
+                        subject_id: subject_id.clone(),
+                        removed_credential_instance_id: removed_credential_instance_id.clone(),
+                        removed_credential_reset_policy_role: *removed_credential_reset_policy_role,
+                    },
+                ]
+            }
+            Precondition::SubjectRetainsRequiredCredentialPostureAfterReplacement {
+                subject_id,
+                replaced_credential_instance_id,
+                replaced_credential_reset_policy_role,
+                successor,
+            } => {
+                vec![
+                    PostgresPreconditionValidationStep::SubjectRetainsRequiredCredentialPostureAfterReplacement {
+                        subject_id: subject_id.clone(),
+                        replaced_credential_instance_id: replaced_credential_instance_id.clone(),
+                        replaced_credential_reset_policy_role: *replaced_credential_reset_policy_role,
+                        successor: successor.clone(),
+                    },
+                ]
+            }
+            Precondition::SubjectRetainsRequiredCredentialPostureAfterAddition {
+                subject_id,
+                added_credential,
+                added_recovery_authorities,
+            } => {
+                vec![
+                    PostgresPreconditionValidationStep::SubjectRetainsRequiredCredentialPostureAfterAddition {
+                        subject_id: subject_id.clone(),
+                        added_credential: added_credential.clone(),
+                        added_recovery_authorities: added_recovery_authorities.clone(),
                     },
                 ]
             }
@@ -563,6 +610,63 @@ impl PostgresPreconditionExecutionContract {
                     },
                 ]
             }
+            Precondition::OutOfBandIdentifierBindingStillActive { subject_id, .. } => {
+                vec![
+                    PostgresPreconditionValidationStep::OutOfBandIdentifierBindingActiveWithSubject {
+                        subject_id: subject_id.clone(),
+                    },
+                ]
+            }
+            Precondition::OutOfBandIdentifierBindingStillPendingActivation {
+                subject_id,
+                ..
+            } => {
+                vec![
+                    PostgresPreconditionValidationStep::OutOfBandIdentifierBindingPendingActivationWithSubject {
+                        subject_id: subject_id.clone(),
+                    },
+                ]
+            }
+            Precondition::NoOpenAdminSupportInterventionForTarget { now, .. } => {
+                vec![
+                    PostgresPreconditionValidationStep::CloseExpiredOpenAdminSupportInterventionsBeforeUniquenessCheck {
+                        now: *now,
+                    },
+                    PostgresPreconditionValidationStep::TreatOpenAdminSupportInterventionUniqueViolationAsPreconditionFailure,
+                ]
+            }
+            Precondition::AdminSupportInterventionStillOpen {
+                subject_id,
+                target_credential_instance_id,
+                action,
+                now,
+                ..
+            } => {
+                vec![
+                    PostgresPreconditionValidationStep::AdminSupportInterventionOpenUnexpiredAndTargetMatched {
+                        subject_id: subject_id.clone(),
+                        target_credential_instance_id: target_credential_instance_id.clone(),
+                        action: *action,
+                        now: *now,
+                    },
+                ]
+            }
+            Precondition::AdminSupportInterventionStillExpiredOpen {
+                subject_id,
+                target_credential_instance_id,
+                action,
+                now,
+                ..
+            } => {
+                vec![
+                    PostgresPreconditionValidationStep::AdminSupportInterventionExpiredOpenAndTargetMatched {
+                        subject_id: subject_id.clone(),
+                        target_credential_instance_id: target_credential_instance_id.clone(),
+                        action: *action,
+                        now: *now,
+                    },
+                ]
+            }
         };
         Self {
             kind: storage_contract.kind(),
@@ -602,6 +706,16 @@ pub enum PostgresPreconditionLockStep {
         /// Subject id.
         subject_id: SubjectId,
     },
+    /// `SELECT ... FOR UPDATE` over active credential-instance rows ordered by id.
+    SelectActiveCredentialInstancesForSubjectForUpdate {
+        /// Subject id.
+        subject_id: SubjectId,
+    },
+    /// `SELECT ... FOR UPDATE` over recovery-authority rows for active credentials.
+    SelectActiveCredentialRecoveryAuthoritiesForSubjectForUpdate {
+        /// Subject id.
+        subject_id: SubjectId,
+    },
     /// Enforce the partial unique index for open challenge dedupe.
     UseOpenOutOfBandChallengeDedupeUniqueIndex {
         /// Dedupe key.
@@ -621,6 +735,13 @@ pub enum PostgresPreconditionLockStep {
         /// Subject lifecycle action.
         action: SubjectLifecycleAction,
     },
+    /// Enforce the partial unique index for open support/admin interventions.
+    UseOpenAdminSupportInterventionUniqueIndex {
+        /// Target credential instance.
+        target_credential_instance_id: VerifiedProofSourceId,
+        /// Lifecycle action.
+        action: CredentialLifecycleAction,
+    },
 }
 
 impl PostgresPreconditionLockStep {
@@ -637,6 +758,16 @@ impl PostgresPreconditionLockStep {
                     subject_id: subject_id.clone(),
                 }
             }
+            StorageLockRequirement::LockActiveCredentialInstancesForSubjectForUpdate {
+                subject_id,
+            } => Self::SelectActiveCredentialInstancesForSubjectForUpdate {
+                subject_id: subject_id.clone(),
+            },
+            StorageLockRequirement::LockActiveCredentialRecoveryAuthoritiesForSubjectForUpdate {
+                subject_id,
+            } => Self::SelectActiveCredentialRecoveryAuthoritiesForSubjectForUpdate {
+                subject_id: subject_id.clone(),
+            },
             StorageLockRequirement::EnforceOpenOutOfBandChallengeDedupeUniqueness {
                 challenge_dedupe_key,
             } => Self::UseOpenOutOfBandChallengeDedupeUniqueIndex {
@@ -654,6 +785,13 @@ impl PostgresPreconditionLockStep {
                 action,
             } => Self::UseOpenPendingSubjectLifecycleActionUniqueIndex {
                 subject_id: subject_id.clone(),
+                action: *action,
+            },
+            StorageLockRequirement::EnforceOpenAdminSupportInterventionUniqueness {
+                target_credential_instance_id,
+                action,
+            } => Self::UseOpenAdminSupportInterventionUniqueIndex {
+                target_credential_instance_id: target_credential_instance_id.clone(),
                 action: *action,
             },
         }
@@ -718,10 +856,12 @@ pub enum PostgresPreconditionValidationStep {
         /// Observed used delivery idempotency keys.
         observed_used_delivery_idempotency_keys: Vec<String>,
     },
-    /// Expired open rows for this dedupe key must be closed before unique enforcement.
-    CloseExpiredOpenOutOfBandChallengesBeforeDedupeCheck {
+    /// Expired or replacement-eligible open rows must be closed before unique enforcement.
+    CloseReplaceableOpenOutOfBandChallengesBeforeDedupeCheck {
         /// Transition time.
         now: UnixSeconds,
+        /// Live challenges created at or before this timestamp may be replaced.
+        replaceable_created_at_or_before: Option<UnixSeconds>,
     },
     /// The partial unique index is the race-proof dedupe check.
     TreatOpenChallengeDedupeUniqueViolationAsPreconditionFailure,
@@ -729,6 +869,35 @@ pub enum PostgresPreconditionValidationStep {
     CredentialInstanceStillActiveWithSubject {
         /// Required subject.
         subject_id: SubjectId,
+    },
+    /// Subject must still have an acceptable credential posture after removing the target.
+    SubjectRetainsRequiredCredentialPostureAfterRemoval {
+        /// Required subject.
+        subject_id: SubjectId,
+        /// Credential being removed or disabled.
+        removed_credential_instance_id: VerifiedProofSourceId,
+        /// Reset policy role of the credential being removed.
+        removed_credential_reset_policy_role: CredentialResetPolicyRole,
+    },
+    /// Subject must still have an acceptable credential posture after replacing the target.
+    SubjectRetainsRequiredCredentialPostureAfterReplacement {
+        /// Required subject.
+        subject_id: SubjectId,
+        /// Credential being replaced.
+        replaced_credential_instance_id: VerifiedProofSourceId,
+        /// Reset policy role of the credential being replaced.
+        replaced_credential_reset_policy_role: CredentialResetPolicyRole,
+        /// Successor credential being created by the replacement.
+        successor: CredentialReplacementSuccessor,
+    },
+    /// Adding a credential must not create a collapsed ordinary/second-factor posture.
+    SubjectRetainsRequiredCredentialPostureAfterAddition {
+        /// Required subject.
+        subject_id: SubjectId,
+        /// Credential being added.
+        added_credential: CredentialInstanceMetadata,
+        /// Recovery authorities being added with the credential.
+        added_recovery_authorities: Vec<CredentialRecoveryAuthority>,
     },
     /// Expired open pending lifecycle actions must be closed before uniqueness check.
     CloseExpiredOpenPendingCredentialLifecycleActionsBeforeUniquenessCheck {
@@ -781,6 +950,45 @@ pub enum PostgresPreconditionValidationStep {
         subject_id: SubjectId,
         /// Required subject lifecycle action.
         action: SubjectLifecycleAction,
+        /// Transition time.
+        now: UnixSeconds,
+    },
+    /// Out-of-band identifier binding must be active and owned by the required subject.
+    OutOfBandIdentifierBindingActiveWithSubject {
+        /// Required subject.
+        subject_id: SubjectId,
+    },
+    /// Out-of-band identifier binding must be pending activation and owned by the required subject.
+    OutOfBandIdentifierBindingPendingActivationWithSubject {
+        /// Required subject.
+        subject_id: SubjectId,
+    },
+    /// Expired open support/admin interventions must be closed before uniqueness check.
+    CloseExpiredOpenAdminSupportInterventionsBeforeUniquenessCheck {
+        /// Transition time.
+        now: UnixSeconds,
+    },
+    /// The partial unique index is the race-proof open intervention check.
+    TreatOpenAdminSupportInterventionUniqueViolationAsPreconditionFailure,
+    /// Support/admin intervention must be open, unexpired, and target-matched.
+    AdminSupportInterventionOpenUnexpiredAndTargetMatched {
+        /// Required subject.
+        subject_id: SubjectId,
+        /// Required target credential instance.
+        target_credential_instance_id: VerifiedProofSourceId,
+        /// Required lifecycle action.
+        action: CredentialLifecycleAction,
+        /// Transition time.
+        now: UnixSeconds,
+    },
+    /// Support/admin intervention must be open, expired, and target-matched.
+    AdminSupportInterventionExpiredOpenAndTargetMatched {
+        /// Required subject.
+        subject_id: SubjectId,
+        /// Required target credential instance.
+        target_credential_instance_id: VerifiedProofSourceId,
+        /// Required lifecycle action.
+        action: CredentialLifecycleAction,
         /// Transition time.
         now: UnixSeconds,
     },
@@ -849,6 +1057,13 @@ pub enum PostgresMutationWriteStep {
         /// Tables whose child rows must be removed.
         cascades_to_tables: Vec<PostgresAuthCoreTable>,
     },
+    /// `DELETE` matching rows in one statement.
+    HardDeleteMatchingRowsWithSingleStatement {
+        /// Deleted target set.
+        target: CoreStorageTarget,
+        /// Table that stores the target set.
+        table: PostgresAuthCoreTable,
+    },
     /// `INSERT ... ON CONFLICT DO UPDATE SET cutoff = GREATEST(existing, excluded)`.
     MonotonicUpsertSubjectAuthRevocationCutoff {
         /// Subject id.
@@ -883,6 +1098,12 @@ impl PostgresMutationWriteStep {
                     .map(postgres_table_for_record_kind)
                     .collect(),
             },
+            StorageWriteRequirement::HardDeleteRowsMatching(target) => {
+                Self::HardDeleteMatchingRowsWithSingleStatement {
+                    table: PostgresAuthCoreSchemaContract::table_for_storage_target(target),
+                    target: target.clone(),
+                }
+            }
             StorageWriteRequirement::MonotonicUpsertSubjectAuthRevocationCutoff { subject_id } => {
                 Self::MonotonicUpsertSubjectAuthRevocationCutoff {
                     subject_id: subject_id.clone(),
@@ -1079,14 +1300,23 @@ fn postgres_table_for_record_kind(kind: &CoreStorageRecordKind) -> PostgresAuthC
         CoreStorageRecordKind::CredentialRecoveryAuthority => {
             PostgresAuthCoreTable::CredentialRecoveryAuthority
         }
+        CoreStorageRecordKind::SubjectLifecycleAuthority => {
+            PostgresAuthCoreTable::SubjectLifecycleAuthority
+        }
         CoreStorageRecordKind::LifecycleAuthoritySource => {
             PostgresAuthCoreTable::LifecycleAuthoritySource
+        }
+        CoreStorageRecordKind::OutOfBandIdentifierBinding => {
+            PostgresAuthCoreTable::OutOfBandIdentifierBinding
         }
         CoreStorageRecordKind::PendingCredentialLifecycleAction => {
             PostgresAuthCoreTable::PendingCredentialLifecycleAction
         }
         CoreStorageRecordKind::PendingSubjectLifecycleAction => {
             PostgresAuthCoreTable::PendingSubjectLifecycleAction
+        }
+        CoreStorageRecordKind::AdminSupportIntervention => {
+            PostgresAuthCoreTable::AdminSupportIntervention
         }
         CoreStorageRecordKind::AuditEvent => PostgresAuthCoreTable::AuditEvent,
         CoreStorageRecordKind::CoreDurableEffectCommand => {

@@ -11,7 +11,9 @@
 //! use paranoid::db::BootstrapConfig;
 //! use paranoid::kv::{Key, Ttl};
 //!
-//! let stores = BootstrapConfig::default().migrate_schema(&pool).await?;
+//! let stores = BootstrapConfig::from_schema_name_text("__paranoid")?
+//!     .migrate_schema(&pool)
+//!     .await?;
 //! let store = stores.kv;
 //!
 //! let key = Key::from_parts(["account", "acct_123", "status"])?;

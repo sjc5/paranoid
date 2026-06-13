@@ -136,6 +136,153 @@ fn online_guessable_message_signature_method_contract_requires_weak_gate_without
 }
 
 #[test]
+fn post_alpha_webauthn_passkey_contract_hooks_model_origin_bound_public_key_requirements() {
+    let method = ProofMethodDeclaration::new(ProofFamily::OriginBoundPublicKey, "webauthn_passkey")
+        .expect("WebAuthn method declaration");
+    let contract = MethodAdapterContract::for_method(method.clone());
+
+    assert_eq!(contract.method(), &method);
+    assert_eq!(contract.ownership(), MethodAdapterOwnership::PluginOwned);
+    assert_eq!(
+        method.semantics(),
+        ProofFamily::OriginBoundPublicKey.semantics()
+    );
+    assert!(method.supports_use(ProofUse::ContributeToFullAuthentication));
+    assert!(method.supports_use(ProofUse::SatisfyStepUp));
+    assert!(!method.supports_use(ProofUse::RecoverOrReplaceCredential));
+    assert!(!method.uses_weak_attempt_failure_budget());
+    assert_eq!(
+        contract.challenge_cookie().kind(),
+        MethodChallengeCookieKind::EncryptedOriginBoundPublicKeyChallenge
+    );
+    assert!(
+        contract
+            .challenge_cookie()
+            .fields()
+            .contains(&MethodChallengeCookieField::OriginOrRelyingPartyId)
+    );
+    assert!(
+        contract
+            .challenge_cookie()
+            .fields()
+            .contains(&MethodChallengeCookieField::ChallengeNonce)
+    );
+    assert_eq!(
+        contract.pre_state_load(),
+        &[
+            MethodPreStateLoadResponsibility::EncryptedChallengeCookie,
+            MethodPreStateLoadResponsibility::OriginBoundPublicKeyAssertion,
+        ]
+    );
+    assert!(contract.post_state_load().is_empty());
+    assert_eq!(
+        contract.verification().completion_input(),
+        MethodCompletionInputKind::OriginBoundPublicKeyAssertion
+    );
+    assert_eq!(
+        contract.verification().verified_proof_identity(),
+        MethodVerifiedProofIdentitySource::EncryptedChallengeCookie
+    );
+    assert_eq!(
+        contract.verification().subject_binding(),
+        MethodVerifiedProofSubjectBinding::MethodMayResolve
+    );
+    assert_eq!(contract.postgres_state().len(), 1);
+    assert_eq!(
+        contract.postgres_state()[0].purpose(),
+        MethodPostgresStatePurpose::VerifierRegistry
+    );
+    assert_eq!(
+        contract.postgres_state()[0].key_policy(),
+        MethodPostgresStateKeyPolicy::SubjectAndVerifierId
+    );
+    assert_eq!(
+        contract.postgres_state()[0].mutation_boundary(),
+        MethodPostgresStateMutationBoundary::ReadOnlyBeforeCommandConstruction
+    );
+    assert!(contract.durable_effects().is_empty());
+    assert_eq!(
+        contract.commit_work().success_requirement(),
+        MethodCommitWorkSuccessRequirement::OptionalWhenMethodHasPrivateStateChange
+    );
+}
+
+#[test]
+fn post_alpha_oidc_and_saml_contract_hooks_model_federated_identity_requirements() {
+    for method_label in ["oidc_google", "saml_enterprise"] {
+        let method =
+            ProofMethodDeclaration::new(ProofFamily::FederatedIdentityAssertion, method_label)
+                .expect("federated method declaration");
+        let contract = MethodAdapterContract::for_method(method.clone());
+
+        assert_eq!(contract.method(), &method);
+        assert_eq!(contract.ownership(), MethodAdapterOwnership::PluginOwned);
+        assert_eq!(
+            method.semantics(),
+            ProofFamily::FederatedIdentityAssertion.semantics()
+        );
+        assert!(method.supports_use(ProofUse::ContributeToFullAuthentication));
+        assert!(method.supports_use(ProofUse::SatisfyStepUp));
+        assert!(!method.supports_use(ProofUse::RecoverOrReplaceCredential));
+        assert!(!method.uses_weak_attempt_failure_budget());
+        assert_eq!(
+            contract.challenge_cookie().kind(),
+            MethodChallengeCookieKind::EncryptedFederatedIdentityState
+        );
+        assert!(
+            contract
+                .challenge_cookie()
+                .fields()
+                .contains(&MethodChallengeCookieField::FederatedIssuer)
+        );
+        assert!(
+            contract
+                .challenge_cookie()
+                .fields()
+                .contains(&MethodChallengeCookieField::ChallengeNonce)
+        );
+        assert_eq!(
+            contract.pre_state_load(),
+            &[
+                MethodPreStateLoadResponsibility::EncryptedChallengeCookie,
+                MethodPreStateLoadResponsibility::FederatedIdentityAssertion,
+            ]
+        );
+        assert!(contract.post_state_load().is_empty());
+        assert_eq!(
+            contract.verification().completion_input(),
+            MethodCompletionInputKind::FederatedIdentityAssertion
+        );
+        assert_eq!(
+            contract.verification().verified_proof_identity(),
+            MethodVerifiedProofIdentitySource::EncryptedChallengeCookie
+        );
+        assert_eq!(
+            contract.verification().subject_binding(),
+            MethodVerifiedProofSubjectBinding::MethodMayResolve
+        );
+        assert_eq!(contract.postgres_state().len(), 1);
+        assert_eq!(
+            contract.postgres_state()[0].purpose(),
+            MethodPostgresStatePurpose::FederatedIdentitySubjectMapping
+        );
+        assert_eq!(
+            contract.postgres_state()[0].key_policy(),
+            MethodPostgresStateKeyPolicy::ExternalIssuerAndSubject
+        );
+        assert_eq!(
+            contract.postgres_state()[0].mutation_boundary(),
+            MethodPostgresStateMutationBoundary::ReadOnlyBeforeCommandConstruction
+        );
+        assert!(contract.durable_effects().is_empty());
+        assert_eq!(
+            contract.commit_work().success_requirement(),
+            MethodCommitWorkSuccessRequirement::OptionalWhenMethodHasPrivateStateChange
+        );
+    }
+}
+
+#[test]
 fn active_method_acceptance_requires_source_for_credential_or_external_authority_proofs() {
     for family in [
         ProofFamily::MessageSignature,
@@ -202,12 +349,12 @@ fn recovery_code_contract_requires_success_commit_work_and_keeps_response_effect
     );
     assert_eq!(
         contract.verification().subject_binding(),
-        MethodVerifiedProofSubjectBinding::KnownAttemptSubject
+        MethodVerifiedProofSubjectBinding::MethodMayResolve
     );
     assert!(contract.pre_state_load().is_empty());
     assert_eq!(
         contract.post_state_load(),
-        &[MethodPostStateLoadResponsibility::VerifyOneTimeRecoveryProofForKnownSubject]
+        &[MethodPostStateLoadResponsibility::VerifyOneTimeRecoveryProofAndConsume]
     );
     assert_eq!(contract.postgres_state().len(), 1);
     assert_eq!(
@@ -371,6 +518,19 @@ fn trusted_device_method_contract_is_core_owned_not_plugin_lifecycle() {
 
 #[test]
 fn method_contract_keeps_proof_stack_and_lifecycle_authority_in_core() {
+    let forbidden = [
+        MethodAdapterForbiddenResponsibility::MutateCoreSessionLifecycle,
+        MethodAdapterForbiddenResponsibility::MutateTrustedDeviceLifecycle,
+        MethodAdapterForbiddenResponsibility::EmitAuthCookies,
+        MethodAdapterForbiddenResponsibility::CycleCsrfTokens,
+        MethodAdapterForbiddenResponsibility::DecideProofStackSufficiency,
+        MethodAdapterForbiddenResponsibility::OverrideCoreProofSemantics,
+        MethodAdapterForbiddenResponsibility::ConstructCoreCompletionCommandDirectly,
+        MethodAdapterForbiddenResponsibility::MarkStatelessFastFailVerified,
+        MethodAdapterForbiddenResponsibility::AppendCoreAuditEvents,
+        MethodAdapterForbiddenResponsibility::DeliverExternalEffectsBeforeCommit,
+    ];
+
     for family in [
         ProofFamily::OutOfBandCode,
         ProofFamily::MessageSignature,
@@ -381,33 +541,7 @@ fn method_contract_keeps_proof_stack_and_lifecycle_authority_in_core() {
     ] {
         let contract = MethodAdapterContract::for_method(proof_method(family));
 
-        assert!(
-            contract
-                .forbidden()
-                .contains(&MethodAdapterForbiddenResponsibility::DecideProofStackSufficiency)
-        );
-        assert!(
-            contract
-                .forbidden()
-                .contains(&MethodAdapterForbiddenResponsibility::OverrideCoreProofSemantics)
-        );
-        assert!(
-            contract
-                .forbidden()
-                .contains(&MethodAdapterForbiddenResponsibility::MutateCoreSessionLifecycle)
-        );
-        assert!(
-            contract.forbidden().contains(
-                &MethodAdapterForbiddenResponsibility::DeliverExternalEffectsBeforeCommit
-            )
-        );
-        assert!(contract.forbidden().contains(
-            &MethodAdapterForbiddenResponsibility::ConstructCoreCompletionCommandDirectly
-        ));
-        assert!(
-            contract
-                .forbidden()
-                .contains(&MethodAdapterForbiddenResponsibility::MarkStatelessFastFailVerified)
-        );
+        assert_eq!(contract.ownership(), MethodAdapterOwnership::PluginOwned);
+        assert_eq!(contract.forbidden(), forbidden.as_slice());
     }
 }

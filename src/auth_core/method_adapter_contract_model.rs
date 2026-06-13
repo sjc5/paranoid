@@ -1,4 +1,4 @@
-use super::*;
+use super::prelude::*;
 
 /// Contract for one auth method adapter.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -173,8 +173,8 @@ pub enum MethodPreStateLoadResponsibility {
 pub enum MethodPostStateLoadResponsibility {
     /// Verify configured secret proof for the active-proof attempt's known subject.
     VerifyConfiguredSecretProofForKnownSubject,
-    /// Verify one-time recovery proof for the active-proof attempt's known subject.
-    VerifyOneTimeRecoveryProofForKnownSubject,
+    /// Verify one-time recovery proof and consume the stored credential before success.
+    VerifyOneTimeRecoveryProofAndConsume,
 }
 
 /// Method verification output contract.
@@ -221,7 +221,7 @@ impl MethodVerificationContract {
             ProofFamily::RecoveryCode => Self {
                 completion_input: MethodCompletionInputKind::RecoveryCredential,
                 verified_proof_identity: MethodVerifiedProofIdentitySource::MethodDeclaration,
-                subject_binding: MethodVerifiedProofSubjectBinding::KnownAttemptSubject,
+                subject_binding: MethodVerifiedProofSubjectBinding::MethodMayResolve,
             },
             ProofFamily::TrustedDevice => Self {
                 completion_input: MethodCompletionInputKind::PassiveTrustedDeviceCredential,
@@ -701,7 +701,7 @@ fn post_state_load_responsibilities_for_method(
             vec![MethodPostStateLoadResponsibility::VerifyConfiguredSecretProofForKnownSubject]
         }
         ProofFamily::RecoveryCode => {
-            vec![MethodPostStateLoadResponsibility::VerifyOneTimeRecoveryProofForKnownSubject]
+            vec![MethodPostStateLoadResponsibility::VerifyOneTimeRecoveryProofAndConsume]
         }
         ProofFamily::OutOfBandCode
         | ProofFamily::MessageSignature

@@ -1,4 +1,4 @@
-use super::*;
+use super::prelude::*;
 
 /// Decoded request cookies available before authoritative state is loaded.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -136,6 +136,23 @@ impl CommandLoadedStateContract {
     ) -> Result<Self, Error> {
         config.validate()?;
         super::active_proof_support::validate_known_subject_active_proof_method(&response.method)?;
+        let mut contract = Self::default();
+        contract.push_active_proof_attempt_requirements(attempt_id);
+        contract
+            .push_active_proof_continuation_requirement_if_presented(presented_cookies, attempt_id);
+        Ok(contract)
+    }
+
+    pub fn for_recovery_credential_active_proof_method_response(
+        config: &Config,
+        response: &CompleteRecoveryCredentialActiveProofMethodResponse,
+        attempt_id: &ActiveProofAttemptId,
+        presented_cookies: &PresentedAuthCookies,
+    ) -> Result<Self, Error> {
+        config.validate()?;
+        super::active_proof_support::validate_recovery_credential_active_proof_method(
+            &response.method,
+        )?;
         let mut contract = Self::default();
         contract.push_active_proof_attempt_requirements(attempt_id);
         contract
@@ -358,12 +375,39 @@ impl CommandLoadedStateContract {
             }
             Command::PlanCredentialReset(_) => {}
             Command::ExecuteCredentialReset(_) => {}
+            Command::PlanCredentialReplacement(_) => {}
+            Command::ExecuteCredentialReplacement(_) => {}
+            Command::PlanCredentialRemoval(_) => {}
+            Command::ExecuteCredentialRemoval(_) => {}
+            Command::PlanCredentialRegeneration(_) => {}
+            Command::ExecuteCredentialRegeneration(_) => {}
+            Command::ExecuteCredentialRotation(_) => {}
+            Command::PlanOutOfBandIdentifierChange(_) => {}
+            Command::ExecuteOutOfBandIdentifierChange(_) => {}
             Command::CancelPendingCredentialReset(_) => {}
+            Command::AddCredential(_) => {}
             Command::ExecuteNonResetPendingCredentialLifecycleAction(_) => {}
             Command::CancelNonResetPendingCredentialLifecycleAction(_) => {}
+            Command::RequestAdminSupportIntervention(_) => {}
+            Command::ApproveAdminSupportIntervention(_) => {}
+            Command::DenyAdminSupportIntervention(_) => {}
+            Command::ExpireAdminSupportIntervention(_) => {}
+            Command::PlanAdminSupportCredentialLifecycleIntervention(_) => {}
             Command::ScheduleSubjectAuthStateDeletion(_) => {}
             Command::ExecutePendingSubjectAuthStateDeletion(_) => {}
             Command::CancelPendingSubjectAuthStateDeletion(_) => {}
+            Command::ExecutePendingOutOfBandIdentifierChange(_) => {}
+            Command::CancelPendingOutOfBandIdentifierChange(_) => {}
+            Command::ReserveOutOfBandIdentifierChangeCandidateBinding(command) => {
+                contract.push_active_proof_attempt_requirements(&command.attempt_id);
+                contract.push_active_proof_continuation_requirement_if_presented(
+                    presented,
+                    &command.attempt_id,
+                );
+                contract.push(LoadedStateRequirement::ActiveProofChallenge {
+                    challenge_id: command.challenge_id.clone(),
+                });
+            }
         }
         Ok(contract)
     }

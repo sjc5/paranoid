@@ -39,6 +39,19 @@ fn auth_ids_are_bounded() {
 }
 
 #[test]
+fn subject_ids_are_opaque_bytes_with_redacted_debug_output() {
+    let subject_id =
+        SubjectId::from_bytes(b"alice@example.invalid".to_vec()).expect("subject id bytes");
+
+    assert_eq!(subject_id.as_bytes(), b"alice@example.invalid");
+
+    let debug_output = format!("{subject_id:?}");
+    assert!(debug_output.contains("byte_len"));
+    assert!(!debug_output.contains("alice"));
+    assert!(!debug_output.contains("example"));
+}
+
+#[test]
 fn proof_method_labels_are_bounded_and_identifier_shaped() {
     let error = ProofSummary::new(
         ProofFamily::OutOfBandCode,
@@ -112,6 +125,248 @@ fn active_proof_method_challenge_state_is_non_empty_and_bounded() {
             input_name: "active-proof method challenge state",
             max_bytes: ACTIVE_PROOF_METHOD_CHALLENGE_STATE_MAX_BYTES,
         }
+    );
+}
+
+#[test]
+fn active_proof_method_public_payloads_are_non_empty_and_bounded() {
+    let error = ActiveProofMethodChallengePresentation::try_from_bytes(Vec::new())
+        .expect_err("method challenge presentation must not be empty");
+
+    assert_eq!(error, Error::EmptyActiveProofMethodChallengePresentation);
+
+    let error = ActiveProofMethodChallengePresentation::try_from_bytes(vec![
+        0_u8;
+        ACTIVE_PROOF_METHOD_CHALLENGE_PRESENTATION_MAX_BYTES
+            + 1
+    ])
+    .expect_err("method challenge presentation must be resource-bounded");
+
+    assert_eq!(
+        error,
+        Error::InputTooLong {
+            input_name: "active-proof method challenge presentation",
+            max_bytes: ACTIVE_PROOF_METHOD_CHALLENGE_PRESENTATION_MAX_BYTES,
+        }
+    );
+
+    let error = ActiveProofMethodChallengeRequestPayload::try_from_bytes(Vec::new())
+        .expect_err("method challenge request payload must not be empty");
+
+    assert_eq!(error, Error::EmptyActiveProofMethodChallengeRequestPayload);
+
+    let error = ActiveProofMethodChallengeRequestPayload::try_from_bytes(vec![
+        0_u8;
+        ACTIVE_PROOF_METHOD_CHALLENGE_REQUEST_PAYLOAD_MAX_BYTES
+            + 1
+    ])
+    .expect_err("method challenge request payload must be resource-bounded");
+
+    assert_eq!(
+        error,
+        Error::InputTooLong {
+            input_name: "active-proof method challenge request payload",
+            max_bytes: ACTIVE_PROOF_METHOD_CHALLENGE_REQUEST_PAYLOAD_MAX_BYTES,
+        }
+    );
+
+    let error = ActiveProofMethodResponsePayload::try_from_bytes(Vec::new())
+        .expect_err("method response payload must not be empty");
+
+    assert_eq!(error, Error::EmptyActiveProofMethodResponsePayload);
+
+    let error = ActiveProofMethodResponsePayload::try_from_bytes(vec![
+        0_u8;
+        ACTIVE_PROOF_METHOD_RESPONSE_PAYLOAD_MAX_BYTES
+            + 1
+    ])
+    .expect_err("method response payload must be resource-bounded");
+
+    assert_eq!(
+        error,
+        Error::InputTooLong {
+            input_name: "active-proof method response payload",
+            max_bytes: ACTIVE_PROOF_METHOD_RESPONSE_PAYLOAD_MAX_BYTES,
+        }
+    );
+}
+
+#[test]
+fn active_proof_secret_responses_are_non_empty_bounded_and_debug_redacted() {
+    let error = KnownSubjectActiveProofSecretResponse::try_from_bytes(Vec::new())
+        .expect_err("secret responses must not be empty");
+
+    assert_eq!(error, Error::EmptyKnownSubjectActiveProofSecretResponse);
+
+    let error = KnownSubjectActiveProofSecretResponse::try_from_bytes(vec![
+        0_u8;
+        ACTIVE_PROOF_METHOD_RESPONSE_PAYLOAD_MAX_BYTES
+            + 1
+    ])
+    .expect_err("secret responses must be resource-bounded");
+
+    assert_eq!(
+        error,
+        Error::InputTooLong {
+            input_name: "known-subject active-proof secret response",
+            max_bytes: ACTIVE_PROOF_METHOD_RESPONSE_PAYLOAD_MAX_BYTES,
+        }
+    );
+
+    let response = KnownSubjectActiveProofSecretResponse::try_from_bytes(
+        b"submitted-recovery-code".as_slice(),
+    )
+    .expect("secret response");
+    let debug = format!("{response:?}");
+    assert!(
+        !debug.contains("submitted-recovery-code"),
+        "secret response debug output must never include submitted secret material"
+    );
+    assert!(
+        debug.contains("len"),
+        "secret response debug output should expose only non-secret shape"
+    );
+}
+
+#[test]
+fn challenge_issue_preflight_responses_are_non_empty_bounded_and_debug_redacted() {
+    let error = ChallengeIssuePreflightResponse::try_from_bytes(
+        WeakProofGateKind::ProofOfWork,
+        "hashcash",
+        Vec::new(),
+    )
+    .expect_err("challenge-issue preflight payloads must not be empty");
+
+    assert_eq!(error, Error::EmptyWeakProofGateResponsePayload);
+
+    let error = ChallengeIssuePreflightResponse::try_from_bytes(
+        WeakProofGateKind::ProofOfWork,
+        "hashcash",
+        vec![0_u8; WEAK_PROOF_GATE_RESPONSE_PAYLOAD_MAX_BYTES + 1],
+    )
+    .expect_err("challenge-issue preflight payloads must be resource-bounded");
+
+    assert_eq!(
+        error,
+        Error::InputTooLong {
+            input_name: "weak-proof gate response payload",
+            max_bytes: WEAK_PROOF_GATE_RESPONSE_PAYLOAD_MAX_BYTES,
+        }
+    );
+
+    let error = ChallengeIssuePreflightResponse::try_from_bytes(
+        WeakProofGateKind::ProofOfWork,
+        "hash cash",
+        b"preflight-gate-solution".as_slice(),
+    )
+    .expect_err("challenge-issue preflight method labels must be identifier-shaped");
+
+    assert_eq!(
+        error,
+        Error::InvalidIdentifierString {
+            input_name: "weak-proof gate method label",
+        }
+    );
+
+    let response = ChallengeIssuePreflightResponse::try_from_bytes(
+        WeakProofGateKind::ProofOfWork,
+        "hashcash",
+        b"preflight-gate-solution".as_slice(),
+    )
+    .expect("preflight response");
+    let debug = format!("{response:?}");
+    assert!(
+        !debug.contains("preflight-gate-solution"),
+        "preflight debug output must never include gate response material"
+    );
+    assert!(
+        debug.contains("payload_len"),
+        "preflight debug output should expose only non-secret shape"
+    );
+}
+
+#[test]
+fn credential_method_payloads_are_non_empty_bounded_and_debug_redacted() {
+    let error = CredentialResetMethodPayload::try_from_bytes(Vec::new())
+        .expect_err("credential reset method payloads must not be empty");
+
+    assert_eq!(error, Error::EmptyCredentialResetMethodPayload);
+
+    let error = CredentialResetMethodPayload::try_from_bytes(vec![
+        0_u8;
+        METHOD_COMMIT_PAYLOAD_MAX_BYTES
+            + 1
+    ])
+    .expect_err("credential reset method payloads must be resource-bounded");
+
+    assert_eq!(
+        error,
+        Error::InputTooLong {
+            input_name: "credential reset method payload",
+            max_bytes: METHOD_COMMIT_PAYLOAD_MAX_BYTES,
+        }
+    );
+
+    let reset = CredentialResetMethodPayload::try_from_bytes(b"reset-secret".as_slice())
+        .expect("reset payload");
+    assert!(
+        !format!("{reset:?}").contains("reset-secret"),
+        "credential reset payload debug output must not include opaque payload bytes"
+    );
+
+    let error = CredentialLifecycleMethodPayload::try_from_bytes(Vec::new())
+        .expect_err("credential lifecycle method payloads must not be empty");
+
+    assert_eq!(error, Error::EmptyCredentialLifecycleMethodPayload);
+
+    let error = CredentialLifecycleMethodPayload::try_from_bytes(vec![
+        0_u8;
+        METHOD_COMMIT_PAYLOAD_MAX_BYTES
+            + 1
+    ])
+    .expect_err("credential lifecycle method payloads must be resource-bounded");
+
+    assert_eq!(
+        error,
+        Error::InputTooLong {
+            input_name: "credential lifecycle method payload",
+            max_bytes: METHOD_COMMIT_PAYLOAD_MAX_BYTES,
+        }
+    );
+
+    let lifecycle =
+        CredentialLifecycleMethodPayload::try_from_bytes(b"lifecycle-secret".as_slice())
+            .expect("lifecycle payload");
+    assert!(
+        !format!("{lifecycle:?}").contains("lifecycle-secret"),
+        "credential lifecycle payload debug output must not include opaque payload bytes"
+    );
+
+    let error = CredentialCreationMethodPayload::try_from_bytes(Vec::new())
+        .expect_err("credential creation method payloads must not be empty");
+
+    assert_eq!(error, Error::EmptyCredentialCreationMethodPayload);
+
+    let error = CredentialCreationMethodPayload::try_from_bytes(vec![
+        0_u8;
+        METHOD_COMMIT_PAYLOAD_MAX_BYTES
+            + 1
+    ])
+    .expect_err("credential creation method payloads must be resource-bounded");
+
+    assert_eq!(
+        error,
+        Error::InputTooLong {
+            input_name: "credential creation method payload",
+            max_bytes: METHOD_COMMIT_PAYLOAD_MAX_BYTES,
+        }
+    );
+
+    let creation = CredentialCreationMethodPayload::try_from_bytes(b"creation-secret".as_slice())
+        .expect("creation payload");
+    assert!(
+        !format!("{creation:?}").contains("creation-secret"),
+        "credential creation payload debug output must not include opaque payload bytes"
     );
 }
 

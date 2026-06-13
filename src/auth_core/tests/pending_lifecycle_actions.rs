@@ -86,6 +86,7 @@ fn non_delayed_credential_actions_do_not_use_the_credential_pending_action_contr
     for action in [
         CredentialLifecycleAction::Create,
         CredentialLifecycleAction::Disable,
+        CredentialLifecycleAction::Rotate,
         CredentialLifecycleAction::RecoverSubjectAccess,
     ] {
         assert_eq!(action.pending_credential_action_contract(), None);
@@ -118,6 +119,37 @@ fn subject_deletion_pending_action_is_not_credential_targeted() {
     );
     assert_eq!(
         deletion.revocation(),
+        PendingLifecycleActionRevocation::SubjectWideOnExecution
+    );
+}
+
+#[test]
+fn out_of_band_identifier_change_pending_action_is_not_credential_targeted() {
+    let identifier_change =
+        SubjectLifecycleAction::ChangeOutOfBandIdentifier.pending_subject_action_contract();
+
+    assert_eq!(
+        identifier_change.target(),
+        PendingLifecycleActionTarget::SubjectOutOfBandIdentifierBinding
+    );
+    assert_eq!(
+        identifier_change.execution(),
+        PendingLifecycleActionExecution::CoreOutOfBandIdentifierBinding
+    );
+    assert_eq!(
+        identifier_change.credential_state_after_execution(),
+        PendingCredentialStateAfterExecution::NoCredentialTarget
+    );
+    assert_eq!(
+        identifier_change.cancellation(),
+        PendingLifecycleActionCancellation::ExplicitWhileUnexpiredWithNotice
+    );
+    assert_eq!(
+        identifier_change.expiry(),
+        PendingLifecycleActionExpiry::DeadlineDerivedQuietCleanup
+    );
+    assert_eq!(
+        identifier_change.revocation(),
         PendingLifecycleActionRevocation::SubjectWideOnExecution
     );
 }

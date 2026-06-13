@@ -1,17 +1,30 @@
 use super::*;
 
+use std::convert::Infallible;
 use std::future::Future;
+use std::num::NonZeroU32;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::LazyLock;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::task::{Context, Poll};
+use std::time::Duration;
 
 use super::super::email_otp_method::{
-    EmailOtpCompleteChallengeResponse, EmailOtpIssueChallenge, EmailOtpResendChallenge,
+    EMAIL_OTP_DELIVERY_QUEUE_TASK_NAME, EmailOtpCompleteChallengeResponse, EmailOtpResendChallenge,
+    PostgresEmailOtpDeliveryMessageDeliverer, PostgresEmailOtpDeliveryMessageRequest,
     PostgresEmailOtpMethodPlugin, PostgresEmailOtpMethodPluginConfig,
     PostgresEmailOtpSubjectResolver, PostgresEmailOtpVerifiedIdentifier,
 };
-use super::super::postgres_method_runtime::PostgresAuthMethodPlugin;
+use super::super::postgres_durable_effect_queue::{
+    PostgresAuthDurableEffectQueueDispatchError, PostgresAuthDurableEffectQueueDispatchSummary,
+};
+use super::super::postgres_method_runtime::{
+    PostgresAuthMethodDurableEffectQueueRegistrationError, PostgresAuthMethodPlugin,
+    enqueue_no_method_durable_effects_to_queue_in_current_transaction,
+    register_no_queue_handlers_for_method_durable_effects,
+};
 use super::super::postgres_password_derived_signature_method::{
     PasswordDerivedSignatureVerifierForTest, PostgresPasswordDerivedSignatureMethodPlugin,
     PostgresPasswordDerivedSignatureMethodPluginConfig,
@@ -27,14 +40,20 @@ use crate::crypto::{
     PASSWORD_KDF_MIN_ITERATIONS, PASSWORD_KDF_MIN_MEMORY_COST_KIB, PASSWORD_KDF_SALT_SIZE,
     PasswordKdfParams, PasswordKdfSalt, SecretBytes,
 };
+use crate::db::queue;
 use crate::db::{
     BootstrapConfig, DatabaseOperationObserver, PgIdentifier, PgQualifiedTableName, PgSchemaName,
-    Pool, PoolConfig, Tx, WritePool, pooler_safe_query, pooler_safe_query_as,
+    Pool, PoolConfig, Tx, WritePool, WriteTx, pooler_safe_query, pooler_safe_query_as,
     pooler_safe_query_scalar, unparameterized_simple_query,
 };
-use http::HeaderMap;
-use http::header::{COOKIE, HeaderValue};
+use bytes::Bytes;
+use data_encoding::BASE64URL_NOPAD;
+use http::header::{CONTENT_TYPE, COOKIE, HeaderValue};
+use http::{HeaderMap, Method, Request, StatusCode};
+use http_body_util::Full;
 use secrecy::SecretString;
+use tower_layer::Layer;
+use tower_service::Service;
 
 static AUTH_POSTGRES_RUNTIME_TEST_COUNTER: AtomicU64 = AtomicU64::new(1);
 static AUTH_POSTGRES_RUNTIME_TEST_LOCK: LazyLock<tokio::sync::Mutex<()>> =
@@ -74,12 +93,116 @@ macro_rules! auth_runtime_test_fetch_optional_in_transaction {
     }};
 }
 
+fn auth_runtime_test_json_response_body(response: &http::Response<Vec<u8>>) -> serde_json::Value {
+    serde_json::from_slice(response.body()).expect("mounted auth response body must be JSON")
+}
+
+#[derive(Clone, Copy)]
+struct MountedAuthRequestStateEchoService;
+
+impl Service<Request<Full<Bytes>>> for MountedAuthRequestStateEchoService {
+    type Response = http::Response<Vec<u8>>;
+    type Error = Infallible;
+    type Future = Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>>>>;
+
+    fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        Poll::Ready(Ok(()))
+    }
+
+    fn call(&mut self, request: Request<Full<Bytes>>) -> Self::Future {
+        let state = request
+            .extensions()
+            .get::<MountedAuthRequestState>()
+            .cloned()
+            .expect("mounted auth request state extension");
+        Box::pin(async move {
+            let body = match state.outcome() {
+                MountedAuthRequestResolutionOutcome::Authenticated { .. } => "authenticated",
+                MountedAuthRequestResolutionOutcome::NeedsStepUp { .. } => "needs_step_up",
+                MountedAuthRequestResolutionOutcome::NeedsActiveProofFromTrustedDevice {
+                    ..
+                } => "needs_active_proof_from_trusted_device",
+                MountedAuthRequestResolutionOutcome::NeedsFullAuthentication => {
+                    "needs_full_authentication"
+                }
+            };
+            Ok(http::Response::new(body.as_bytes().to_vec()))
+        })
+    }
+}
+
+#[derive(Clone)]
+struct RecordingPostgresMountedSubjectMapper {
+    recorded: Arc<Mutex<Vec<MountedAuthApplicationSubjectMappingRequest>>>,
+}
+
+impl RecordingPostgresMountedSubjectMapper {
+    fn new(recorded: Arc<Mutex<Vec<MountedAuthApplicationSubjectMappingRequest>>>) -> Self {
+        Self { recorded }
+    }
+}
+
+impl MountedAuthApplicationSubjectMapper for RecordingPostgresMountedSubjectMapper {
+    type ApplicationSubject = String;
+    type Error = Infallible;
+
+    fn map_application_subject<'a>(
+        &'a self,
+        request: MountedAuthApplicationSubjectMappingRequest,
+    ) -> Pin<Box<dyn Future<Output = Result<Self::ApplicationSubject, Self::Error>> + 'a>> {
+        Box::pin(async move {
+            self.recorded
+                .lock()
+                .expect("record mapped application subject requests")
+                .push(request);
+            Ok("mapped-application-subject".to_owned())
+        })
+    }
+}
+
+#[derive(Clone, Copy)]
+struct MountedAuthMappedApplicationSubjectEchoService;
+
+impl Service<Request<Full<Bytes>>> for MountedAuthMappedApplicationSubjectEchoService {
+    type Response = http::Response<Vec<u8>>;
+    type Error = Infallible;
+    type Future = Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>>>>;
+
+    fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        Poll::Ready(Ok(()))
+    }
+
+    fn call(&mut self, request: Request<Full<Bytes>>) -> Self::Future {
+        let mapped = request
+            .extensions()
+            .get::<MountedAuthMappedApplicationSubject<String>>()
+            .expect("mapped application subject extension")
+            .clone();
+        let request_state = request
+            .extensions()
+            .get::<MountedAuthRequestState>()
+            .expect("mounted auth request state extension")
+            .clone();
+        Box::pin(async move {
+            assert!(matches!(
+                request_state.outcome(),
+                MountedAuthRequestResolutionOutcome::Authenticated { .. }
+            ));
+            Ok(http::Response::new(
+                mapped.application_subject().as_bytes().to_vec(),
+            ))
+        })
+    }
+}
+
 struct PostgresRuntimeTestHarness {
+    write_pool: WritePool,
     pool: Pool,
     database_operation_observer: DatabaseOperationObserver,
     store_config: super::super::postgres_store::PostgresAuthStoreConfig,
     runtime: super::super::postgres_runtime::PostgresAuthWebRuntime,
     schema: PgSchemaName,
+    method_registry: Option<Arc<super::super::postgres_method_runtime::PostgresAuthMethodRegistry>>,
     method_plugin: Option<Arc<TestPostgresAuthMethodPlugin>>,
     email_otp_plugin: Option<Arc<PostgresEmailOtpMethodPlugin>>,
     totp_plugin: Option<Arc<PostgresTotpMethodPlugin<TestTotpCodeVerifier>>>,
@@ -92,6 +215,248 @@ struct FirstPartyMethodSelection {
     include_totp_plugin: bool,
     include_recovery_code_plugin: bool,
     include_password_derived_signature_plugin: bool,
+}
+
+fn recovery_code_id_for_runtime_test(tag: u8) -> [u8; 32] {
+    [tag; 32]
+}
+
+struct RecordingMountedSupportStaffAuthorizer {
+    authorization: Arc<Mutex<MountedAdminSupportStaffAuthorization>>,
+    recorded_intervention_request_authorizations:
+        Arc<Mutex<Vec<MountedAdminSupportInterventionRequestVerificationRequest>>>,
+    recorded_requests: Arc<Mutex<Vec<MountedAdminSupportStaffVerificationRequest>>>,
+}
+
+impl RecordingMountedSupportStaffAuthorizer {
+    fn new(authorization: MountedAdminSupportStaffAuthorization) -> Self {
+        Self {
+            authorization: Arc::new(Mutex::new(authorization)),
+            recorded_intervention_request_authorizations: Arc::new(Mutex::new(Vec::new())),
+            recorded_requests: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+
+    fn set_authorization(&self, authorization: MountedAdminSupportStaffAuthorization) {
+        *self
+            .authorization
+            .lock()
+            .expect("staff authorization mutex poisoned") = authorization;
+    }
+
+    fn recorded_intervention_request_authorizations(
+        &self,
+    ) -> Vec<MountedAdminSupportInterventionRequestVerificationRequest> {
+        self.recorded_intervention_request_authorizations
+            .lock()
+            .expect("staff intervention request authorization mutex poisoned")
+            .clone()
+    }
+
+    fn recorded_requests(&self) -> Vec<MountedAdminSupportStaffVerificationRequest> {
+        self.recorded_requests
+            .lock()
+            .expect("staff authorization request mutex poisoned")
+            .clone()
+    }
+}
+
+struct RecordingCoreAuthOutOfBandMessageDeliverer {
+    result: Result<(), CoreAuthDurableEffectDeliveryError>,
+    recorded_requests: Arc<Mutex<Vec<CoreAuthOutOfBandMessageDeliveryRequest>>>,
+}
+
+impl RecordingCoreAuthOutOfBandMessageDeliverer {
+    fn new(result: Result<(), CoreAuthDurableEffectDeliveryError>) -> Self {
+        Self {
+            result,
+            recorded_requests: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+
+    fn recorded_requests(&self) -> Vec<CoreAuthOutOfBandMessageDeliveryRequest> {
+        self.recorded_requests
+            .lock()
+            .expect("out-of-band delivery request mutex poisoned")
+            .clone()
+    }
+}
+
+impl CoreAuthOutOfBandMessageDeliverer for RecordingCoreAuthOutOfBandMessageDeliverer {
+    fn deliver_out_of_band_message<'a>(
+        &'a self,
+        request: CoreAuthOutOfBandMessageDeliveryRequest,
+    ) -> Pin<Box<dyn Future<Output = Result<(), CoreAuthDurableEffectDeliveryError>> + Send + 'a>>
+    {
+        self.recorded_requests
+            .lock()
+            .expect("out-of-band delivery request mutex poisoned")
+            .push(request);
+        let result = self.result.clone();
+        Box::pin(async move { result })
+    }
+}
+
+struct RecordingCoreAuthSecurityNotificationDeliverer {
+    result: Result<(), CoreAuthDurableEffectDeliveryError>,
+    recorded_requests: Arc<Mutex<Vec<CoreAuthSecurityNotificationDeliveryRequest>>>,
+}
+
+impl RecordingCoreAuthSecurityNotificationDeliverer {
+    fn new(result: Result<(), CoreAuthDurableEffectDeliveryError>) -> Self {
+        Self {
+            result,
+            recorded_requests: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+
+    fn recorded_requests(&self) -> Vec<CoreAuthSecurityNotificationDeliveryRequest> {
+        self.recorded_requests
+            .lock()
+            .expect("security notification delivery request mutex poisoned")
+            .clone()
+    }
+}
+
+impl CoreAuthSecurityNotificationDeliverer for RecordingCoreAuthSecurityNotificationDeliverer {
+    fn deliver_security_notification<'a>(
+        &'a self,
+        request: CoreAuthSecurityNotificationDeliveryRequest,
+    ) -> Pin<Box<dyn Future<Output = Result<(), CoreAuthDurableEffectDeliveryError>> + Send + 'a>>
+    {
+        self.recorded_requests
+            .lock()
+            .expect("security notification delivery request mutex poisoned")
+            .push(request);
+        let result = self.result.clone();
+        Box::pin(async move { result })
+    }
+}
+
+struct RecordingCoreAuthApplicationSubjectDataLifecycleIntegrator {
+    result: Result<(), CoreAuthDurableEffectDeliveryError>,
+    recorded_requests: Arc<Mutex<Vec<CoreAuthApplicationSubjectDataLifecycleRequest>>>,
+}
+
+impl RecordingCoreAuthApplicationSubjectDataLifecycleIntegrator {
+    fn new(result: Result<(), CoreAuthDurableEffectDeliveryError>) -> Self {
+        Self {
+            result,
+            recorded_requests: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+
+    fn recorded_requests(&self) -> Vec<CoreAuthApplicationSubjectDataLifecycleRequest> {
+        self.recorded_requests
+            .lock()
+            .expect("application subject data lifecycle request mutex poisoned")
+            .clone()
+    }
+}
+
+impl CoreAuthApplicationSubjectDataLifecycleIntegrator
+    for RecordingCoreAuthApplicationSubjectDataLifecycleIntegrator
+{
+    fn apply_application_subject_data_lifecycle_action<'a>(
+        &'a self,
+        request: CoreAuthApplicationSubjectDataLifecycleRequest,
+    ) -> Pin<Box<dyn Future<Output = Result<(), CoreAuthDurableEffectDeliveryError>> + Send + 'a>>
+    {
+        self.recorded_requests
+            .lock()
+            .expect("application subject data lifecycle request mutex poisoned")
+            .push(request);
+        let result = self.result.clone();
+        Box::pin(async move { result })
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct RecordedEmailOtpDeliveryMessageRequest {
+    queue_job_id: crate::queue::JobId,
+    retry_count: u32,
+    max_retries: u32,
+    challenge_id: ActiveProofChallengeId,
+    delivery_idempotency_key: String,
+    recipient_handle: String,
+    response_secret: Vec<u8>,
+}
+
+struct RecordingEmailOtpDeliveryMessageDeliverer {
+    result: Result<(), AuthDurableEffectDeliveryError>,
+    recorded_requests: Arc<Mutex<Vec<RecordedEmailOtpDeliveryMessageRequest>>>,
+}
+
+impl RecordingEmailOtpDeliveryMessageDeliverer {
+    fn new(result: Result<(), AuthDurableEffectDeliveryError>) -> Self {
+        Self {
+            result,
+            recorded_requests: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+
+    fn recorded_requests(&self) -> Vec<RecordedEmailOtpDeliveryMessageRequest> {
+        self.recorded_requests
+            .lock()
+            .expect("email otp delivery request mutex poisoned")
+            .clone()
+    }
+}
+
+impl PostgresEmailOtpDeliveryMessageDeliverer for RecordingEmailOtpDeliveryMessageDeliverer {
+    fn deliver_email_otp_message<'a>(
+        &'a self,
+        request: PostgresEmailOtpDeliveryMessageRequest,
+    ) -> AuthDurableEffectDeliveryFuture<'a> {
+        self.recorded_requests
+            .lock()
+            .expect("email otp delivery request mutex poisoned")
+            .push(RecordedEmailOtpDeliveryMessageRequest {
+                queue_job_id: request.queue_job_id(),
+                retry_count: request.retry_count(),
+                max_retries: request.max_retries(),
+                challenge_id: request.challenge_id().clone(),
+                delivery_idempotency_key: request.delivery_idempotency_key().to_owned(),
+                recipient_handle: request.recipient_handle().to_owned(),
+                response_secret: request.response_secret().expose_secret().to_vec(),
+            });
+        let result = self.result.clone();
+        Box::pin(async move { result })
+    }
+}
+
+impl MountedAdminSupportStaffAuthorizer for RecordingMountedSupportStaffAuthorizer {
+    fn authorize_admin_support_intervention_request<'a>(
+        &'a self,
+        _headers: &'a HeaderMap,
+        request: MountedAdminSupportInterventionRequestVerificationRequest,
+    ) -> Pin<Box<dyn Future<Output = MountedAdminSupportStaffAuthorization> + Send + 'a>> {
+        self.recorded_intervention_request_authorizations
+            .lock()
+            .expect("staff intervention request authorization mutex poisoned")
+            .push(request);
+        let authorization = *self
+            .authorization
+            .lock()
+            .expect("staff authorization mutex poisoned");
+        Box::pin(std::future::ready(authorization))
+    }
+
+    fn authorize_admin_support_staff_action<'a>(
+        &'a self,
+        _headers: &'a HeaderMap,
+        request: MountedAdminSupportStaffVerificationRequest,
+    ) -> Pin<Box<dyn Future<Output = MountedAdminSupportStaffAuthorization> + Send + 'a>> {
+        self.recorded_requests
+            .lock()
+            .expect("staff authorization request mutex poisoned")
+            .push(request);
+        let authorization = *self
+            .authorization
+            .lock()
+            .expect("staff authorization mutex poisoned");
+        Box::pin(std::future::ready(authorization))
+    }
 }
 
 impl PostgresRuntimeTestHarness {
@@ -111,6 +476,22 @@ impl PostgresRuntimeTestHarness {
 
     async fn connect_required_with_email_otp_method() -> Self {
         Self::connect_required_with_registered_plugins(None, true).await
+    }
+
+    async fn connect_required_with_email_otp_delivery_message_deliverer(
+        delivery_message_deliverer: Arc<dyn PostgresEmailOtpDeliveryMessageDeliverer>,
+    ) -> Self {
+        Self::connect_required_with_registered_plugins_for_test_method_configured_methods_and_config(
+            None,
+            true,
+            None,
+            None,
+            TestActiveMethodVerificationMode::BeforeStateLoad,
+            FirstPartyMethodSelection::default(),
+            config(),
+            Some(delivery_message_deliverer),
+        )
+        .await
     }
 
     async fn connect_required_with_email_otp_subject_resolver(
@@ -265,6 +646,31 @@ impl PostgresRuntimeTestHarness {
         active_method_verification_mode: TestActiveMethodVerificationMode,
         first_party_methods: FirstPartyMethodSelection,
     ) -> Self {
+        Self::connect_required_with_registered_plugins_for_test_method_configured_methods_and_config(
+            failure_mode,
+            include_email_otp_plugin,
+            email_otp_subject_resolver,
+            test_method,
+            active_method_verification_mode,
+            first_party_methods,
+            config(),
+            None,
+        )
+        .await
+    }
+
+    async fn connect_required_with_registered_plugins_for_test_method_configured_methods_and_config(
+        failure_mode: Option<TestMethodCommitFailureMode>,
+        include_email_otp_plugin: bool,
+        email_otp_subject_resolver: Option<Arc<dyn PostgresEmailOtpSubjectResolver>>,
+        test_method: Option<ProofMethodDeclaration>,
+        active_method_verification_mode: TestActiveMethodVerificationMode,
+        first_party_methods: FirstPartyMethodSelection,
+        runtime_config: Config,
+        email_otp_delivery_message_deliverer: Option<
+            Arc<dyn PostgresEmailOtpDeliveryMessageDeliverer>,
+        >,
+    ) -> Self {
         let database_url = required_auth_postgres_runtime_test_database_url();
 
         let write_pool =
@@ -277,19 +683,19 @@ impl PostgresRuntimeTestHarness {
         let database_operation_observer = DatabaseOperationObserver::default();
         let pool =
             raw_pool.clone_with_database_operation_observer(database_operation_observer.clone());
-        let schema_name = unique_runtime_test_schema_name();
-        let schema = PgSchemaName::new(schema_name.clone());
-        let create_schema = format!("CREATE SCHEMA {}", schema_name.quoted());
-        unparameterized_simple_query(sqlx::AssertSqlSafe(create_schema.as_str()))
-            .execute(raw_pool.sqlx_pool())
+        let db_bootstrap_config =
+            BootstrapConfig::new(PgSchemaName::new(unique_runtime_test_schema_name()));
+        let schema = db_bootstrap_config.schema_name().clone();
+        db_bootstrap_config
+            .migrate_schema(&write_pool)
             .await
-            .expect("create auth runtime test schema");
+            .expect("migrate DB foundation before auth runtime schema");
 
-        let store_config = super::super::postgres_store::PostgresAuthStoreConfig::new(
-            Some(schema.clone()),
-            PgIdentifier::new("__paranoid_auth_").expect("table prefix"),
-        )
-        .expect("store config");
+        let store_config =
+            super::super::postgres_store::PostgresAuthStoreConfig::for_db_bootstrap_config(
+                &db_bootstrap_config,
+            )
+            .expect("store config");
         let method_plugin = match (failure_mode, test_method) {
             (Some(failure_mode), Some(method)) => Some(Arc::new(
                 TestPostgresAuthMethodPlugin::with_method_and_verification_mode(
@@ -315,18 +721,17 @@ impl PostgresRuntimeTestHarness {
         };
         let email_otp_plugin = if include_email_otp_plugin {
             let mut plugin = PostgresEmailOtpMethodPlugin::new(
-                PostgresEmailOtpMethodPluginConfig::new(
-                    Some(schema.clone()),
-                    PgIdentifier::new("__paranoid_auth_email_otp_")
-                        .expect("email otp table prefix"),
-                )
-                .expect("email otp method config"),
+                PostgresEmailOtpMethodPluginConfig::for_db_bootstrap_config(&db_bootstrap_config)
+                    .expect("email otp method config"),
                 test_keyset("tests.auth.postgres-runtime.email-otp.v1"),
             )
             .expect("email otp method plugin");
             let subject_resolver = email_otp_subject_resolver
                 .unwrap_or_else(|| Arc::new(EmbeddedSubjectEmailOtpResolver));
             plugin = plugin.with_subject_resolver(subject_resolver);
+            if let Some(deliverer) = email_otp_delivery_message_deliverer {
+                plugin = plugin.with_delivery_message_deliverer(deliverer);
+            }
             Some(Arc::new(plugin))
         } else {
             None
@@ -334,11 +739,8 @@ impl PostgresRuntimeTestHarness {
         let totp_plugin = if first_party_methods.include_totp_plugin {
             Some(Arc::new(
                 PostgresTotpMethodPlugin::new(
-                    PostgresTotpMethodPluginConfig::new(
-                        Some(schema.clone()),
-                        PgIdentifier::new("__paranoid_auth_totp_").expect("totp table prefix"),
-                    )
-                    .expect("totp method config"),
+                    PostgresTotpMethodPluginConfig::for_db_bootstrap_config(&db_bootstrap_config)
+                        .expect("totp method config"),
                     test_keyset("tests.auth.postgres-runtime.totp.v1"),
                     TestTotpCodeVerifier,
                 )
@@ -350,10 +752,8 @@ impl PostgresRuntimeTestHarness {
         let recovery_code_plugin = if first_party_methods.include_recovery_code_plugin {
             Some(Arc::new(
                 PostgresRecoveryCodeMethodPlugin::new(
-                    PostgresRecoveryCodeMethodPluginConfig::new(
-                        Some(schema.clone()),
-                        PgIdentifier::new("__paranoid_auth_recovery_code_")
-                            .expect("recovery code table prefix"),
+                    PostgresRecoveryCodeMethodPluginConfig::for_db_bootstrap_config(
+                        &db_bootstrap_config,
                     )
                     .expect("recovery code method config"),
                     test_keyset("tests.auth.postgres-runtime.recovery-code.v1"),
@@ -367,10 +767,8 @@ impl PostgresRuntimeTestHarness {
             if first_party_methods.include_password_derived_signature_plugin {
                 Some(Arc::new(
                     PostgresPasswordDerivedSignatureMethodPlugin::new(
-                        PostgresPasswordDerivedSignatureMethodPluginConfig::new(
-                            Some(schema.clone()),
-                            PgIdentifier::new("__paranoid_auth_password_signature_")
-                                .expect("password-derived signature table prefix"),
+                        PostgresPasswordDerivedSignatureMethodPluginConfig::for_db_bootstrap_config(
+                            &db_bootstrap_config,
                         )
                         .expect("password-derived signature method config"),
                     )
@@ -401,29 +799,38 @@ impl PostgresRuntimeTestHarness {
         if let Some(plugin) = password_derived_signature_plugin.as_ref() {
             plugins.push(plugin.clone());
         }
-        if !plugins.is_empty() {
-            let registry =
+        let method_registry = if plugins.is_empty() {
+            None
+        } else {
+            Some(Arc::new(
                 super::super::postgres_method_runtime::PostgresAuthMethodRegistry::new(plugins)
-                    .expect("test method registry");
-            store = store.with_method_registry(Arc::new(registry));
+                    .expect("test method registry"),
+            ))
+        };
+        if let Some(registry) = method_registry.as_ref() {
+            store = store.with_method_registry(Arc::clone(registry));
         }
         store
             .migrate_schema(&write_pool)
             .await
             .expect("migrate auth schema");
         let runtime = super::super::postgres_runtime::PostgresAuthWebRuntime::new(
-            AuthWebRuntime::new(config(), auth_web_transport()),
+            AuthWebRuntime::new(runtime_config, auth_web_transport()),
             pool.clone(),
             store,
             Arc::new(hashcash_verifier_for_test()),
         );
+        let write_pool =
+            write_pool.clone_with_database_operation_observer(database_operation_observer.clone());
 
         Self {
+            write_pool,
             pool,
             database_operation_observer,
             store_config,
             runtime,
             schema,
+            method_registry,
             method_plugin,
             email_otp_plugin,
             totp_plugin,
@@ -441,7 +848,97 @@ impl PostgresRuntimeTestHarness {
     }
 }
 
-fn assert_no_database_operations(observer: &DatabaseOperationObserver, expectation: &'static str) {
+struct AuthRuntimeQueueTestStore {
+    store: crate::db::queue::Store,
+    jobs_table: PgQualifiedTableName,
+}
+
+async fn migrate_queue_store_for_auth_runtime_test(
+    harness: &PostgresRuntimeTestHarness,
+) -> AuthRuntimeQueueTestStore {
+    let jobs_table = PgQualifiedTableName::new(
+        Some(harness.schema.clone()),
+        PgIdentifier::new("__paranoid_auth_queue_jobs").expect("queue jobs table"),
+    );
+    let dead_letter_table = PgQualifiedTableName::new(
+        Some(harness.schema.clone()),
+        PgIdentifier::new("__paranoid_auth_queue_dead_letters").expect("queue dead-letter table"),
+    );
+    let pause_table = PgQualifiedTableName::new(
+        Some(harness.schema.clone()),
+        PgIdentifier::new("__paranoid_auth_queue_pauses").expect("queue pause table"),
+    );
+    let queue_config = crate::db::queue::StoreConfig {
+        table_name: jobs_table.clone(),
+        dead_letter_table_name: dead_letter_table,
+        pause_table_name: pause_table,
+        schema_ledger_table_name: harness
+            .store_config
+            .schema_ledger_table_name()
+            .expect("auth schema ledger table"),
+        payload_json_limit_bytes: crate::db::queue::DEFAULT_QUEUE_PAYLOAD_JSON_LIMIT_BYTES,
+    };
+    let store = crate::db::queue::Store::new_inner(queue_config).expect("queue store config");
+    store
+        .migrate_schema(&harness.write_pool)
+        .await
+        .expect("migrate auth runtime queue schema");
+    AuthRuntimeQueueTestStore { store, jobs_table }
+}
+
+fn auth_runtime_queue_worker_config() -> crate::queue::WorkerConfig {
+    crate::queue::WorkerConfig {
+        concurrency: 10,
+        startup_jitter_max_delay: Some(Duration::ZERO),
+        default_job_timeout: crate::queue::WorkerDefaultJobTimeout::NoTimeout,
+        retry_policy: crate::queue::RetryPolicy {
+            strategy: crate::queue::RetryBackoffStrategy::Fixed {
+                backoff: Duration::from_millis(1),
+            },
+            jitter_fraction: 0.0,
+            ..crate::queue::RetryPolicy::default()
+        },
+        ..crate::queue::WorkerConfig::default()
+    }
+}
+
+fn mounted_auth_durable_effect_worker_service_for_test(
+    harness: &PostgresRuntimeTestHarness,
+    queue_test_store: &AuthRuntimeQueueTestStore,
+    out_of_band_deliverer: Arc<dyn CoreAuthOutOfBandMessageDeliverer>,
+    security_notification_deliverer: Arc<dyn CoreAuthSecurityNotificationDeliverer>,
+) -> MountedAuthDurableEffectPostgresWorkerService {
+    let application_subject_data_integrator =
+        Arc::new(RecordingCoreAuthApplicationSubjectDataLifecycleIntegrator::new(Ok(())));
+    mounted_auth_durable_effect_worker_service_for_test_with_application_subject_data_integrator(
+        harness,
+        queue_test_store,
+        out_of_band_deliverer,
+        security_notification_deliverer,
+        application_subject_data_integrator,
+    )
+}
+
+fn mounted_auth_durable_effect_worker_service_for_test_with_application_subject_data_integrator(
+    harness: &PostgresRuntimeTestHarness,
+    queue_test_store: &AuthRuntimeQueueTestStore,
+    out_of_band_deliverer: Arc<dyn CoreAuthOutOfBandMessageDeliverer>,
+    security_notification_deliverer: Arc<dyn CoreAuthSecurityNotificationDeliverer>,
+    application_subject_data_integrator: Arc<dyn CoreAuthApplicationSubjectDataLifecycleIntegrator>,
+) -> MountedAuthDurableEffectPostgresWorkerService {
+    MountedAuthDurableEffectPostgresWorkerService::new(
+        harness.write_pool.clone(),
+        queue_test_store.store.clone(),
+        &harness.runtime,
+        MountedAuthDurableEffectWorkerIntegrations::new(
+            out_of_band_deliverer,
+            security_notification_deliverer,
+            application_subject_data_integrator,
+        ),
+    )
+}
+
+fn assert_no_database_operations(observer: &DatabaseOperationObserver, expectation: &str) {
     let records = observer.records();
     assert!(
         records.is_empty(),
@@ -461,6 +958,180 @@ fn assert_database_operations_include_label(
     );
 }
 
+fn assert_database_operation_labels_exact(
+    observer: &DatabaseOperationObserver,
+    expected_labels: &[&'static str],
+    expectation: &'static str,
+) {
+    let records = observer.records();
+    let actual_labels = records
+        .iter()
+        .map(|record| record.label)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        actual_labels, expected_labels,
+        "{expectation}; observed database operations: {records:?}"
+    );
+}
+
+fn assert_missing_active_proof_continuation_error(
+    error: super::super::postgres_runtime::AuthPostgresWebRuntimeExecutionError,
+) {
+    assert!(matches!(
+        error,
+        super::super::postgres_runtime::AuthPostgresWebRuntimeExecutionError::Core(
+            Error::MissingActiveProofContinuationCookie
+        )
+    ));
+}
+
+fn assert_invalid_active_proof_continuation_payload_error(
+    error: super::super::postgres_runtime::AuthPostgresWebRuntimeExecutionError,
+) {
+    assert!(matches!(
+        error,
+        super::super::postgres_runtime::AuthPostgresWebRuntimeExecutionError::Core(
+            Error::InvalidActiveProofContinuationCookiePayload
+        )
+    ));
+}
+
+fn assert_expired_active_proof_continuation_error(
+    error: super::super::postgres_runtime::AuthPostgresWebRuntimeExecutionError,
+) {
+    assert!(matches!(
+        error,
+        super::super::postgres_runtime::AuthPostgresWebRuntimeExecutionError::Core(
+            Error::ActiveProofAttemptNotOpen
+        )
+    ));
+}
+
+async fn runtime_bound_recovery_continuation_headers_for_runtime_test(
+    harness: &PostgresRuntimeTestHarness,
+    subject_label: &str,
+    authentication_label: &str,
+) -> HeaderMap {
+    let subject_id: SubjectId = id(subject_label);
+    let issued_auth = complete_full_authentication_through_runtime(
+        &harness.runtime,
+        &harness.pool,
+        &harness.store_config,
+        email_otp_plugin_for_harness(harness),
+        authentication_label,
+        20,
+        subject_id,
+        false,
+    )
+    .await;
+    let started = start_current_session_active_proof_attempt_through_runtime(
+        &harness.runtime,
+        issued_auth.session_cookie_pair.as_str(),
+        at(70),
+        ProofUse::RecoverOrReplaceCredential,
+    )
+    .await;
+    headers_from_cookie_pairs(&[started.continuation_cookie_pair.as_str()])
+}
+
+fn rendered_active_proof_continuation_cookie_pair_for_runtime_test(
+    proof_use: ProofUse,
+    subject_id: Option<SubjectId>,
+    issued_at: UnixSeconds,
+    attempt_fast_fail_until: UnixSeconds,
+) -> String {
+    let attempt_id = id("rendered-continuation-cookie-attempt");
+    let continuation_cookie = MaterializedActiveProofContinuationCookieResponse::new(
+        ActiveProofContinuationCookieDraft {
+            attempt_id,
+            proof_use,
+            subject_binding: match (&proof_use, &subject_id) {
+                (ProofUse::RecoverOrReplaceCredential, Some(_)) => {
+                    ActiveProofContinuationSubjectBinding::VerifiedProofBoundSubject
+                }
+                (_, Some(_)) => ActiveProofContinuationSubjectBinding::RuntimeBoundSubject,
+                (_, None) => ActiveProofContinuationSubjectBinding::NoSubject,
+            },
+            subject_id,
+            attempt_fast_fail_until,
+        },
+        AuthCredentialSecret::try_from(b"rendered-continuation-cookie-secret".as_slice())
+            .expect("continuation credential secret"),
+    );
+    let effects = MaterializedResponseEffects::from_vec(vec![
+        MaterializedResponseEffect::IssueActiveProofContinuationCookie(continuation_cookie),
+    ]);
+    let headers = auth_web_transport()
+        .render_set_cookie_headers(issued_at, effects)
+        .expect("render active-proof continuation cookie");
+    active_proof_continuation_cookie_pair_from_set_cookie(&headers).to_owned()
+}
+
+fn rendered_session_cookie_pair_for_runtime_test(
+    draft: SessionCookieDraft,
+    issued_at: UnixSeconds,
+) -> String {
+    let session_cookie = MaterializedSessionCookieResponse::new(
+        draft,
+        AuthCredentialSecret::try_from(b"rendered-session-cookie-secret".as_slice())
+            .expect("session credential secret"),
+    );
+    let effects = MaterializedResponseEffects::from_vec(vec![
+        MaterializedResponseEffect::IssueSessionCookie(session_cookie),
+    ]);
+    let headers = auth_web_transport()
+        .render_set_cookie_headers(issued_at, effects)
+        .expect("render session cookie");
+    cookie_pair_from_set_cookie(&headers, "__Host-__paranoid_auth_session=").to_owned()
+}
+
+fn rendered_trusted_device_cookie_pair_for_runtime_test(
+    draft: TrustedDeviceCookieDraft,
+    issued_at: UnixSeconds,
+) -> String {
+    let trusted_device_cookie = MaterializedTrustedDeviceCookieResponse::new(
+        draft,
+        AuthCredentialSecret::try_from(b"rendered-trusted-device-cookie-secret".as_slice())
+            .expect("trusted-device credential secret"),
+    );
+    let effects = MaterializedResponseEffects::from_vec(vec![
+        MaterializedResponseEffect::IssueTrustedDeviceCookie(trusted_device_cookie),
+    ]);
+    let headers = auth_web_transport()
+        .render_set_cookie_headers(issued_at, effects)
+        .expect("render trusted-device cookie");
+    cookie_pair_from_set_cookie(&headers, "__Host-__paranoid_auth_trusted_device=").to_owned()
+}
+
+fn config_with_divergent_credential_reset_role_policies() -> Config {
+    let mut value = config();
+    value.credential_lifecycle_policy.credential_reset = CredentialResetLifecyclePolicies {
+        ordinary_credential: CredentialResetLifecyclePolicy {
+            independent_evidence_requirement:
+                CredentialLifecycleIndependentEvidenceRequirement::NotRequired,
+            delayed_action_timing: Some(DelayedLifecycleActionTimingPolicy {
+                delay: DurationSeconds::new(120),
+                expires_after: DurationSeconds::new(220),
+            }),
+            authenticated_planning_step_up_freshness: StepUpFreshnessRequirement::NotRequired,
+            authenticated_execution_step_up_freshness: StepUpFreshnessRequirement::NotRequired,
+            authenticated_cancellation_step_up_freshness: StepUpFreshnessRequirement::NotRequired,
+        },
+        second_factor_credential: CredentialResetLifecyclePolicy {
+            independent_evidence_requirement:
+                CredentialLifecycleIndependentEvidenceRequirement::Required,
+            delayed_action_timing: Some(DelayedLifecycleActionTimingPolicy {
+                delay: DurationSeconds::new(300),
+                expires_after: DurationSeconds::new(500),
+            }),
+            authenticated_planning_step_up_freshness: StepUpFreshnessRequirement::Required,
+            authenticated_execution_step_up_freshness: StepUpFreshnessRequirement::Required,
+            authenticated_cancellation_step_up_freshness: StepUpFreshnessRequirement::Required,
+        },
+    };
+    value
+}
+
 fn email_otp_plugin_for_harness(
     harness: &PostgresRuntimeTestHarness,
 ) -> &PostgresEmailOtpMethodPlugin {
@@ -477,6 +1148,150 @@ fn password_derived_signature_plugin_for_harness(
         .password_derived_signature_plugin
         .as_ref()
         .expect("password-derived signature method plugin")
+}
+
+fn totp_plugin_for_harness(
+    harness: &PostgresRuntimeTestHarness,
+) -> &PostgresTotpMethodPlugin<TestTotpCodeVerifier> {
+    harness.totp_plugin.as_ref().expect("TOTP method plugin")
+}
+
+async fn complete_password_derived_signature_full_authentication_proof_for_runtime_test(
+    runtime: &super::super::postgres_runtime::PostgresAuthWebRuntime,
+    plugin: &PostgresPasswordDerivedSignatureMethodPlugin,
+    lookup_handle: &[u8],
+    password: &[u8],
+    issued_at: UnixSeconds,
+    completed_at: UnixSeconds,
+) -> ActiveProofAttemptId {
+    let empty_headers = HeaderMap::new();
+    let issued = runtime
+        .execute_unbound_active_proof_attempt_start_and_active_proof_method_challenge_issue_from_headers(
+            &empty_headers,
+            StartAndIssueActiveProofMethodChallengeInput {
+                now: issued_at,
+                proof_use: ProofUse::ContributeToFullAuthentication,
+                method: plugin.method().clone(),
+                method_challenge_request_payload: Some(
+                    PostgresPasswordDerivedSignatureMethodPlugin::challenge_request_payload_for_test(
+                        lookup_handle,
+                    )
+                    .expect("password-derived challenge request payload"),
+                ),
+            },
+            challenge_issue_preflight_response_for_test(
+                issued_at,
+                ProofUse::ContributeToFullAuthentication,
+                plugin.method(),
+            ),
+        )
+        .await
+        .expect("issue password-derived signature challenge");
+    let (attempt_id, method_challenge) = match issued.outcome() {
+        Outcome::ActiveProofMethodChallengeIssued {
+            attempt_id,
+            method_challenge,
+            ..
+        } => (attempt_id.clone(), method_challenge),
+        outcome => panic!("expected password-derived challenge issue, got {outcome:?}"),
+    };
+    let challenge_cookie_pair = cookie_pair_from_set_cookie(
+        issued.set_cookie_headers(),
+        "__Host-__paranoid_auth_active_proof_challenge=",
+    )
+    .to_owned();
+    let completion_headers = headers_from_cookie_pairs(&[challenge_cookie_pair.as_str()]);
+    let response_payload = PostgresPasswordDerivedSignatureMethodPlugin::response_payload_for_test(
+        password,
+        method_challenge,
+    )
+    .expect("password-derived signature response");
+    let weak_proof_gate_response = bound_proof_of_work_gate_response_for_active_method_completion(
+        &completion_headers,
+        &response_payload,
+        completed_at,
+    );
+    let completed = runtime
+        .execute_active_proof_method_response_from_headers(
+            &completion_headers,
+            CompleteActiveProofMethodResponse {
+                now: completed_at,
+                response_payload,
+                weak_proof_gate_response: Some(weak_proof_gate_response),
+            },
+        )
+        .await
+        .expect("complete password-derived signature proof");
+    assert_eq!(
+        completed.outcome(),
+        &Outcome::ActiveProofCompleted {
+            attempt_id: attempt_id.clone(),
+            proof: plugin.method().verified_proof_summary(),
+        }
+    );
+    attempt_id
+}
+
+async fn complete_totp_step_up_proof_for_runtime_test(
+    runtime: &super::super::postgres_runtime::PostgresAuthWebRuntime,
+    pool: &Pool,
+    store_config: &super::super::postgres_store::PostgresAuthStoreConfig,
+    email_otp: &PostgresEmailOtpMethodPlugin,
+    plugin: &PostgresTotpMethodPlugin<TestTotpCodeVerifier>,
+    subject_id: SubjectId,
+    flow_label: &str,
+    auth_start_at: u64,
+    step_up_start_at: UnixSeconds,
+    proof_completed_at: UnixSeconds,
+    secret: &[u8],
+) -> ActiveProofAttemptId {
+    let issued_auth = complete_full_authentication_through_runtime(
+        runtime,
+        pool,
+        store_config,
+        email_otp,
+        flow_label,
+        auth_start_at,
+        subject_id,
+        false,
+    )
+    .await;
+    let started = start_current_session_active_proof_attempt_through_runtime(
+        runtime,
+        issued_auth.session_cookie_pair.as_str(),
+        step_up_start_at,
+        ProofUse::SatisfyStepUp,
+    )
+    .await;
+    let continuation_headers =
+        headers_from_cookie_pairs(&[started.continuation_cookie_pair.as_str()]);
+    let secret_response = totp_test_method_response_payload(secret, proof_completed_at);
+    let weak_proof_gate_response = bound_proof_of_work_gate_response_for_known_subject_completion(
+        &continuation_headers,
+        plugin.method(),
+        &secret_response,
+        proof_completed_at,
+    );
+    let completed = runtime
+        .execute_known_subject_active_proof_method_response_from_headers(
+            &continuation_headers,
+            CompleteKnownSubjectActiveProofMethodResponse {
+                now: proof_completed_at,
+                method: plugin.method().clone(),
+                secret_response,
+                weak_proof_gate_response: Some(weak_proof_gate_response),
+            },
+        )
+        .await
+        .expect("complete TOTP step-up proof");
+    assert_eq!(
+        completed.outcome(),
+        &Outcome::ActiveProofCompleted {
+            attempt_id: started.attempt_id.clone(),
+            proof: plugin.method().verified_proof_summary(),
+        }
+    );
+    started.attempt_id
 }
 
 struct EmbeddedSubjectEmailOtpResolver;
@@ -1125,6 +1940,13 @@ fn mismatched_recovery_code_test_method_response_payload() -> KnownSubjectActive
         .expect("mismatched recovery code test method response payload")
 }
 
+fn generated_recovery_code_test_method_response_payload(
+    code: &GeneratedRecoveryCode,
+) -> KnownSubjectActiveProofSecretResponse {
+    KnownSubjectActiveProofSecretResponse::try_from_bytes(code.expose_secret())
+        .expect("generated recovery code response payload")
+}
+
 fn minimum_accepted_password_kdf_params_for_tests() -> PasswordKdfParams {
     PasswordKdfParams::new(
         PASSWORD_KDF_MIN_MEMORY_COST_KIB,
@@ -1491,6 +2313,59 @@ impl super::super::postgres_method_runtime::PostgresAuthMethodPlugin
         })
     }
 
+    fn build_credential_creation_commit_work<'a, 'tx>(
+        &'a self,
+        _tx: &'a mut Tx<'tx>,
+        request: super::super::postgres_method_runtime::CredentialCreationMethodWorkBuildRequest<
+            'a,
+        >,
+    ) -> Pin<
+        Box<
+            dyn Future<
+                    Output = Result<
+                        super::super::postgres_method_runtime::CredentialMethodWorkBuild,
+                        super::super::postgres_method_runtime::PostgresAuthMethodBuildError,
+                    >,
+                > + Send
+                + 'a,
+        >,
+    > {
+        Box::pin(async move {
+            if request.new_credential.proof_family() != self.method.family()
+                || request.new_credential.method_label() != self.method.method_label()
+            {
+                return Err(
+                    super::super::postgres_method_runtime::PostgresAuthMethodBuildError::plugin_rejected(
+                        self.method(),
+                        "credential_creation",
+                        "credential creation target used a different method".to_owned(),
+                    ),
+                );
+            }
+            Ok(super::super::postgres_method_runtime::CredentialMethodWorkBuild::from_method_commit_work(vec![
+                MethodCommitWork::new(
+                    self.method.verified_proof_summary(),
+                    vec![
+                        MethodCommitPrecondition::new(
+                            "password_verifier_absent",
+                            request.method_payload.as_bytes(),
+                        )
+                        .expect("method work item"),
+                    ],
+                    vec![
+                        MethodCommitMutation::new(
+                            "create_password_verifier",
+                            request.method_payload.as_bytes(),
+                        )
+                        .expect("method work item"),
+                    ],
+                    Vec::new(),
+                )
+                .expect("credential creation method commit work"),
+            ]))
+        })
+    }
+
     fn build_credential_lifecycle_commit_work<'a, 'tx>(
         &'a self,
         _tx: &'a mut Tx<'tx>,
@@ -1501,7 +2376,7 @@ impl super::super::postgres_method_runtime::PostgresAuthMethodPlugin
         Box<
             dyn Future<
                     Output = Result<
-                        Vec<MethodCommitWork>,
+                        super::super::postgres_method_runtime::CredentialMethodWorkBuild,
                         super::super::postgres_method_runtime::PostgresAuthMethodBuildError,
                     >,
                 > + Send
@@ -1520,12 +2395,42 @@ impl super::super::postgres_method_runtime::PostgresAuthMethodPlugin
                     ),
                 );
             }
-            let (precondition_operation, mutation_operation) = match request.pending_action.action {
-                CredentialLifecycleAction::Replace => (
+            let (precondition_operation, mutation_operation) = match (
+                request.action,
+                request.authority,
+            ) {
+                (
+                    CredentialLifecycleAction::Replace,
+                    super::super::postgres_method_runtime::CredentialLifecycleMethodWorkAuthority::ImmediateReplacement { .. },
+                ) => (
+                    "replacement_candidate_current",
+                    "replace_credential_immediately",
+                ),
+                (
+                    CredentialLifecycleAction::Rotate,
+                    super::super::postgres_method_runtime::CredentialLifecycleMethodWorkAuthority::ImmediateRotation { .. },
+                ) => (
+                    "rotation_candidate_current",
+                    "rotate_credential_immediately",
+                ),
+                (
+                    CredentialLifecycleAction::Replace,
+                    super::super::postgres_method_runtime::CredentialLifecycleMethodWorkAuthority::MaturePendingAction { .. },
+                ) => (
                     "replacement_candidate_current",
                     "replace_credential_from_pending_action",
                 ),
-                CredentialLifecycleAction::Regenerate => (
+                (
+                    CredentialLifecycleAction::Regenerate,
+                    super::super::postgres_method_runtime::CredentialLifecycleMethodWorkAuthority::ImmediateRegeneration { .. },
+                ) => (
+                    "regeneration_candidate_current",
+                    "regenerate_credential_immediately",
+                ),
+                (
+                    CredentialLifecycleAction::Regenerate,
+                    super::super::postgres_method_runtime::CredentialLifecycleMethodWorkAuthority::MaturePendingAction { .. },
+                ) => (
                     "regeneration_candidate_current",
                     "regenerate_credential_from_pending_action",
                 ),
@@ -1539,7 +2444,7 @@ impl super::super::postgres_method_runtime::PostgresAuthMethodPlugin
                     );
                 }
             };
-            Ok(vec![
+            Ok(super::super::postgres_method_runtime::CredentialMethodWorkBuild::from_method_commit_work(vec![
                 MethodCommitWork::new(
                     self.method.verified_proof_summary(),
                     vec![
@@ -1559,7 +2464,7 @@ impl super::super::postgres_method_runtime::PostgresAuthMethodPlugin
                     Vec::new(),
                 )
                 .expect("credential lifecycle method commit work"),
-            ])
+            ]))
         })
     }
 
@@ -1617,8 +2522,10 @@ impl super::super::postgres_method_runtime::PostgresAuthMethodPlugin
             match precondition.operation().as_str() {
                 "otp_state_absent"
                 | "recovery_code_still_unused"
+                | "password_verifier_absent"
                 | "password_verifier_version_current"
                 | "replacement_candidate_current"
+                | "rotation_candidate_current"
                 | "regeneration_candidate_current" => {}
                 other => Self::validate_operation(other, "otp_state_absent")?,
             }
@@ -1669,7 +2576,10 @@ impl super::super::postgres_method_runtime::PostgresAuthMethodPlugin
             match mutation.operation().as_str() {
                 "store_otp_state"
                 | "consume_recovery_code"
+                | "create_password_verifier"
                 | "replace_password_verifier"
+                | "replace_credential_immediately"
+                | "rotate_credential_immediately"
                 | "replace_credential_from_pending_action"
                 | "regenerate_credential_from_pending_action" => {}
                 other => Self::validate_operation(other, "store_otp_state")?,
@@ -1764,7132 +2674,64 @@ impl super::super::postgres_method_runtime::PostgresAuthMethodPlugin
             Ok(())
         })
     }
-}
 
-#[test]
-fn postgres_method_registry_rejects_duplicate_method_registration() {
-    let schema = PgSchemaName::from_identifier_text("__paranoid_auth_registry_test")
-        .expect("test schema name");
-    let left: Arc<dyn super::super::postgres_method_runtime::PostgresAuthMethodPlugin> = Arc::new(
-        TestPostgresAuthMethodPlugin::new(&schema, TestMethodCommitFailureMode::None),
-    );
-    let right: Arc<dyn super::super::postgres_method_runtime::PostgresAuthMethodPlugin> = Arc::new(
-        TestPostgresAuthMethodPlugin::new(&schema, TestMethodCommitFailureMode::None),
-    );
-
-    let error =
-        super::super::postgres_method_runtime::PostgresAuthMethodRegistry::new([left, right])
-            .expect_err("duplicate method plugins must be rejected");
-
-    assert!(
-        matches!(
-            error,
-            super::super::postgres_method_runtime::PostgresAuthMethodRegistryError::DuplicateMethod {
-                family: ProofFamily::OutOfBandCode,
-                ref method_label,
-            } if method_label == "email_otp"
-        ),
-        "expected duplicate email_otp registration error, got {error:?}"
-    );
-}
-
-#[test]
-fn postgres_method_registry_rejects_core_owned_method_registration() {
-    let schema = PgSchemaName::from_identifier_text("__paranoid_auth_registry_test")
-        .expect("test schema name");
-    let plugin: Arc<dyn super::super::postgres_method_runtime::PostgresAuthMethodPlugin> =
-        Arc::new(TestPostgresAuthMethodPlugin::with_method(
-            &schema,
-            ProofMethodDeclaration::new(ProofFamily::TrustedDevice, "trusted_device")
-                .expect("core-owned method declaration"),
-            TestMethodCommitFailureMode::None,
-        ));
-
-    let error = super::super::postgres_method_runtime::PostgresAuthMethodRegistry::new([plugin])
-        .expect_err("core-owned methods must not be registered as plugins");
-
-    assert!(
-        matches!(
-            error,
-            super::super::postgres_method_runtime::PostgresAuthMethodRegistryError::CoreOwnedMethod {
-                family: ProofFamily::TrustedDevice,
-                ref method_label,
-            } if method_label == "trusted_device"
-        ),
-        "expected core-owned method registration error, got {error:?}"
-    );
-}
-
-#[tokio::test]
-async fn auth_bootstrap_facade_uses_db_foundation_schema() {
-    let _postgres_runtime_test_guard = AUTH_POSTGRES_RUNTIME_TEST_LOCK.lock().await;
-    let database_url = required_auth_postgres_runtime_test_database_url();
-    let write_pool = WritePool::connect(PoolConfig::new(SecretString::from(database_url.clone())))
-        .await
-        .expect("connect write test database");
-    let raw_pool = Pool::connect(PoolConfig::new(SecretString::from(database_url)))
-        .await
-        .expect("connect test database");
-    let database_operation_observer = DatabaseOperationObserver::default();
-    let pool = raw_pool.clone_with_database_operation_observer(database_operation_observer.clone());
-    let schema_name = unique_runtime_test_schema_name();
-    let schema = PgSchemaName::new(schema_name.clone());
-    let db_bootstrap_config = BootstrapConfig::new(schema.clone());
-    db_bootstrap_config
-        .migrate_schema(&write_pool)
-        .await
-        .expect("migrate DB foundation before auth bootstrap");
-
-    let auth_bootstrap = first_party_postgres_auth_bootstrap_for_test(db_bootstrap_config.clone());
-    let store_config = auth_bootstrap
-        .auth_store_config()
-        .expect("auth store config");
-
-    let _runtime = auth_bootstrap
-        .migrate_schema_and_build_web_runtime_after_db_bootstrap(
-            &write_pool,
-            pool.clone(),
-            AuthWebRuntime::new(config(), auth_web_transport()),
-            Arc::new(hashcash_verifier_for_test()),
-        )
-        .await
-        .expect("migrate auth schema and build runtime");
-    first_party_postgres_auth_bootstrap_for_test(db_bootstrap_config.clone())
-        .validate_schema_after_db_bootstrap(&pool)
-        .await
-        .expect("validate auth schema through bootstrap facade");
-
-    for table_name in [
-        "auth_sessions",
-        "auth_subject_state",
-        "auth_email_otp_challenges",
-        "auth_email_otp_delivery_commands",
-        "auth_totp_verifiers",
-        "auth_recovery_code_codes",
-        "auth_password_signature_verifiers",
-    ] {
-        assert!(
-            auth_runtime_test_table_exists(&pool, &schema, table_name).await,
-            "expected auth bootstrap table {table_name} in DB foundation schema"
-        );
+    fn register_durable_effect_queue_handlers(
+        &self,
+        task_registry: &mut queue::TaskRegistry,
+    ) -> Result<(), PostgresAuthMethodDurableEffectQueueRegistrationError> {
+        register_no_queue_handlers_for_method_durable_effects(task_registry)
     }
 
-    let ledger_row_count = count_auth_schema_ledger_rows(&pool, &store_config).await;
-    assert_eq!(
-        ledger_row_count, 1,
-        "auth bootstrap must record exactly one auth-core row in the DB foundation schema ledger"
-    );
-    assert!(
-        database_operation_observer
-            .records()
-            .into_iter()
-            .filter_map(|record| record.statement)
-            .all(|statement| !statement.contains("pg_advisory")),
-        "auth bootstrap must not use the DB bootstrap advisory-lock exception"
-    );
-
-    drop_auth_runtime_test_schema(&pool, &schema).await;
-}
-
-#[tokio::test]
-async fn postgres_runtime_completes_message_signature_through_method_registry() {
-    let _postgres_runtime_test_guard = AUTH_POSTGRES_RUNTIME_TEST_LOCK.lock().await;
-    let harness =
-        PostgresRuntimeTestHarness::connect_required_with_message_signature_method().await;
-    let pool = &harness.pool;
-    let store_config = &harness.store_config;
-    let runtime = &harness.runtime;
-    let empty_headers = HeaderMap::new();
-    let subject_id: SubjectId = id("message-signature-subject");
-    let method = ProofMethodDeclaration::new(ProofFamily::MessageSignature, "ssh_signature")
-        .expect("message signature method");
-
-    let issued = runtime
-        .execute_unbound_active_proof_attempt_start_and_active_proof_method_challenge_issue_from_headers(
-            &empty_headers,
-            StartAndIssueActiveProofMethodChallengeInput {
-                now: at(20),
-                proof_use: ProofUse::ContributeToFullAuthentication,
-                method: method.clone(),
-                method_challenge_request_payload: None,
-            },
-            challenge_issue_preflight_response_for_test(
-                at(20),
-                ProofUse::ContributeToFullAuthentication,
-                &method,
-            ),
+    fn enqueue_available_durable_effects_to_queue_in_current_transaction<'a, 'tx>(
+        &'a self,
+        tx: &'a mut WriteTx<'tx>,
+        queue_store: &'a queue::Store,
+        limit: NonZeroU32,
+        enqueued_at: UnixSeconds,
+    ) -> Pin<
+        Box<
+            dyn Future<
+                    Output = Result<
+                        PostgresAuthDurableEffectQueueDispatchSummary,
+                        PostgresAuthDurableEffectQueueDispatchError,
+                    >,
+                > + Send
+                + 'a,
+        >,
+    > {
+        enqueue_no_method_durable_effects_to_queue_in_current_transaction(
+            tx,
+            queue_store,
+            limit,
+            enqueued_at,
         )
-        .await
-        .expect("issue message signature challenge through method registry");
-    let (attempt_id, challenge_id, method_challenge) = match issued.outcome() {
-        Outcome::ActiveProofMethodChallengeIssued {
-            attempt_id: issued_attempt_id,
-            challenge_id: issued_challenge_id,
-            proof,
-            method_challenge,
-            ..
-        } => {
-            assert_eq!(
-                proof,
-                &ProofSummary::new(ProofFamily::MessageSignature, "ssh_signature").expect("proof"),
-            );
-            (
-                issued_attempt_id.clone(),
-                issued_challenge_id.clone(),
-                method_challenge,
-            )
-        }
-        outcome => panic!("expected message signature challenge issue, got {outcome:?}"),
-    };
-    assert!(
-        method_challenge.as_bytes().starts_with(
-            test_challenge_presentation_prefix(ProofFamily::MessageSignature)
-                .expect("message signature challenge prefix")
-        )
-    );
-    let message_signature_nonce =
-        test_method_runtime_challenge_bytes(method_challenge, ProofFamily::MessageSignature);
-    let challenge_cookie_pair = cookie_pair_from_set_cookie(
-        issued.set_cookie_headers(),
-        "__Host-__paranoid_auth_active_proof_challenge=",
-    )
-    .to_owned();
-    assert_eq!(
-        count_challenges_for_challenge(pool, store_config, &challenge_id).await,
-        1
-    );
-
-    let completion_headers = headers_from_cookie_pairs(&[challenge_cookie_pair.as_str()]);
-    harness.database_operation_observer.clear();
-    let bad_response_error = runtime
-        .execute_active_proof_method_response_from_headers(
-            &completion_headers,
-            CompleteActiveProofMethodResponse {
-                now: at(40),
-                response_payload: mismatched_runtime_challenge_test_method_response_payload(
-                    ProofFamily::MessageSignature,
-                    message_signature_nonce,
-                    &subject_id,
-                ),
-                weak_proof_gate_response: None,
-            },
-        )
-        .await
-        .expect_err("bad message signature response must reject before authoritative state load");
-    assert!(matches!(
-        bad_response_error,
-        super::super::postgres_runtime::AuthPostgresWebRuntimeExecutionError::MethodBuild(
-            super::super::postgres_method_runtime::PostgresAuthMethodBuildError::PluginRejected {
-                family: ProofFamily::MessageSignature,
-                operation: "active_proof_completion",
-                ..
-            }
-        )
-    ));
-    assert_no_database_operations(
-        &harness.database_operation_observer,
-        "bad message signature response must reject before any database operation",
-    );
-    assert_eq!(
-        count_open_challenges_for_challenge(pool, store_config, &challenge_id).await,
-        1,
-        "bad message signature response must leave the authoritative challenge open"
-    );
-
-    let completed = runtime
-        .execute_active_proof_method_response_from_headers(
-            &completion_headers,
-            CompleteActiveProofMethodResponse {
-                now: at(50),
-                response_payload: test_method_response_payload(
-                    ProofFamily::MessageSignature,
-                    message_signature_nonce,
-                    &subject_id,
-                ),
-                weak_proof_gate_response: None,
-            },
-        )
-        .await
-        .expect("complete message signature proof through method registry");
-
-    assert_eq!(
-        completed.outcome(),
-        &Outcome::ActiveProofCompleted {
-            attempt_id: attempt_id.clone(),
-            proof: ProofSummary::new(ProofFamily::MessageSignature, "ssh_signature")
-                .expect("proof"),
-        }
-    );
-    assert!(set_cookie_headers_contain_deletion(
-        completed.set_cookie_headers(),
-        "__Host-__paranoid_auth_active_proof_challenge=",
-    ));
-    assert_eq!(
-        count_satisfied_proofs_for_attempt(pool, store_config, &attempt_id).await,
-        1
-    );
-    assert_eq!(
-        fetch_satisfied_proof_source_for_attempt(pool, store_config, &attempt_id).await,
-        Some(test_active_method_proof_source(
-            ProofFamily::MessageSignature,
-            test_active_method_source_id(ProofFamily::MessageSignature, &subject_id),
-        ))
-    );
-    assert_eq!(
-        count_open_challenges_for_challenge(pool, store_config, &challenge_id).await,
-        0
-    );
-
-    harness.drop_schema().await;
-}
-
-#[tokio::test]
-async fn postgres_runtime_completes_message_signature_after_authoritative_confirmation() {
-    let _postgres_runtime_test_guard = AUTH_POSTGRES_RUNTIME_TEST_LOCK.lock().await;
-    let method = ProofMethodDeclaration::new(ProofFamily::MessageSignature, "ssh_signature")
-        .expect("message signature method");
-    let harness =
-        PostgresRuntimeTestHarness::connect_required_with_registered_authoritative_test_method(
-            method.clone(),
-        )
-        .await;
-    let pool = &harness.pool;
-    let store_config = &harness.store_config;
-    let runtime = &harness.runtime;
-    let empty_headers = HeaderMap::new();
-    let subject_id: SubjectId = id("authoritative-message-subject");
-
-    let issued = runtime
-        .execute_unbound_active_proof_attempt_start_and_active_proof_method_challenge_issue_from_headers(
-            &empty_headers,
-            StartAndIssueActiveProofMethodChallengeInput {
-                now: at(20),
-                proof_use: ProofUse::ContributeToFullAuthentication,
-                method: method.clone(),
-                method_challenge_request_payload: None,
-            },
-            challenge_issue_preflight_response_for_test(
-                at(20),
-                ProofUse::ContributeToFullAuthentication,
-                &method,
-            ),
-        )
-        .await
-        .expect("issue authoritative message signature challenge through method registry");
-    let (attempt_id, method_challenge) = match issued.outcome() {
-        Outcome::ActiveProofMethodChallengeIssued {
-            attempt_id,
-            method_challenge,
-            ..
-        } => (attempt_id.clone(), method_challenge),
-        outcome => panic!("expected message signature challenge issue, got {outcome:?}"),
-    };
-    let message_signature_nonce =
-        test_method_runtime_challenge_bytes(method_challenge, ProofFamily::MessageSignature);
-    let challenge_cookie_pair = cookie_pair_from_set_cookie(
-        issued.set_cookie_headers(),
-        "__Host-__paranoid_auth_active_proof_challenge=",
-    )
-    .to_owned();
-    let completion_headers = headers_from_cookie_pairs(&[challenge_cookie_pair.as_str()]);
-
-    let completed = runtime
-        .execute_active_proof_method_response_from_headers(
-            &completion_headers,
-            CompleteActiveProofMethodResponse {
-                now: at(30),
-                response_payload: test_method_response_payload(
-                    ProofFamily::MessageSignature,
-                    message_signature_nonce,
-                    &subject_id,
-                ),
-                weak_proof_gate_response: None,
-            },
-        )
-        .await
-        .expect("complete message signature through authoritative confirmation");
-
-    assert_eq!(
-        completed.outcome(),
-        &Outcome::ActiveProofCompleted {
-            attempt_id: attempt_id.clone(),
-            proof: ProofSummary::new(ProofFamily::MessageSignature, "ssh_signature")
-                .expect("proof"),
-        }
-    );
-    assert_eq!(
-        count_satisfied_proofs_for_attempt(pool, store_config, &attempt_id).await,
-        1
-    );
-    assert_eq!(
-        fetch_satisfied_proof_source_for_attempt(pool, store_config, &attempt_id).await,
-        Some(test_active_method_proof_source(
-            ProofFamily::MessageSignature,
-            test_active_method_source_id(ProofFamily::MessageSignature, &subject_id),
-        ))
-    );
-
-    harness.drop_schema().await;
-}
-
-#[tokio::test]
-async fn postgres_runtime_completes_password_derived_signature_after_authoritative_recheck() {
-    let _postgres_runtime_test_guard = AUTH_POSTGRES_RUNTIME_TEST_LOCK.lock().await;
-    let harness =
-        PostgresRuntimeTestHarness::connect_required_with_password_derived_signature_method().await;
-    let pool = &harness.pool;
-    let store_config = &harness.store_config;
-    let runtime = &harness.runtime;
-    let plugin = password_derived_signature_plugin_for_harness(&harness);
-    let empty_headers = HeaderMap::new();
-    let subject_id: SubjectId = id("password-signature-subject");
-    let password_credential_id: VerifiedProofSourceId = id("password-signature-credential");
-    let lookup_handle = b"password-signature-lookup";
-    let password = b"correct-password";
-    let salt = PasswordKdfSalt::from_bytes(&[11_u8; PASSWORD_KDF_SALT_SIZE]).expect("KDF salt");
-    let params = minimum_accepted_password_kdf_params_for_tests();
-
-    plugin
-        .store_verifier_for_test(
-            pool,
-            PasswordDerivedSignatureVerifierForTest {
-                subject_id: &subject_id,
-                password_credential_id: &password_credential_id,
-                lookup_handle,
-                password,
-                salt,
-                params,
-                now: at(10),
-            },
-        )
-        .await
-        .expect("store password-derived verifier");
-
-    let issued = runtime
-        .execute_unbound_active_proof_attempt_start_and_active_proof_method_challenge_issue_from_headers(
-            &empty_headers,
-            StartAndIssueActiveProofMethodChallengeInput {
-                now: at(20),
-                proof_use: ProofUse::ContributeToFullAuthentication,
-                method: plugin.method().clone(),
-                method_challenge_request_payload: Some(
-                    PostgresPasswordDerivedSignatureMethodPlugin::challenge_request_payload_for_test(
-                        lookup_handle,
-                    )
-                    .expect("password-derived challenge request payload"),
-                ),
-            },
-            challenge_issue_preflight_response_for_test(
-                at(20),
-                ProofUse::ContributeToFullAuthentication,
-                plugin.method(),
-            ),
-        )
-        .await
-        .expect("issue password-derived signature challenge");
-    let (attempt_id, challenge_id, method_challenge) = match issued.outcome() {
-        Outcome::ActiveProofMethodChallengeIssued {
-            attempt_id,
-            challenge_id,
-            proof,
-            method_challenge,
-            ..
-        } => {
-            assert_eq!(proof, &plugin.method().verified_proof_summary());
-            (attempt_id.clone(), challenge_id.clone(), method_challenge)
-        }
-        outcome => panic!("expected password-derived signature challenge issue, got {outcome:?}"),
-    };
-    let challenge_cookie_pair = cookie_pair_from_set_cookie(
-        issued.set_cookie_headers(),
-        "__Host-__paranoid_auth_active_proof_challenge=",
-    )
-    .to_owned();
-    let completion_headers = headers_from_cookie_pairs(&[challenge_cookie_pair.as_str()]);
-    let response_payload = PostgresPasswordDerivedSignatureMethodPlugin::response_payload_for_test(
-        password,
-        method_challenge,
-    )
-    .expect("password-derived signature response");
-    let weak_proof_gate_response = bound_proof_of_work_gate_response_for_active_method_completion(
-        &completion_headers,
-        &response_payload,
-        at(30),
-    );
-
-    harness.database_operation_observer.clear();
-    let completed = runtime
-        .execute_active_proof_method_response_from_headers(
-            &completion_headers,
-            CompleteActiveProofMethodResponse {
-                now: at(30),
-                response_payload,
-                weak_proof_gate_response: Some(weak_proof_gate_response),
-            },
-        )
-        .await
-        .expect("complete password-derived signature proof");
-
-    assert_database_operations_include_label(
-        &harness.database_operation_observer,
-        "auth_core.password_derived_signature.verify.fetch_locked_current_verifier",
-        "password-derived signature success must recheck authoritative verifier state",
-    );
-    assert_eq!(
-        completed.outcome(),
-        &Outcome::ActiveProofCompleted {
-            attempt_id: attempt_id.clone(),
-            proof: plugin.method().verified_proof_summary(),
-        }
-    );
-    assert_eq!(
-        count_satisfied_proofs_for_attempt(pool, store_config, &attempt_id).await,
-        1
-    );
-    assert_eq!(
-        fetch_satisfied_proof_source_for_attempt(pool, store_config, &attempt_id).await,
-        Some(VerifiedProofSource::new(
-            VerifiedProofSourceKind::CredentialInstance,
-            password_credential_id,
-        ))
-    );
-    assert_eq!(
-        count_open_challenges_for_challenge(pool, store_config, &challenge_id).await,
-        0
-    );
-
-    harness.drop_schema().await;
-}
-
-#[tokio::test]
-async fn postgres_runtime_rejects_wrong_password_derived_signature_before_database_work() {
-    let _postgres_runtime_test_guard = AUTH_POSTGRES_RUNTIME_TEST_LOCK.lock().await;
-    let harness =
-        PostgresRuntimeTestHarness::connect_required_with_password_derived_signature_method().await;
-    let pool = &harness.pool;
-    let store_config = &harness.store_config;
-    let runtime = &harness.runtime;
-    let plugin = password_derived_signature_plugin_for_harness(&harness);
-    let empty_headers = HeaderMap::new();
-    let subject_id: SubjectId = id("wrong-password-signature-subject");
-    let password_credential_id: VerifiedProofSourceId = id("wrong-password-signature-credential");
-    let lookup_handle = b"wrong-password-signature-lookup";
-    let salt = PasswordKdfSalt::from_bytes(&[12_u8; PASSWORD_KDF_SALT_SIZE]).expect("KDF salt");
-    let params = minimum_accepted_password_kdf_params_for_tests();
-
-    plugin
-        .store_verifier_for_test(
-            pool,
-            PasswordDerivedSignatureVerifierForTest {
-                subject_id: &subject_id,
-                password_credential_id: &password_credential_id,
-                lookup_handle,
-                password: b"correct-password",
-                salt,
-                params,
-                now: at(10),
-            },
-        )
-        .await
-        .expect("store password-derived verifier");
-
-    let issued = runtime
-        .execute_unbound_active_proof_attempt_start_and_active_proof_method_challenge_issue_from_headers(
-            &empty_headers,
-            StartAndIssueActiveProofMethodChallengeInput {
-                now: at(20),
-                proof_use: ProofUse::ContributeToFullAuthentication,
-                method: plugin.method().clone(),
-                method_challenge_request_payload: Some(
-                    PostgresPasswordDerivedSignatureMethodPlugin::challenge_request_payload_for_test(
-                        lookup_handle,
-                    )
-                    .expect("password-derived challenge request payload"),
-                ),
-            },
-            challenge_issue_preflight_response_for_test(
-                at(20),
-                ProofUse::ContributeToFullAuthentication,
-                plugin.method(),
-            ),
-        )
-        .await
-        .expect("issue password-derived signature challenge");
-    let (challenge_id, method_challenge) = match issued.outcome() {
-        Outcome::ActiveProofMethodChallengeIssued {
-            challenge_id,
-            method_challenge,
-            ..
-        } => (challenge_id.clone(), method_challenge),
-        outcome => panic!("expected password-derived signature challenge issue, got {outcome:?}"),
-    };
-    let challenge_cookie_pair = cookie_pair_from_set_cookie(
-        issued.set_cookie_headers(),
-        "__Host-__paranoid_auth_active_proof_challenge=",
-    )
-    .to_owned();
-    let completion_headers = headers_from_cookie_pairs(&[challenge_cookie_pair.as_str()]);
-    let response_payload = PostgresPasswordDerivedSignatureMethodPlugin::response_payload_for_test(
-        b"wrong-password",
-        method_challenge,
-    )
-    .expect("wrong password-derived signature response");
-    let weak_proof_gate_response = bound_proof_of_work_gate_response_for_active_method_completion(
-        &completion_headers,
-        &response_payload,
-        at(30),
-    );
-
-    harness.database_operation_observer.clear();
-    let error = runtime
-        .execute_active_proof_method_response_from_headers(
-            &completion_headers,
-            CompleteActiveProofMethodResponse {
-                now: at(30),
-                response_payload,
-                weak_proof_gate_response: Some(weak_proof_gate_response),
-            },
-        )
-        .await
-        .expect_err("wrong password-derived signature must reject before state load");
-
-    assert!(matches!(
-        error,
-        super::super::postgres_runtime::AuthPostgresWebRuntimeExecutionError::MethodBuild(
-            super::super::postgres_method_runtime::PostgresAuthMethodBuildError::PluginRejected {
-                family: ProofFamily::MessageSignature,
-                operation: "active_proof_completion",
-                ..
-            }
-        )
-    ));
-    assert_no_database_operations(
-        &harness.database_operation_observer,
-        "wrong password-derived signature must reject before any database operation",
-    );
-    assert_eq!(
-        count_open_challenges_for_challenge(pool, store_config, &challenge_id).await,
-        1,
-        "wrong password-derived signature must leave the authoritative challenge open",
-    );
-
-    harness.drop_schema().await;
-}
-
-#[tokio::test]
-async fn postgres_runtime_rejects_invalid_password_derived_weak_gate_before_database_work() {
-    let _postgres_runtime_test_guard = AUTH_POSTGRES_RUNTIME_TEST_LOCK.lock().await;
-    let harness =
-        PostgresRuntimeTestHarness::connect_required_with_password_derived_signature_method().await;
-    let pool = &harness.pool;
-    let store_config = &harness.store_config;
-    let runtime = &harness.runtime;
-    let plugin = password_derived_signature_plugin_for_harness(&harness);
-    let empty_headers = HeaderMap::new();
-    let subject_id: SubjectId = id("invalid-gate-password-signature-subject");
-    let password_credential_id: VerifiedProofSourceId =
-        id("invalid-gate-password-signature-credential");
-    let lookup_handle = b"invalid-gate-password-signature-lookup";
-    let salt = PasswordKdfSalt::from_bytes(&[17_u8; PASSWORD_KDF_SALT_SIZE]).expect("KDF salt");
-    let params = minimum_accepted_password_kdf_params_for_tests();
-
-    plugin
-        .store_verifier_for_test(
-            pool,
-            PasswordDerivedSignatureVerifierForTest {
-                subject_id: &subject_id,
-                password_credential_id: &password_credential_id,
-                lookup_handle,
-                password: b"correct-password",
-                salt,
-                params,
-                now: at(10),
-            },
-        )
-        .await
-        .expect("store password-derived verifier");
-
-    let issued = runtime
-        .execute_unbound_active_proof_attempt_start_and_active_proof_method_challenge_issue_from_headers(
-            &empty_headers,
-            StartAndIssueActiveProofMethodChallengeInput {
-                now: at(20),
-                proof_use: ProofUse::ContributeToFullAuthentication,
-                method: plugin.method().clone(),
-                method_challenge_request_payload: Some(
-                    PostgresPasswordDerivedSignatureMethodPlugin::challenge_request_payload_for_test(
-                        lookup_handle,
-                    )
-                    .expect("password-derived challenge request payload"),
-                ),
-            },
-            challenge_issue_preflight_response_for_test(
-                at(20),
-                ProofUse::ContributeToFullAuthentication,
-                plugin.method(),
-            ),
-        )
-        .await
-        .expect("issue password-derived signature challenge");
-    let (attempt_id, challenge_id, method_challenge) = match issued.outcome() {
-        Outcome::ActiveProofMethodChallengeIssued {
-            attempt_id,
-            challenge_id,
-            method_challenge,
-            ..
-        } => (attempt_id.clone(), challenge_id.clone(), method_challenge),
-        outcome => panic!("expected password-derived signature challenge issue, got {outcome:?}"),
-    };
-    let challenge_cookie_pair = cookie_pair_from_set_cookie(
-        issued.set_cookie_headers(),
-        "__Host-__paranoid_auth_active_proof_challenge=",
-    )
-    .to_owned();
-    let completion_headers = headers_from_cookie_pairs(&[challenge_cookie_pair.as_str()]);
-    let response_payload = PostgresPasswordDerivedSignatureMethodPlugin::response_payload_for_test(
-        b"correct-password",
-        method_challenge,
-    )
-    .expect("valid password-derived signature response");
-
-    harness.database_operation_observer.clear();
-    let error = runtime
-        .execute_active_proof_method_response_from_headers(
-            &completion_headers,
-            CompleteActiveProofMethodResponse {
-                now: at(30),
-                response_payload,
-                weak_proof_gate_response: Some(invalid_proof_of_work_gate_response()),
-            },
-        )
-        .await
-        .expect_err("invalid password-derived weak gate must reject before state load");
-
-    assert!(matches!(
-        error,
-        super::super::postgres_runtime::AuthPostgresWebRuntimeExecutionError::Core(
-            Error::WeakProofGateVerificationFailed
-        )
-    ));
-    assert_no_database_operations(
-        &harness.database_operation_observer,
-        "invalid password-derived weak gate must reject before any database operation",
-    );
-    assert_eq!(
-        count_open_challenges_for_challenge(pool, store_config, &challenge_id).await,
-        1,
-        "invalid password-derived weak gate must leave the authoritative challenge open",
-    );
-    assert_eq!(
-        count_satisfied_proofs_for_attempt(pool, store_config, &attempt_id).await,
-        0
-    );
-
-    harness.drop_schema().await;
-}
-
-#[tokio::test]
-async fn postgres_runtime_rejects_reused_password_derived_weak_gate_for_different_signature_before_database_work()
- {
-    let _postgres_runtime_test_guard = AUTH_POSTGRES_RUNTIME_TEST_LOCK.lock().await;
-    let harness =
-        PostgresRuntimeTestHarness::connect_required_with_password_derived_signature_method().await;
-    let pool = &harness.pool;
-    let store_config = &harness.store_config;
-    let runtime = &harness.runtime;
-    let plugin = password_derived_signature_plugin_for_harness(&harness);
-    let empty_headers = HeaderMap::new();
-    let subject_id: SubjectId = id("reused-gate-password-signature-subject");
-    let password_credential_id: VerifiedProofSourceId =
-        id("reused-gate-password-signature-credential");
-    let lookup_handle = b"reused-gate-password-signature-lookup";
-    let salt = PasswordKdfSalt::from_bytes(&[15_u8; PASSWORD_KDF_SALT_SIZE]).expect("KDF salt");
-    let params = minimum_accepted_password_kdf_params_for_tests();
-
-    plugin
-        .store_verifier_for_test(
-            pool,
-            PasswordDerivedSignatureVerifierForTest {
-                subject_id: &subject_id,
-                password_credential_id: &password_credential_id,
-                lookup_handle,
-                password: b"correct-password",
-                salt,
-                params,
-                now: at(10),
-            },
-        )
-        .await
-        .expect("store password-derived verifier");
-
-    let issued = runtime
-        .execute_unbound_active_proof_attempt_start_and_active_proof_method_challenge_issue_from_headers(
-            &empty_headers,
-            StartAndIssueActiveProofMethodChallengeInput {
-                now: at(20),
-                proof_use: ProofUse::ContributeToFullAuthentication,
-                method: plugin.method().clone(),
-                method_challenge_request_payload: Some(
-                    PostgresPasswordDerivedSignatureMethodPlugin::challenge_request_payload_for_test(
-                        lookup_handle,
-                    )
-                    .expect("password-derived challenge request payload"),
-                ),
-            },
-            challenge_issue_preflight_response_for_test(
-                at(20),
-                ProofUse::ContributeToFullAuthentication,
-                plugin.method(),
-            ),
-        )
-        .await
-        .expect("issue password-derived signature challenge");
-    let (challenge_id, method_challenge) = match issued.outcome() {
-        Outcome::ActiveProofMethodChallengeIssued {
-            challenge_id,
-            method_challenge,
-            ..
-        } => (challenge_id.clone(), method_challenge),
-        outcome => panic!("expected password-derived signature challenge issue, got {outcome:?}"),
-    };
-    let challenge_cookie_pair = cookie_pair_from_set_cookie(
-        issued.set_cookie_headers(),
-        "__Host-__paranoid_auth_active_proof_challenge=",
-    )
-    .to_owned();
-    let completion_headers = headers_from_cookie_pairs(&[challenge_cookie_pair.as_str()]);
-    let first_guessed_response_payload =
-        PostgresPasswordDerivedSignatureMethodPlugin::response_payload_for_test(
-            b"first-wrong-password",
-            method_challenge,
-        )
-        .expect("first guessed password-derived signature response");
-    let weak_proof_gate_response = bound_proof_of_work_gate_response_for_active_method_completion(
-        &completion_headers,
-        &first_guessed_response_payload,
-        at(30),
-    );
-    let second_guessed_response_payload =
-        PostgresPasswordDerivedSignatureMethodPlugin::response_payload_for_test(
-            b"second-wrong-password",
-            method_challenge,
-        )
-        .expect("second guessed password-derived signature response");
-
-    harness.database_operation_observer.clear();
-    let error = runtime
-        .execute_active_proof_method_response_from_headers(
-            &completion_headers,
-            CompleteActiveProofMethodResponse {
-                now: at(30),
-                response_payload: second_guessed_response_payload,
-                weak_proof_gate_response: Some(weak_proof_gate_response),
-            },
-        )
-        .await
-        .expect_err("weak gate solved for one signature must not work for another signature");
-
-    assert!(matches!(
-        error,
-        super::super::postgres_runtime::AuthPostgresWebRuntimeExecutionError::Core(
-            Error::WeakProofGateVerificationFailed
-        )
-    ));
-    assert_no_database_operations(
-        &harness.database_operation_observer,
-        "reused password-derived weak gate must reject before any database operation",
-    );
-    assert_eq!(
-        count_open_challenges_for_challenge(pool, store_config, &challenge_id).await,
-        1,
-        "reused password-derived weak gate must leave the authoritative challenge open",
-    );
-
-    harness.drop_schema().await;
-}
-
-#[tokio::test]
-async fn postgres_runtime_rejects_password_derived_signature_after_verifier_rotation() {
-    let _postgres_runtime_test_guard = AUTH_POSTGRES_RUNTIME_TEST_LOCK.lock().await;
-    let harness =
-        PostgresRuntimeTestHarness::connect_required_with_password_derived_signature_method().await;
-    let pool = &harness.pool;
-    let store_config = &harness.store_config;
-    let runtime = &harness.runtime;
-    let plugin = password_derived_signature_plugin_for_harness(&harness);
-    let empty_headers = HeaderMap::new();
-    let subject_id: SubjectId = id("rotated-password-signature-subject");
-    let password_credential_id: VerifiedProofSourceId = id("rotated-password-signature-credential");
-    let lookup_handle = b"rotated-password-signature-lookup";
-    let first_salt =
-        PasswordKdfSalt::from_bytes(&[13_u8; PASSWORD_KDF_SALT_SIZE]).expect("first KDF salt");
-    let second_salt =
-        PasswordKdfSalt::from_bytes(&[14_u8; PASSWORD_KDF_SALT_SIZE]).expect("second KDF salt");
-    let params = minimum_accepted_password_kdf_params_for_tests();
-
-    plugin
-        .store_verifier_for_test(
-            pool,
-            PasswordDerivedSignatureVerifierForTest {
-                subject_id: &subject_id,
-                password_credential_id: &password_credential_id,
-                lookup_handle,
-                password: b"old-password",
-                salt: first_salt,
-                params,
-                now: at(10),
-            },
-        )
-        .await
-        .expect("store old password-derived verifier");
-
-    let issued = runtime
-        .execute_unbound_active_proof_attempt_start_and_active_proof_method_challenge_issue_from_headers(
-            &empty_headers,
-            StartAndIssueActiveProofMethodChallengeInput {
-                now: at(20),
-                proof_use: ProofUse::ContributeToFullAuthentication,
-                method: plugin.method().clone(),
-                method_challenge_request_payload: Some(
-                    PostgresPasswordDerivedSignatureMethodPlugin::challenge_request_payload_for_test(
-                        lookup_handle,
-                    )
-                    .expect("password-derived challenge request payload"),
-                ),
-            },
-            challenge_issue_preflight_response_for_test(
-                at(20),
-                ProofUse::ContributeToFullAuthentication,
-                plugin.method(),
-            ),
-        )
-        .await
-        .expect("issue password-derived signature challenge");
-    let (attempt_id, challenge_id, method_challenge) = match issued.outcome() {
-        Outcome::ActiveProofMethodChallengeIssued {
-            attempt_id,
-            challenge_id,
-            method_challenge,
-            ..
-        } => (attempt_id.clone(), challenge_id.clone(), method_challenge),
-        outcome => panic!("expected password-derived signature challenge issue, got {outcome:?}"),
-    };
-    let challenge_cookie_pair = cookie_pair_from_set_cookie(
-        issued.set_cookie_headers(),
-        "__Host-__paranoid_auth_active_proof_challenge=",
-    )
-    .to_owned();
-    let response_payload = PostgresPasswordDerivedSignatureMethodPlugin::response_payload_for_test(
-        b"old-password",
-        method_challenge,
-    )
-    .expect("password-derived signature response against sealed old verifier");
-    let weak_proof_gate_response = bound_proof_of_work_gate_response_for_active_method_completion(
-        &headers_from_cookie_pairs(&[challenge_cookie_pair.as_str()]),
-        &response_payload,
-        at(30),
-    );
-
-    plugin
-        .store_verifier_for_test(
-            pool,
-            PasswordDerivedSignatureVerifierForTest {
-                subject_id: &subject_id,
-                password_credential_id: &password_credential_id,
-                lookup_handle,
-                password: b"new-password",
-                salt: second_salt,
-                params,
-                now: at(25),
-            },
-        )
-        .await
-        .expect("rotate password-derived verifier");
-
-    let completion_headers = headers_from_cookie_pairs(&[challenge_cookie_pair.as_str()]);
-    harness.database_operation_observer.clear();
-    let error = runtime
-        .execute_active_proof_method_response_from_headers(
-            &completion_headers,
-            CompleteActiveProofMethodResponse {
-                now: at(30),
-                response_payload,
-                weak_proof_gate_response: Some(weak_proof_gate_response),
-            },
-        )
-        .await
-        .expect_err("stale password-derived signature challenge must reject after recheck");
-
-    assert!(matches!(
-        error,
-        super::super::postgres_runtime::AuthPostgresWebRuntimeExecutionError::MethodBuild(
-            super::super::postgres_method_runtime::PostgresAuthMethodBuildError::PluginRejected {
-                family: ProofFamily::MessageSignature,
-                operation: "active_proof_authoritative_confirmation",
-                ..
-            }
-        )
-    ));
-    assert_database_operations_include_label(
-        &harness.database_operation_observer,
-        "auth_core.password_derived_signature.verify.fetch_locked_current_verifier",
-        "stale password-derived signature challenge must perform authoritative verifier recheck",
-    );
-    assert_eq!(
-        count_satisfied_proofs_for_attempt(pool, store_config, &attempt_id).await,
-        0
-    );
-    assert_eq!(
-        count_open_challenges_for_challenge(pool, store_config, &challenge_id).await,
-        1
-    );
-
-    harness.drop_schema().await;
-}
-
-#[tokio::test]
-async fn postgres_runtime_authoritative_active_method_loads_resolved_subject_revocation() {
-    let _postgres_runtime_test_guard = AUTH_POSTGRES_RUNTIME_TEST_LOCK.lock().await;
-    let method = ProofMethodDeclaration::new(ProofFamily::MessageSignature, "ssh_signature")
-        .expect("message signature method");
-    let harness =
-        PostgresRuntimeTestHarness::connect_required_with_registered_authoritative_test_method(
-            method.clone(),
-        )
-        .await;
-    let pool = &harness.pool;
-    let store_config = &harness.store_config;
-    let runtime = &harness.runtime;
-    let empty_headers = HeaderMap::new();
-    let subject_id: SubjectId = id("authoritative-revoked-subject");
-
-    let issued = runtime
-        .execute_unbound_active_proof_attempt_start_and_active_proof_method_challenge_issue_from_headers(
-            &empty_headers,
-            StartAndIssueActiveProofMethodChallengeInput {
-                now: at(20),
-                proof_use: ProofUse::ContributeToFullAuthentication,
-                method: method.clone(),
-                method_challenge_request_payload: None,
-            },
-            challenge_issue_preflight_response_for_test(
-                at(20),
-                ProofUse::ContributeToFullAuthentication,
-                &method,
-            ),
-        )
-        .await
-        .expect("issue authoritative message signature challenge through method registry");
-    let (attempt_id, challenge_id, method_challenge) = match issued.outcome() {
-        Outcome::ActiveProofMethodChallengeIssued {
-            attempt_id,
-            challenge_id,
-            method_challenge,
-            ..
-        } => (attempt_id.clone(), challenge_id.clone(), method_challenge),
-        outcome => panic!("expected message signature challenge issue, got {outcome:?}"),
-    };
-    let message_signature_nonce =
-        test_method_runtime_challenge_bytes(method_challenge, ProofFamily::MessageSignature);
-    let challenge_cookie_pair = cookie_pair_from_set_cookie(
-        issued.set_cookie_headers(),
-        "__Host-__paranoid_auth_active_proof_challenge=",
-    )
-    .to_owned();
-    runtime
-        .execute_from_headers(
-            &empty_headers,
-            Command::RevokeSubjectAuthState(RevokeSubjectAuthState {
-                now: at(25),
-                subject_id: subject_id.clone(),
-                reason: RevocationReason::SubjectAuthStateChanged,
-            }),
-        )
-        .await
-        .expect("commit subject-wide revocation before authoritative method completion");
-    let completion_headers = headers_from_cookie_pairs(&[challenge_cookie_pair.as_str()]);
-
-    let error = runtime
-        .execute_active_proof_method_response_from_headers(
-            &completion_headers,
-            CompleteActiveProofMethodResponse {
-                now: at(30),
-                response_payload: test_method_response_payload(
-                    ProofFamily::MessageSignature,
-                    message_signature_nonce,
-                    &subject_id,
-                ),
-                weak_proof_gate_response: None,
-            },
-        )
-        .await
-        .expect_err("resolved subject revocation must reject active method completion");
-
-    assert!(matches!(
-        error,
-        super::super::postgres_runtime::AuthPostgresWebRuntimeExecutionError::Core(
-            Error::ActiveProofAttemptNotOpen
-        )
-    ));
-    assert_eq!(
-        count_satisfied_proofs_for_attempt(pool, store_config, &attempt_id).await,
-        0
-    );
-    assert_eq!(
-        count_open_challenges_for_challenge(pool, store_config, &challenge_id).await,
-        1
-    );
-
-    harness.drop_schema().await;
-}
-
-#[tokio::test]
-async fn postgres_runtime_rejects_active_method_cookie_without_sealed_method_state() {
-    let _postgres_runtime_test_guard = AUTH_POSTGRES_RUNTIME_TEST_LOCK.lock().await;
-    let harness =
-        PostgresRuntimeTestHarness::connect_required_with_message_signature_method().await;
-    let runtime = &harness.runtime;
-    let nonce = ActiveProofChallengeFastFailNonce::from_bytes(
-        &[77_u8; ACTIVE_PROOF_CHALLENGE_FAST_FAIL_NONCE_BYTES],
-    )
-    .expect("nonce");
-    let challenge_cookie = ActiveProofChallengeCookieDraft::new_without_response_mac(
-        ActiveProofChallengeCookieContext::new(
-            id("missing-method-state-attempt"),
-            id("missing-method-state-challenge"),
-            ProofSummary::new(ProofFamily::MessageSignature, "ssh_signature").expect("proof"),
-            at(20),
-            at(60),
-            nonce.clone(),
-        )
-        .expect("challenge cookie context"),
-    )
-    .expect("challenge cookie without method state");
-    let effects = MaterializedResponseEffects::from_vec(vec![
-        MaterializedResponseEffect::IssueActiveProofChallengeCookie(challenge_cookie),
-    ]);
-    let set_cookie_headers = auth_web_transport()
-        .render_set_cookie_headers(at(20), effects)
-        .expect("set cookie headers");
-    let challenge_cookie_pair = cookie_pair_from_set_cookie(
-        &set_cookie_headers,
-        "__Host-__paranoid_auth_active_proof_challenge=",
-    );
-    let completion_headers = headers_from_cookie_pairs(&[challenge_cookie_pair]);
-
-    harness.database_operation_observer.clear();
-    let error = runtime
-        .execute_active_proof_method_response_from_headers(
-            &completion_headers,
-            CompleteActiveProofMethodResponse {
-                now: at(30),
-                response_payload: test_method_response_payload(
-                    ProofFamily::MessageSignature,
-                    nonce.as_bytes(),
-                    &id("missing-method-state-subject"),
-                ),
-                weak_proof_gate_response: Some(invalid_proof_of_work_gate_response()),
-            },
-        )
-        .await
-        .expect_err("active method cookie without sealed state must be rejected");
-
-    assert!(matches!(
-        error,
-        super::super::postgres_runtime::AuthPostgresWebRuntimeExecutionError::Core(
-            Error::MissingActiveProofMethodChallengeState
-        )
-    ));
-    assert_no_database_operations(
-        &harness.database_operation_observer,
-        "active method cookie without sealed method state must reject before any database operation",
-    );
-
-    harness.drop_schema().await;
-}
-
-#[tokio::test]
-async fn postgres_runtime_rejects_expired_active_method_cookie_before_plugin_dispatch() {
-    let _postgres_runtime_test_guard = AUTH_POSTGRES_RUNTIME_TEST_LOCK.lock().await;
-    let harness =
-        PostgresRuntimeTestHarness::connect_required_with_message_signature_method().await;
-    let runtime = &harness.runtime;
-    let nonce = ActiveProofChallengeFastFailNonce::from_bytes(
-        &[78_u8; ACTIVE_PROOF_CHALLENGE_FAST_FAIL_NONCE_BYTES],
-    )
-    .expect("nonce");
-    let challenge_cookie = ActiveProofChallengeCookieDraft::new_with_method_challenge_state(
-        ActiveProofChallengeCookieContext::new(
-            id("expired-active-method-attempt"),
-            id("expired-active-method-challenge"),
-            ProofSummary::new(ProofFamily::MessageSignature, "ssh_signature").expect("proof"),
-            at(20),
-            at(30),
-            nonce,
-        )
-        .expect("challenge cookie context"),
-        ActiveProofMethodChallengeState::try_from_bytes(b"expired-active-method-state".as_slice())
-            .expect("method challenge state"),
-    )
-    .expect("expired active-method challenge cookie");
-    let effects = MaterializedResponseEffects::from_vec(vec![
-        MaterializedResponseEffect::IssueActiveProofChallengeCookie(challenge_cookie),
-    ]);
-    let set_cookie_headers = auth_web_transport()
-        .render_set_cookie_headers(at(20), effects)
-        .expect("set cookie headers");
-    let challenge_cookie_pair = cookie_pair_from_set_cookie(
-        &set_cookie_headers,
-        "__Host-__paranoid_auth_active_proof_challenge=",
-    );
-    let completion_headers = headers_from_cookie_pairs(&[challenge_cookie_pair]);
-
-    harness.database_operation_observer.clear();
-    let error = runtime
-        .execute_active_proof_method_response_from_headers(
-            &completion_headers,
-            CompleteActiveProofMethodResponse {
-                now: at(31),
-                response_payload: ActiveProofMethodResponsePayload::try_from_bytes(
-                    b"malformed-response".as_slice(),
-                )
-                .expect("method response payload"),
-                weak_proof_gate_response: None,
-            },
-        )
-        .await
-        .expect_err("expired active-method cookie must be rejected before plugin dispatch");
-
-    assert!(matches!(
-        error,
-        super::super::postgres_runtime::AuthPostgresWebRuntimeExecutionError::Core(
-            Error::ActiveProofChallengeCookieExpired
-        )
-    ));
-    assert_no_database_operations(
-        &harness.database_operation_observer,
-        "expired active method cookie must reject before any database operation",
-    );
-
-    harness.drop_schema().await;
-}
-
-#[tokio::test]
-async fn postgres_runtime_completes_origin_bound_public_key_through_method_registry() {
-    let _postgres_runtime_test_guard = AUTH_POSTGRES_RUNTIME_TEST_LOCK.lock().await;
-    let harness =
-        PostgresRuntimeTestHarness::connect_required_with_origin_bound_public_key_method().await;
-    let pool = &harness.pool;
-    let store_config = &harness.store_config;
-    let runtime = &harness.runtime;
-    let empty_headers = HeaderMap::new();
-    let subject_id: SubjectId = id("origin-bound-public-key-subject");
-    let method = ProofMethodDeclaration::new(ProofFamily::OriginBoundPublicKey, "webauthn_passkey")
-        .expect("origin-bound public-key method");
-
-    let issued = runtime
-        .execute_unbound_active_proof_attempt_start_and_active_proof_method_challenge_issue_from_headers(
-            &empty_headers,
-            StartAndIssueActiveProofMethodChallengeInput {
-                now: at(20),
-                proof_use: ProofUse::ContributeToFullAuthentication,
-                method: method.clone(),
-                method_challenge_request_payload: None,
-            },
-            challenge_issue_preflight_response_for_test(
-                at(20),
-                ProofUse::ContributeToFullAuthentication,
-                &method,
-            ),
-        )
-        .await
-        .expect("issue origin-bound public-key challenge through method registry");
-    let (attempt_id, challenge_id, method_challenge) = match issued.outcome() {
-        Outcome::ActiveProofMethodChallengeIssued {
-            attempt_id: issued_attempt_id,
-            challenge_id: issued_challenge_id,
-            proof,
-            method_challenge,
-            ..
-        } => {
-            assert_eq!(
-                proof,
-                &ProofSummary::new(ProofFamily::OriginBoundPublicKey, "webauthn_passkey")
-                    .expect("proof"),
-            );
-            (
-                issued_attempt_id.clone(),
-                issued_challenge_id.clone(),
-                method_challenge,
-            )
-        }
-        outcome => panic!("expected origin-bound public-key challenge issue, got {outcome:?}"),
-    };
-    assert!(
-        method_challenge.as_bytes().starts_with(
-            test_challenge_presentation_prefix(ProofFamily::OriginBoundPublicKey)
-                .expect("origin-bound public-key challenge prefix")
-        )
-    );
-    let origin_bound_nonce =
-        test_method_runtime_challenge_bytes(method_challenge, ProofFamily::OriginBoundPublicKey);
-    let challenge_cookie_pair = cookie_pair_from_set_cookie(
-        issued.set_cookie_headers(),
-        "__Host-__paranoid_auth_active_proof_challenge=",
-    )
-    .to_owned();
-    assert_eq!(
-        count_challenges_for_challenge(pool, store_config, &challenge_id).await,
-        1
-    );
-
-    let completion_headers = headers_from_cookie_pairs(&[challenge_cookie_pair.as_str()]);
-    let mismatched_nonce_error = runtime
-        .execute_active_proof_method_response_from_headers(
-            &completion_headers,
-            CompleteActiveProofMethodResponse {
-                now: at(30),
-                response_payload: mismatched_runtime_challenge_test_method_response_payload(
-                    ProofFamily::OriginBoundPublicKey,
-                    origin_bound_nonce,
-                    &subject_id,
-                ),
-                weak_proof_gate_response: None,
-            },
-        )
-        .await
-        .expect_err("origin-bound public-key assertion must bind the runtime nonce");
-    assert!(matches!(
-        mismatched_nonce_error,
-        super::super::postgres_runtime::AuthPostgresWebRuntimeExecutionError::MethodBuild(_)
-    ));
-    assert_eq!(
-        count_open_challenges_for_challenge(pool, store_config, &challenge_id).await,
-        1
-    );
-
-    let completed = runtime
-        .execute_active_proof_method_response_from_headers(
-            &completion_headers,
-            CompleteActiveProofMethodResponse {
-                now: at(35),
-                response_payload: test_method_response_payload(
-                    ProofFamily::OriginBoundPublicKey,
-                    origin_bound_nonce,
-                    &subject_id,
-                ),
-                weak_proof_gate_response: None,
-            },
-        )
-        .await
-        .expect("complete origin-bound public-key proof through method registry");
-
-    assert_eq!(
-        completed.outcome(),
-        &Outcome::ActiveProofCompleted {
-            attempt_id: attempt_id.clone(),
-            proof: ProofSummary::new(ProofFamily::OriginBoundPublicKey, "webauthn_passkey")
-                .expect("proof"),
-        }
-    );
-    assert!(set_cookie_headers_contain_deletion(
-        completed.set_cookie_headers(),
-        "__Host-__paranoid_auth_active_proof_challenge=",
-    ));
-    assert_eq!(
-        count_satisfied_proofs_for_attempt(pool, store_config, &attempt_id).await,
-        1
-    );
-    assert_eq!(
-        fetch_satisfied_proof_source_for_attempt(pool, store_config, &attempt_id).await,
-        Some(test_active_method_proof_source(
-            ProofFamily::OriginBoundPublicKey,
-            test_active_method_source_id(ProofFamily::OriginBoundPublicKey, &subject_id),
-        ))
-    );
-    assert_eq!(
-        count_open_challenges_for_challenge(pool, store_config, &challenge_id).await,
-        0
-    );
-
-    harness.drop_schema().await;
-}
-
-#[tokio::test]
-async fn postgres_runtime_completes_federated_identity_through_method_registry() {
-    let _postgres_runtime_test_guard = AUTH_POSTGRES_RUNTIME_TEST_LOCK.lock().await;
-    let harness =
-        PostgresRuntimeTestHarness::connect_required_with_federated_identity_method().await;
-    let pool = &harness.pool;
-    let store_config = &harness.store_config;
-    let runtime = &harness.runtime;
-    let empty_headers = HeaderMap::new();
-    let subject_id: SubjectId = id("federated-identity-subject");
-    let method =
-        ProofMethodDeclaration::new(ProofFamily::FederatedIdentityAssertion, "oidc_google")
-            .expect("federated identity method");
-
-    let issued = runtime
-        .execute_unbound_active_proof_attempt_start_and_active_proof_method_challenge_issue_from_headers(
-            &empty_headers,
-            StartAndIssueActiveProofMethodChallengeInput {
-                now: at(20),
-                proof_use: ProofUse::ContributeToFullAuthentication,
-                method: method.clone(),
-                method_challenge_request_payload: None,
-            },
-            challenge_issue_preflight_response_for_test(
-                at(20),
-                ProofUse::ContributeToFullAuthentication,
-                &method,
-            ),
-        )
-        .await
-        .expect("issue federated identity state through method registry");
-    let (attempt_id, challenge_id, method_challenge) = match issued.outcome() {
-        Outcome::ActiveProofMethodChallengeIssued {
-            attempt_id: issued_attempt_id,
-            challenge_id: issued_challenge_id,
-            proof,
-            method_challenge,
-            ..
-        } => {
-            assert_eq!(
-                proof,
-                &ProofSummary::new(ProofFamily::FederatedIdentityAssertion, "oidc_google")
-                    .expect("proof"),
-            );
-            (
-                issued_attempt_id.clone(),
-                issued_challenge_id.clone(),
-                method_challenge,
-            )
-        }
-        outcome => panic!("expected federated identity state issue, got {outcome:?}"),
-    };
-    assert!(
-        method_challenge.as_bytes().starts_with(
-            test_challenge_presentation_prefix(ProofFamily::FederatedIdentityAssertion)
-                .expect("federated identity state prefix")
-        )
-    );
-    let federated_state = test_method_runtime_challenge_bytes(
-        method_challenge,
-        ProofFamily::FederatedIdentityAssertion,
-    );
-    let challenge_cookie_pair = cookie_pair_from_set_cookie(
-        issued.set_cookie_headers(),
-        "__Host-__paranoid_auth_active_proof_challenge=",
-    )
-    .to_owned();
-    assert_eq!(
-        count_challenges_for_challenge(pool, store_config, &challenge_id).await,
-        1
-    );
-
-    let completion_headers = headers_from_cookie_pairs(&[challenge_cookie_pair.as_str()]);
-    let mismatched_issuer_error = runtime
-        .execute_active_proof_method_response_from_headers(
-            &completion_headers,
-            CompleteActiveProofMethodResponse {
-                now: at(30),
-                response_payload: mismatched_federated_issuer_test_method_response_payload(
-                    federated_state,
-                    &subject_id,
-                ),
-                weak_proof_gate_response: None,
-            },
-        )
-        .await
-        .expect_err("federated identity assertion must bind issuer, audience, redirect, and state");
-    assert!(matches!(
-        mismatched_issuer_error,
-        super::super::postgres_runtime::AuthPostgresWebRuntimeExecutionError::MethodBuild(_)
-    ));
-    assert_eq!(
-        count_open_challenges_for_challenge(pool, store_config, &challenge_id).await,
-        1
-    );
-
-    let completed = runtime
-        .execute_active_proof_method_response_from_headers(
-            &completion_headers,
-            CompleteActiveProofMethodResponse {
-                now: at(35),
-                response_payload: test_method_response_payload(
-                    ProofFamily::FederatedIdentityAssertion,
-                    federated_state,
-                    &subject_id,
-                ),
-                weak_proof_gate_response: None,
-            },
-        )
-        .await
-        .expect("complete federated identity proof through method registry");
-
-    assert_eq!(
-        completed.outcome(),
-        &Outcome::ActiveProofCompleted {
-            attempt_id: attempt_id.clone(),
-            proof: ProofSummary::new(ProofFamily::FederatedIdentityAssertion, "oidc_google")
-                .expect("proof"),
-        }
-    );
-    assert!(set_cookie_headers_contain_deletion(
-        completed.set_cookie_headers(),
-        "__Host-__paranoid_auth_active_proof_challenge=",
-    ));
-    assert_eq!(
-        count_satisfied_proofs_for_attempt(pool, store_config, &attempt_id).await,
-        1
-    );
-    assert_eq!(
-        fetch_satisfied_proof_source_for_attempt(pool, store_config, &attempt_id).await,
-        Some(test_active_method_proof_source(
-            ProofFamily::FederatedIdentityAssertion,
-            test_active_method_source_id(ProofFamily::FederatedIdentityAssertion, &subject_id),
-        ))
-    );
-    assert_eq!(
-        count_open_challenges_for_challenge(pool, store_config, &challenge_id).await,
-        0
-    );
-
-    harness.drop_schema().await;
-}
-
-#[tokio::test]
-async fn postgres_runtime_completes_totp_through_known_subject_method_registry() {
-    let _postgres_runtime_test_guard = AUTH_POSTGRES_RUNTIME_TEST_LOCK.lock().await;
-    let harness = PostgresRuntimeTestHarness::connect_required_with_totp_method().await;
-    let pool = &harness.pool;
-    let store_config = &harness.store_config;
-    let runtime = &harness.runtime;
-    let totp_plugin = harness.totp_plugin.as_ref().expect("TOTP method plugin");
-    let email_otp = email_otp_plugin_for_harness(&harness);
-    let subject_id: SubjectId = id("totp-known-subject");
-    let totp_credential_id: VerifiedProofSourceId = id("totp-known-credential");
-    let totp_secret = b"totp-known-subject-secret";
-    let method =
-        ProofMethodDeclaration::new(ProofFamily::SharedSecretOtp, "totp").expect("TOTP method");
-
-    totp_plugin
-        .store_secret_for_test(pool, &subject_id, &totp_credential_id, totp_secret, at(10))
-        .await
-        .expect("store TOTP verifier state");
-
-    let issued_auth = complete_full_authentication_through_runtime(
-        runtime,
-        pool,
-        store_config,
-        email_otp,
-        "totp-known-bootstrap",
-        20,
-        subject_id.clone(),
-        false,
-    )
-    .await;
-    let started = start_current_session_active_proof_attempt_through_runtime(
-        runtime,
-        issued_auth.session_cookie_pair.as_str(),
-        at(70),
-        ProofUse::SatisfyStepUp,
-    )
-    .await;
-    let attempt_id = started.attempt_id.clone();
-    let continuation_cookie_pair = started.continuation_cookie_pair;
-    let continuation_headers = headers_from_cookie_pairs(&[continuation_cookie_pair.as_str()]);
-
-    harness.database_operation_observer.clear();
-    let failed_secret_response = mismatched_totp_test_method_response_payload();
-    let failed_weak_proof_gate_response =
-        bound_proof_of_work_gate_response_for_known_subject_completion(
-            &continuation_headers,
-            &method,
-            &failed_secret_response,
-            at(30),
-        );
-    let failed = runtime
-        .execute_known_subject_active_proof_method_response_from_headers(
-            &continuation_headers,
-            CompleteKnownSubjectActiveProofMethodResponse {
-                now: at(30),
-                method: method.clone(),
-                secret_response: failed_secret_response,
-                weak_proof_gate_response: Some(failed_weak_proof_gate_response),
-            },
-        )
-        .await
-        .expect("failed TOTP proof should be recorded through the weak-proof budget");
-    assert_eq!(
-        failed.outcome(),
-        &Outcome::ActiveProofFailureRecorded {
-            attempt_id: attempt_id.clone(),
-            attempt_was_deleted: false,
-        }
-    );
-    assert_database_operations_include_label(
-        &harness.database_operation_observer,
-        "auth_core.totp.verify.fetch_locked_verifier",
-        "wrong direct TOTP with a valid weak gate must perform authoritative verifier lookup",
-    );
-    assert!(failed.set_cookie_headers().is_empty());
-    assert_eq!(
-        count_satisfied_proofs_for_attempt(pool, store_config, &attempt_id).await,
-        0
-    );
-    assert_eq!(
-        fetch_active_proof_attempt_weak_failures(pool, store_config, &attempt_id).await,
-        Some(1),
-    );
-
-    let completed_secret_response = totp_test_method_response_payload(totp_secret, at(85));
-    let completed_weak_proof_gate_response =
-        bound_proof_of_work_gate_response_for_known_subject_completion(
-            &continuation_headers,
-            &method,
-            &completed_secret_response,
-            at(85),
-        );
-    let completed = runtime
-        .execute_known_subject_active_proof_method_response_from_headers(
-            &continuation_headers,
-            CompleteKnownSubjectActiveProofMethodResponse {
-                now: at(85),
-                method,
-                secret_response: completed_secret_response,
-                weak_proof_gate_response: Some(completed_weak_proof_gate_response),
-            },
-        )
-        .await
-        .expect("complete TOTP through known-subject method registry");
-
-    assert_eq!(
-        completed.outcome(),
-        &Outcome::ActiveProofCompleted {
-            attempt_id: attempt_id.clone(),
-            proof: ProofSummary::new(ProofFamily::SharedSecretOtp, "totp").expect("proof"),
-        }
-    );
-    assert!(completed.set_cookie_headers().is_empty());
-    assert_eq!(
-        count_satisfied_proofs_for_attempt(pool, store_config, &attempt_id).await,
-        1
-    );
-    assert_eq!(
-        fetch_satisfied_proof_source_for_attempt(pool, store_config, &attempt_id).await,
-        Some(VerifiedProofSource::new(
-            VerifiedProofSourceKind::CredentialInstance,
-            totp_credential_id,
-        ))
-    );
-
-    harness.drop_schema().await;
-}
-
-#[tokio::test]
-async fn postgres_runtime_challenge_bound_totp_bloom_rejects_definite_miss_before_database_work() {
-    let _postgres_runtime_test_guard = AUTH_POSTGRES_RUNTIME_TEST_LOCK.lock().await;
-    let harness = PostgresRuntimeTestHarness::connect_required_with_totp_method().await;
-    let pool = &harness.pool;
-    let store_config = &harness.store_config;
-    let runtime = &harness.runtime;
-    let totp_plugin = harness.totp_plugin.as_ref().expect("TOTP method plugin");
-    let email_otp = email_otp_plugin_for_harness(&harness);
-    let subject_id: SubjectId = id("totp-bloom-definite-miss-subject");
-    let totp_credential_id: VerifiedProofSourceId = id("totp-bloom-definite-miss-credential");
-    let totp_secret = b"totp-bloom-definite-miss-secret";
-
-    totp_plugin
-        .store_secret_for_test(pool, &subject_id, &totp_credential_id, totp_secret, at(10))
-        .await
-        .expect("store TOTP verifier state");
-
-    let issued_auth = complete_full_authentication_through_runtime(
-        runtime,
-        pool,
-        store_config,
-        email_otp,
-        "totp-bloom-definite-miss-bootstrap",
-        20,
-        subject_id,
-        false,
-    )
-    .await;
-    let challenge = start_current_session_and_issue_challenge_bound_totp_through_runtime(
-        runtime,
-        issued_auth.session_cookie_pair.as_str(),
-        at(70),
-        at(80),
-    )
-    .await;
-    let completion_headers = headers_from_cookie_pairs(&[challenge.challenge_cookie_pair.as_str()]);
-    let secret_response = mismatched_totp_test_method_response_payload();
-    let weak_proof_gate_response =
-        bound_proof_of_work_gate_response_for_challenge_bound_totp_completion(
-            &completion_headers,
-            &secret_response,
-            at(85),
-        );
-
-    harness.database_operation_observer.clear();
-    let error = runtime
-        .execute_challenge_bound_known_subject_active_proof_method_response_from_headers(
-            &completion_headers,
-            CompleteChallengeBoundKnownSubjectActiveProofMethodResponse {
-                now: at(85),
-                secret_response,
-                weak_proof_gate_response: Some(weak_proof_gate_response),
-            },
-        )
-        .await
-        .expect_err("definite Bloom miss must reject before authoritative state load");
-
-    assert!(matches!(
-        error,
-        super::super::postgres_runtime::AuthPostgresWebRuntimeExecutionError::MethodBuild(
-            super::super::postgres_method_runtime::PostgresAuthMethodBuildError::PluginRejected {
-                family: ProofFamily::SharedSecretOtp,
-                operation: "challenge_bound_known_subject_active_proof_completion",
-                ..
-            }
-        )
-    ));
-    assert_no_database_operations(
-        &harness.database_operation_observer,
-        "definite TOTP Bloom miss must reject before any database operation",
-    );
-    assert_eq!(
-        count_open_challenges_for_challenge(pool, store_config, &challenge.challenge_id).await,
-        1,
-        "definite Bloom miss must leave the authoritative challenge open"
-    );
-    assert_eq!(
-        count_satisfied_proofs_for_attempt(pool, store_config, &challenge.attempt_id).await,
-        0
-    );
-
-    harness.drop_schema().await;
-}
-
-#[tokio::test]
-async fn postgres_runtime_rejects_invalid_challenge_bound_totp_weak_gate_before_database_work() {
-    let _postgres_runtime_test_guard = AUTH_POSTGRES_RUNTIME_TEST_LOCK.lock().await;
-    let harness = PostgresRuntimeTestHarness::connect_required_with_totp_method().await;
-    let pool = &harness.pool;
-    let store_config = &harness.store_config;
-    let runtime = &harness.runtime;
-    let totp_plugin = harness.totp_plugin.as_ref().expect("TOTP method plugin");
-    let email_otp = email_otp_plugin_for_harness(&harness);
-    let subject_id: SubjectId = id("totp-bloom-invalid-gate-subject");
-    let totp_credential_id: VerifiedProofSourceId = id("totp-bloom-invalid-gate-credential");
-    let totp_secret = b"totp-bloom-invalid-gate-secret";
-
-    totp_plugin
-        .store_secret_for_test(pool, &subject_id, &totp_credential_id, totp_secret, at(10))
-        .await
-        .expect("store TOTP verifier state");
-
-    let issued_auth = complete_full_authentication_through_runtime(
-        runtime,
-        pool,
-        store_config,
-        email_otp,
-        "totp-bloom-invalid-gate-bootstrap",
-        20,
-        subject_id,
-        false,
-    )
-    .await;
-    let challenge = start_current_session_and_issue_challenge_bound_totp_through_runtime(
-        runtime,
-        issued_auth.session_cookie_pair.as_str(),
-        at(70),
-        at(80),
-    )
-    .await;
-    let completion_headers = headers_from_cookie_pairs(&[challenge.challenge_cookie_pair.as_str()]);
-    let secret_response = totp_test_method_response_payload(totp_secret, at(85));
-
-    harness.database_operation_observer.clear();
-    let error = runtime
-        .execute_challenge_bound_known_subject_active_proof_method_response_from_headers(
-            &completion_headers,
-            CompleteChallengeBoundKnownSubjectActiveProofMethodResponse {
-                now: at(85),
-                secret_response,
-                weak_proof_gate_response: Some(invalid_proof_of_work_gate_response()),
-            },
-        )
-        .await
-        .expect_err("invalid challenge-bound TOTP weak gate must reject before state load");
-
-    assert!(matches!(
-        error,
-        super::super::postgres_runtime::AuthPostgresWebRuntimeExecutionError::Core(
-            Error::WeakProofGateVerificationFailed
-        )
-    ));
-    assert_no_database_operations(
-        &harness.database_operation_observer,
-        "invalid challenge-bound TOTP weak gate must reject before any database operation",
-    );
-    assert_eq!(
-        count_open_challenges_for_challenge(pool, store_config, &challenge.challenge_id).await,
-        1,
-        "invalid challenge-bound TOTP weak gate must leave the authoritative challenge open",
-    );
-    assert_eq!(
-        count_satisfied_proofs_for_attempt(pool, store_config, &challenge.attempt_id).await,
-        0
-    );
-
-    harness.drop_schema().await;
-}
-
-#[tokio::test]
-async fn postgres_runtime_challenge_bound_totp_bloom_possible_hit_completes_authoritatively() {
-    let _postgres_runtime_test_guard = AUTH_POSTGRES_RUNTIME_TEST_LOCK.lock().await;
-    let harness = PostgresRuntimeTestHarness::connect_required_with_totp_method().await;
-    let pool = &harness.pool;
-    let store_config = &harness.store_config;
-    let runtime = &harness.runtime;
-    let totp_plugin = harness.totp_plugin.as_ref().expect("TOTP method plugin");
-    let email_otp = email_otp_plugin_for_harness(&harness);
-    let subject_id: SubjectId = id("totp-bloom-authoritative-subject");
-    let totp_credential_id: VerifiedProofSourceId = id("totp-bloom-authoritative-credential");
-    let totp_secret = b"totp-bloom-authoritative-secret";
-
-    totp_plugin
-        .store_secret_for_test(pool, &subject_id, &totp_credential_id, totp_secret, at(10))
-        .await
-        .expect("store TOTP verifier state");
-
-    let issued_auth = complete_full_authentication_through_runtime(
-        runtime,
-        pool,
-        store_config,
-        email_otp,
-        "totp-bloom-authoritative-bootstrap",
-        20,
-        subject_id,
-        false,
-    )
-    .await;
-    let challenge = start_current_session_and_issue_challenge_bound_totp_through_runtime(
-        runtime,
-        issued_auth.session_cookie_pair.as_str(),
-        at(70),
-        at(80),
-    )
-    .await;
-    assert!(
-        challenge.challenge_cookie_pair.len() < 2048,
-        "challenge-bound TOTP Bloom cookie pair should stay comfortably below one 4KiB cookie"
-    );
-    let completion_headers = headers_from_cookie_pairs(&[challenge.challenge_cookie_pair.as_str()]);
-    let secret_response = totp_test_method_response_payload(totp_secret, at(85));
-    let weak_proof_gate_response =
-        bound_proof_of_work_gate_response_for_challenge_bound_totp_completion(
-            &completion_headers,
-            &secret_response,
-            at(85),
-        );
-
-    harness.database_operation_observer.clear();
-    let completed = runtime
-        .execute_challenge_bound_known_subject_active_proof_method_response_from_headers(
-            &completion_headers,
-            CompleteChallengeBoundKnownSubjectActiveProofMethodResponse {
-                now: at(85),
-                secret_response,
-                weak_proof_gate_response: Some(weak_proof_gate_response),
-            },
-        )
-        .await
-        .expect("complete challenge-bound TOTP through Bloom lane");
-
-    assert_eq!(
-        completed.outcome(),
-        &Outcome::ActiveProofCompleted {
-            attempt_id: challenge.attempt_id.clone(),
-            proof: ProofSummary::new(ProofFamily::SharedSecretOtp, "totp").expect("proof"),
-        }
-    );
-    assert_database_operations_include_label(
-        &harness.database_operation_observer,
-        "auth_core.totp.verify.fetch_locked_verifier",
-        "possible TOTP Bloom hit must perform authoritative verifier lookup",
-    );
-    assert_eq!(
-        count_open_challenges_for_challenge(pool, store_config, &challenge.challenge_id).await,
-        0
-    );
-    assert_eq!(
-        fetch_satisfied_proof_source_for_attempt(pool, store_config, &challenge.attempt_id).await,
-        Some(VerifiedProofSource::new(
-            VerifiedProofSourceKind::CredentialInstance,
-            totp_credential_id,
-        ))
-    );
-
-    harness.drop_schema().await;
-}
-
-#[tokio::test]
-async fn postgres_runtime_challenge_bound_totp_bloom_possible_hit_rechecks_verifier_version() {
-    let _postgres_runtime_test_guard = AUTH_POSTGRES_RUNTIME_TEST_LOCK.lock().await;
-    let harness = PostgresRuntimeTestHarness::connect_required_with_totp_method().await;
-    let pool = &harness.pool;
-    let store_config = &harness.store_config;
-    let runtime = &harness.runtime;
-    let totp_plugin = harness.totp_plugin.as_ref().expect("TOTP method plugin");
-    let email_otp = email_otp_plugin_for_harness(&harness);
-    let subject_id: SubjectId = id("totp-bloom-stale-verifier-subject");
-    let totp_credential_id: VerifiedProofSourceId = id("totp-bloom-stale-verifier-credential");
-    let old_totp_secret = b"totp-bloom-stale-verifier-old-secret";
-    let new_totp_secret = b"totp-bloom-stale-verifier-new-secret";
-
-    totp_plugin
-        .store_secret_for_test(
-            pool,
-            &subject_id,
-            &totp_credential_id,
-            old_totp_secret,
-            at(10),
-        )
-        .await
-        .expect("store old TOTP verifier state");
-
-    let issued_auth = complete_full_authentication_through_runtime(
-        runtime,
-        pool,
-        store_config,
-        email_otp,
-        "totp-bloom-stale-verifier-bootstrap",
-        20,
-        subject_id.clone(),
-        false,
-    )
-    .await;
-    let challenge = start_current_session_and_issue_challenge_bound_totp_through_runtime(
-        runtime,
-        issued_auth.session_cookie_pair.as_str(),
-        at(70),
-        at(80),
-    )
-    .await;
-    let completion_headers = headers_from_cookie_pairs(&[challenge.challenge_cookie_pair.as_str()]);
-    let secret_response = totp_test_method_response_payload(old_totp_secret, at(85));
-    let weak_proof_gate_response =
-        bound_proof_of_work_gate_response_for_challenge_bound_totp_completion(
-            &completion_headers,
-            &secret_response,
-            at(85),
-        );
-
-    totp_plugin
-        .store_secret_for_test(
-            pool,
-            &subject_id,
-            &totp_credential_id,
-            new_totp_secret,
-            at(82),
-        )
-        .await
-        .expect("rotate TOTP verifier state");
-
-    harness.database_operation_observer.clear();
-    let failed = runtime
-        .execute_challenge_bound_known_subject_active_proof_method_response_from_headers(
-            &completion_headers,
-            CompleteChallengeBoundKnownSubjectActiveProofMethodResponse {
-                now: at(85),
-                secret_response,
-                weak_proof_gate_response: Some(weak_proof_gate_response),
-            },
-        )
-        .await
-        .expect("stale verifier Bloom possible hit should record a proof failure");
-
-    assert_eq!(
-        failed.outcome(),
-        &Outcome::ActiveProofFailureRecorded {
-            attempt_id: challenge.attempt_id.clone(),
-            attempt_was_deleted: false,
-        }
-    );
-    assert_database_operations_include_label(
-        &harness.database_operation_observer,
-        "auth_core.totp.verify.fetch_locked_verifier",
-        "stale TOTP Bloom possible hit must perform authoritative verifier/version recheck",
-    );
-    assert_eq!(
-        count_satisfied_proofs_for_attempt(pool, store_config, &challenge.attempt_id).await,
-        0
-    );
-    assert_eq!(
-        fetch_active_proof_attempt_weak_failures(pool, store_config, &challenge.attempt_id).await,
-        Some(1)
-    );
-
-    harness.drop_schema().await;
-}
-
-#[tokio::test]
-async fn postgres_runtime_challenge_bound_totp_bloom_has_no_false_negative_for_late_window_code() {
-    let _postgres_runtime_test_guard = AUTH_POSTGRES_RUNTIME_TEST_LOCK.lock().await;
-    let harness = PostgresRuntimeTestHarness::connect_required_with_totp_method().await;
-    let pool = &harness.pool;
-    let store_config = &harness.store_config;
-    let runtime = &harness.runtime;
-    let totp_plugin = harness.totp_plugin.as_ref().expect("TOTP method plugin");
-    let email_otp = email_otp_plugin_for_harness(&harness);
-    let subject_id: SubjectId = id("totp-bloom-late-window-subject");
-    let totp_credential_id: VerifiedProofSourceId = id("totp-bloom-late-window-credential");
-    let totp_secret = b"totp-bloom-late-window-secret";
-
-    totp_plugin
-        .store_secret_for_test(pool, &subject_id, &totp_credential_id, totp_secret, at(10))
-        .await
-        .expect("store TOTP verifier state");
-
-    let issued_auth = complete_full_authentication_through_runtime(
-        runtime,
-        pool,
-        store_config,
-        email_otp,
-        "totp-bloom-late-window-bootstrap",
-        20,
-        subject_id,
-        false,
-    )
-    .await;
-    let challenge = start_current_session_and_issue_challenge_bound_totp_through_runtime(
-        runtime,
-        issued_auth.session_cookie_pair.as_str(),
-        at(70),
-        at(80),
-    )
-    .await;
-    let completion_headers = headers_from_cookie_pairs(&[challenge.challenge_cookie_pair.as_str()]);
-    let secret_response = totp_test_method_response_payload(totp_secret, at(115));
-    let weak_proof_gate_response =
-        bound_proof_of_work_gate_response_for_challenge_bound_totp_completion(
-            &completion_headers,
-            &secret_response,
-            at(115),
-        );
-
-    let completed = runtime
-        .execute_challenge_bound_known_subject_active_proof_method_response_from_headers(
-            &completion_headers,
-            CompleteChallengeBoundKnownSubjectActiveProofMethodResponse {
-                now: at(115),
-                secret_response,
-                weak_proof_gate_response: Some(weak_proof_gate_response),
-            },
-        )
-        .await
-        .expect("late-window TOTP code must not be a Bloom false negative");
-
-    assert!(matches!(
-        completed.outcome(),
-        Outcome::ActiveProofCompleted { .. }
-    ));
-    assert_eq!(
-        count_satisfied_proofs_for_attempt(pool, store_config, &challenge.attempt_id).await,
-        1
-    );
-
-    harness.drop_schema().await;
-}
-
-#[tokio::test]
-async fn postgres_runtime_deletes_attempt_after_totp_failure_budget() {
-    let _postgres_runtime_test_guard = AUTH_POSTGRES_RUNTIME_TEST_LOCK.lock().await;
-    let harness = PostgresRuntimeTestHarness::connect_required_with_totp_method().await;
-    let pool = &harness.pool;
-    let store_config = &harness.store_config;
-    let runtime = &harness.runtime;
-    let totp_plugin = harness.totp_plugin.as_ref().expect("TOTP method plugin");
-    let email_otp = email_otp_plugin_for_harness(&harness);
-    let subject_id: SubjectId = id("totp-budget-subject");
-    let totp_credential_id: VerifiedProofSourceId = id("totp-budget-credential");
-    let method =
-        ProofMethodDeclaration::new(ProofFamily::SharedSecretOtp, "totp").expect("TOTP method");
-
-    let issued_auth = complete_full_authentication_through_runtime(
-        runtime,
-        pool,
-        store_config,
-        email_otp,
-        "totp-budget-bootstrap",
-        20,
-        subject_id.clone(),
-        false,
-    )
-    .await;
-    let started = start_current_session_active_proof_attempt_through_runtime(
-        runtime,
-        issued_auth.session_cookie_pair.as_str(),
-        at(70),
-        ProofUse::SatisfyStepUp,
-    )
-    .await;
-    let attempt_id = started.attempt_id.clone();
-    let continuation_cookie_pair = started.continuation_cookie_pair;
-    let continuation_headers = headers_from_cookie_pairs(&[continuation_cookie_pair.as_str()]);
-
-    totp_plugin
-        .store_secret_for_test(
-            pool,
-            &subject_id,
-            &totp_credential_id,
-            b"totp-budget-secret",
-            at(10),
-        )
-        .await
-        .expect("store TOTP verifier state");
-
-    for (now, attempt_was_deleted) in [(80, false), (81, false), (82, true)] {
-        let secret_response = mismatched_totp_test_method_response_payload();
-        let weak_proof_gate_response =
-            bound_proof_of_work_gate_response_for_known_subject_completion(
-                &continuation_headers,
-                &method,
-                &secret_response,
-                at(now),
-            );
-        let failed = runtime
-            .execute_known_subject_active_proof_method_response_from_headers(
-                &continuation_headers,
-                CompleteKnownSubjectActiveProofMethodResponse {
-                    now: at(now),
-                    method: method.clone(),
-                    secret_response,
-                    weak_proof_gate_response: Some(weak_proof_gate_response),
-                },
-            )
-            .await
-            .expect("failed TOTP proof should record or delete by weak-proof budget");
-        assert_eq!(
-            failed.outcome(),
-            &Outcome::ActiveProofFailureRecorded {
-                attempt_id: attempt_id.clone(),
-                attempt_was_deleted,
-            }
-        );
     }
-
-    assert_eq!(
-        count_active_proof_attempts_for_attempt(pool, store_config, &attempt_id).await,
-        0
-    );
-    assert_eq!(
-        count_satisfied_proofs_for_attempt(pool, store_config, &attempt_id).await,
-        0
-    );
-    assert_eq!(
-        totp_plugin
-            .count_verifiers_for_subject_for_test(pool, &subject_id)
-            .await
-            .expect("count TOTP verifier after weak-proof budget exhaustion"),
-        1,
-        "exhausting a TOTP proof ceremony must not consume or delete the configured TOTP verifier",
-    );
-    assert_eq!(count_all_sessions(pool, store_config).await, 1);
-    let resolved_existing_session = runtime
-        .execute_request_resolution_from_headers(
-            &headers_from_cookie_pairs(&[issued_auth.session_cookie_pair.as_str()]),
-            ResolveRequestInput {
-                now: at(83),
-                request_kind: RequestKind::StateChanging,
-            },
-        )
-        .await
-        .expect("resolve existing session after weak-proof budget exhaustion");
-    assert_eq!(
-        resolved_existing_session.outcome(),
-        &Outcome::Authenticated(Authenticated {
-            subject_id,
-            session_id: issued_auth.session_id,
-            source: AuthenticationSource::AuthoritativeSession,
-            step_up_is_fresh: false,
-        }),
-        "exhausting a TOTP proof ceremony must not lock or revoke the live session",
-    );
-
-    harness.drop_schema().await;
 }
 
-#[tokio::test]
-async fn postgres_runtime_rejects_invalid_totp_weak_gate_before_state_load() {
-    let _postgres_runtime_test_guard = AUTH_POSTGRES_RUNTIME_TEST_LOCK.lock().await;
-    let harness = PostgresRuntimeTestHarness::connect_required_with_totp_method().await;
-    let pool = &harness.pool;
-    let store_config = &harness.store_config;
-    let runtime = &harness.runtime;
-    let issued_auth = complete_full_authentication_through_runtime(
-        runtime,
-        pool,
-        store_config,
-        email_otp_plugin_for_harness(&harness),
-        "totp-invalid-gate-bootstrap",
-        20,
-        id("unused-invalid-gate-subject"),
-        false,
-    )
-    .await;
-    let started = start_current_session_active_proof_attempt_through_runtime(
-        runtime,
-        issued_auth.session_cookie_pair.as_str(),
-        at(70),
-        ProofUse::SatisfyStepUp,
-    )
-    .await;
-    let continuation_cookie_pair = started.continuation_cookie_pair;
-    let continuation_headers = headers_from_cookie_pairs(&[continuation_cookie_pair.as_str()]);
-
-    harness.database_operation_observer.clear();
-    let error = runtime
-        .execute_known_subject_active_proof_method_response_from_headers(
-            &continuation_headers,
-            CompleteKnownSubjectActiveProofMethodResponse {
-                now: at(80),
-                method: ProofMethodDeclaration::new(ProofFamily::SharedSecretOtp, "totp")
-                    .expect("TOTP method"),
-                secret_response: mismatched_totp_test_method_response_payload(),
-                weak_proof_gate_response: Some(invalid_proof_of_work_gate_response()),
-            },
-        )
-        .await
-        .expect_err("invalid weak gate must fail before loading the active proof attempt");
-
-    assert!(matches!(
-        error,
-        super::super::postgres_runtime::AuthPostgresWebRuntimeExecutionError::Core(
-            Error::WeakProofGateVerificationFailed
-        )
-    ));
-    assert_no_database_operations(
-        &harness.database_operation_observer,
-        "invalid TOTP weak gate must reject before any database operation",
-    );
-
-    harness.drop_schema().await;
-}
-
-#[tokio::test]
-async fn postgres_runtime_completes_recovery_code_through_known_subject_method_registry() {
-    let _postgres_runtime_test_guard = AUTH_POSTGRES_RUNTIME_TEST_LOCK.lock().await;
-    let harness = PostgresRuntimeTestHarness::connect_required_with_recovery_code_method().await;
-    let pool = &harness.pool;
-    let store_config = &harness.store_config;
-    let runtime = &harness.runtime;
-    let recovery_code_plugin = harness
-        .recovery_code_plugin
-        .as_ref()
-        .expect("recovery code method plugin");
-    let email_otp = email_otp_plugin_for_harness(&harness);
-    let subject_id: SubjectId = id("recovery-known-subject");
-    let recovery_code_id = b"recovery-code-id";
-    let recovery_code_secret = b"correct-recovery-code";
-    let method = ProofMethodDeclaration::new(ProofFamily::RecoveryCode, "recovery_code")
-        .expect("recovery code method");
-
-    recovery_code_plugin
-        .store_recovery_code_for_test(
-            pool,
-            &subject_id,
-            recovery_code_id,
-            recovery_code_secret,
-            at(10),
-        )
-        .await
-        .expect("store recovery code verifier state");
-
-    let issued_auth = complete_full_authentication_through_runtime(
-        runtime,
-        pool,
-        store_config,
-        email_otp,
-        "recovery-known-bootstrap",
-        20,
-        subject_id.clone(),
-        false,
-    )
-    .await;
-    let started = start_current_session_active_proof_attempt_through_runtime(
-        runtime,
-        issued_auth.session_cookie_pair.as_str(),
-        at(70),
-        ProofUse::RecoverOrReplaceCredential,
-    )
-    .await;
-    let attempt_id = started.attempt_id.clone();
-    let continuation_cookie_pair = started.continuation_cookie_pair;
-    let continuation_headers = headers_from_cookie_pairs(&[continuation_cookie_pair.as_str()]);
-
-    harness.database_operation_observer.clear();
-    let pre_state_rejected = runtime
-        .execute_known_subject_active_proof_method_response_from_headers(
-            &continuation_headers,
-            CompleteKnownSubjectActiveProofMethodResponse {
-                now: at(80),
-                method: method.clone(),
-                secret_response: mismatched_recovery_code_test_method_response_payload(),
-                weak_proof_gate_response: None,
-            },
-        )
-        .await
-        .expect_err("malformed sealed recovery code must reject before state load");
-    assert!(
-        matches!(
-            pre_state_rejected,
-            super::super::postgres_runtime::AuthPostgresWebRuntimeExecutionError::MethodBuild(_)
-        ),
-        "expected method pre-state rejection, got {pre_state_rejected:?}"
-    );
-    assert_no_database_operations(
-        &harness.database_operation_observer,
-        "malformed sealed recovery code must reject before any database operation",
-    );
-    assert_eq!(
-        recovery_code_plugin
-            .count_recovery_codes_for_subject_for_test(pool, &subject_id)
-            .await
-            .expect("count recovery codes"),
-        1
-    );
-    assert_eq!(
-        recovery_code_plugin
-            .count_unused_recovery_codes_for_subject_for_test(pool, &subject_id)
-            .await
-            .expect("count unused recovery codes"),
-        1
-    );
-    assert_eq!(
-        count_satisfied_proofs_for_attempt(pool, store_config, &attempt_id).await,
-        0
-    );
-    assert_eq!(
-        count_active_proof_attempts_for_attempt(pool, store_config, &attempt_id).await,
-        1
-    );
-    harness.database_operation_observer.clear();
-    let guessed_sealed_rejected = runtime
-        .execute_known_subject_active_proof_method_response_from_headers(
-            &continuation_headers,
-            CompleteKnownSubjectActiveProofMethodResponse {
-                now: at(81),
-                method: method.clone(),
-                secret_response: guessed_recovery_code_test_method_response_payload(),
-                weak_proof_gate_response: None,
-            },
-        )
-        .await
-        .expect_err("guessed sealed recovery code must reject before state load");
-    assert!(
-        matches!(
-            guessed_sealed_rejected,
-            super::super::postgres_runtime::AuthPostgresWebRuntimeExecutionError::MethodBuild(_)
-        ),
-        "expected guessed sealed code method pre-state rejection, got {guessed_sealed_rejected:?}"
-    );
-    assert_no_database_operations(
-        &harness.database_operation_observer,
-        "guessed sealed recovery code must reject before any database operation",
-    );
-    let wrong_subject_sealed_response = recovery_code_plugin
-        .sealed_recovery_code_response_for_test(&id("other-recovery-subject"), recovery_code_secret)
-        .expect("wrong-subject sealed recovery code response");
-    harness.database_operation_observer.clear();
-    let wrong_subject_rejected = runtime
-        .execute_known_subject_active_proof_method_response_from_headers(
-            &continuation_headers,
-            CompleteKnownSubjectActiveProofMethodResponse {
-                now: at(82),
-                method: method.clone(),
-                secret_response: wrong_subject_sealed_response,
-                weak_proof_gate_response: None,
-            },
-        )
-        .await
-        .expect_err("wrong-subject sealed recovery code must reject before state load");
-    assert!(
-        matches!(
-            wrong_subject_rejected,
-            super::super::postgres_runtime::AuthPostgresWebRuntimeExecutionError::MethodBuild(_)
-        ),
-        "expected wrong-subject method pre-state rejection, got {wrong_subject_rejected:?}"
-    );
-    assert_no_database_operations(
-        &harness.database_operation_observer,
-        "wrong-subject sealed recovery code must reject before any database operation",
-    );
-    assert_eq!(
-        recovery_code_plugin
-            .count_unused_recovery_codes_for_subject_for_test(pool, &subject_id)
-            .await
-            .expect("count unused recovery codes"),
-        1
-    );
-    assert_eq!(
-        count_satisfied_proofs_for_attempt(pool, store_config, &attempt_id).await,
-        0
-    );
-    let unused_sealed_response = recovery_code_plugin
-        .sealed_recovery_code_response_for_test(&subject_id, b"unused-recovery-code")
-        .expect("unused sealed recovery code response");
-    harness.database_operation_observer.clear();
-    let unused_sealed_rejection = runtime
-        .execute_known_subject_active_proof_method_response_from_headers(
-            &continuation_headers,
-            CompleteKnownSubjectActiveProofMethodResponse {
-                now: at(83),
-                method: method.clone(),
-                secret_response: unused_sealed_response,
-                weak_proof_gate_response: None,
-            },
-        )
-        .await
-        .expect("unused sealed recovery code must reject authoritatively");
-    assert_eq!(
-        unused_sealed_rejection.outcome(),
-        &Outcome::ActiveProofFailureRecorded {
-            attempt_id: attempt_id.clone(),
-            attempt_was_deleted: false,
-        }
-    );
-    assert_database_operations_include_label(
-        &harness.database_operation_observer,
-        "auth_core.recovery_code.verify.fetch_locked_unused_code",
-        "well-formed unused recovery code must perform authoritative one-time lookup",
-    );
-    assert_eq!(
-        recovery_code_plugin
-            .count_unused_recovery_codes_for_subject_for_test(pool, &subject_id)
-            .await
-            .expect("count unused recovery codes after unused sealed rejection"),
-        1,
-        "unused sealed recovery code must not consume any stored recovery code"
-    );
-    assert_eq!(
-        count_satisfied_proofs_for_attempt(pool, store_config, &attempt_id).await,
-        0,
-        "unused sealed recovery code must not record a satisfied proof"
-    );
-    assert_eq!(
-        fetch_active_proof_attempt_weak_failures(pool, store_config, &attempt_id).await,
-        Some(0),
-        "unused sealed recovery code must not spend online-guessing weak-failure budget"
-    );
-    let sealed_response = recovery_code_plugin
-        .sealed_recovery_code_response_for_test(&subject_id, recovery_code_secret)
-        .expect("sealed recovery code response");
-
-    let completed = runtime
-        .execute_known_subject_active_proof_method_response_from_headers(
-            &continuation_headers,
-            CompleteKnownSubjectActiveProofMethodResponse {
-                now: at(85),
-                method,
-                secret_response: sealed_response,
-                weak_proof_gate_response: None,
-            },
-        )
-        .await
-        .expect("complete recovery code through known-subject method registry");
-
-    assert_eq!(
-        completed.outcome(),
-        &Outcome::ActiveProofCompleted {
-            attempt_id: attempt_id.clone(),
-            proof: ProofSummary::new(ProofFamily::RecoveryCode, "recovery_code").expect("proof"),
-        }
-    );
-    assert!(completed.set_cookie_headers().is_empty());
-    assert_eq!(
-        count_satisfied_proofs_for_attempt(pool, store_config, &attempt_id).await,
-        1
-    );
-    assert_eq!(
-        fetch_satisfied_proof_source_for_attempt(pool, store_config, &attempt_id).await,
-        Some(VerifiedProofSource::new(
-            VerifiedProofSourceKind::CredentialInstance,
-            VerifiedProofSourceId::from_bytes(recovery_code_id.as_slice())
-                .expect("recovery code source id"),
-        ))
-    );
-    assert_eq!(
-        recovery_code_plugin
-            .count_recovery_codes_for_subject_for_test(pool, &subject_id)
-            .await
-            .expect("count recovery codes"),
-        1
-    );
-    assert_eq!(
-        recovery_code_plugin
-            .count_unused_recovery_codes_for_subject_for_test(pool, &subject_id)
-            .await
-            .expect("count unused recovery codes"),
-        0
-    );
-
-    harness.drop_schema().await;
-}
-
-#[tokio::test]
-async fn postgres_runtime_rejects_direct_active_proof_attempt_start() {
-    let _postgres_runtime_test_guard = AUTH_POSTGRES_RUNTIME_TEST_LOCK.lock().await;
-    let harness = PostgresRuntimeTestHarness::connect_required().await;
-    let pool = &harness.pool;
-    let store_config = &harness.store_config;
-    let runtime = &harness.runtime;
-    let empty_headers = HeaderMap::new();
-    let attempt_id: ActiveProofAttemptId = id("totp-unbound-attempt");
-
-    let error = runtime
-        .execute_from_headers(
-            &empty_headers,
-            Command::StartActiveProofAttempt(StartActiveProofAttempt {
-                now: at(20),
-                attempt_id: attempt_id.clone(),
-                proof_use: ProofUse::SatisfyStepUp,
-                subject_id: None,
-            }),
-        )
-        .await
-        .expect_err("direct attempt start must require runtime fresh ID generation");
-
-    assert!(matches!(
-        error,
-        super::super::postgres_runtime::AuthPostgresWebRuntimeExecutionError::Core(
-            Error::ActiveProofAttemptStartRequiresRuntimeFreshIdGeneration
-        )
-    ));
-    assert_eq!(
-        count_active_proof_attempts_for_attempt(pool, store_config, &attempt_id).await,
-        0
-    );
-
-    harness.drop_schema().await;
-}
-
-#[tokio::test]
-async fn postgres_runtime_current_session_active_proof_start_without_session_does_not_write() {
-    let _postgres_runtime_test_guard = AUTH_POSTGRES_RUNTIME_TEST_LOCK.lock().await;
-    let harness = PostgresRuntimeTestHarness::connect_required().await;
-    let pool = &harness.pool;
-    let store_config = &harness.store_config;
-    let runtime = &harness.runtime;
-    let empty_headers = HeaderMap::new();
-
-    let execution = runtime
-        .execute_current_session_active_proof_attempt_start_from_headers(
-            &empty_headers,
-            StartCurrentSessionActiveProofAttemptInput {
-                now: at(20),
-                proof_use: ProofUse::SatisfyStepUp,
-            },
-        )
-        .await
-        .expect("missing session resolves without writes");
-
-    assert_eq!(execution.outcome(), &Outcome::NeedsFullAuthentication);
-    assert_eq!(count_all_active_proof_attempts(pool, store_config).await, 0);
-
-    harness.drop_schema().await;
-}
-
-#[tokio::test]
-async fn postgres_runtime_rejects_unbound_challenge_issue_preflight_before_writes() {
-    let _postgres_runtime_test_guard = AUTH_POSTGRES_RUNTIME_TEST_LOCK.lock().await;
-    let harness = PostgresRuntimeTestHarness::connect_required().await;
-    let pool = &harness.pool;
-    let store_config = &harness.store_config;
-    let runtime = &harness.runtime;
-    let email_otp = email_otp_plugin_for_harness(&harness);
-    let empty_headers = HeaderMap::new();
-
-    harness.database_operation_observer.clear();
-    let error = runtime
-        .execute_unbound_active_proof_attempt_start_and_out_of_band_challenge_issue_from_headers(
-            &empty_headers,
-            StartAndIssueOutOfBandChallengeInput {
-                now: at(20),
-                proof_use: ProofUse::ContributeToFullAuthentication,
-                method: ProofMethodDeclaration::new(ProofFamily::OutOfBandCode, "email_otp")
-                    .expect("method declaration"),
-                challenge_dedupe_key: dedupe_key("preflight-rejected:email-hash:window"),
-                recipient_handle: "preflight-rejected-recipient".to_owned(),
-                idempotency_key: "preflight-rejected-delivery".to_owned(),
-            },
-            invalid_challenge_issue_preflight_response(),
-        )
-        .await
-        .expect_err("invalid challenge issue preflight must reject before writes");
-
-    assert!(matches!(
-        error,
-        super::super::postgres_runtime::AuthPostgresWebRuntimeExecutionError::Core(
-            Error::WeakProofGateVerificationFailed
-        )
-    ));
-    assert_no_database_operations(
-        &harness.database_operation_observer,
-        "invalid challenge issue preflight must reject before any database operation",
-    );
-    assert_eq!(count_all_active_proof_attempts(pool, store_config).await, 0);
-    assert_eq!(
-        count_all_active_proof_challenges(pool, store_config).await,
-        0
-    );
-    assert_eq!(
-        count_core_durable_effect_commands(pool, store_config).await,
-        0
-    );
-    assert_eq!(
-        email_otp
-            .count_delivery_commands_for_test(pool)
-            .await
-            .expect("count email otp delivery commands after rejected preflight"),
-        0,
-        "invalid challenge issue preflight must not enqueue method-owned delivery commands",
-    );
-
-    harness.drop_schema().await;
-}
-
-#[tokio::test]
-async fn postgres_runtime_rejects_unbound_challenge_issue_preflight_gate_mismatch_before_writes() {
-    let _postgres_runtime_test_guard = AUTH_POSTGRES_RUNTIME_TEST_LOCK.lock().await;
-    let harness = PostgresRuntimeTestHarness::connect_required().await;
-    let pool = &harness.pool;
-    let store_config = &harness.store_config;
-    let runtime = &harness.runtime;
-    let empty_headers = HeaderMap::new();
-
-    harness.database_operation_observer.clear();
-    let error = runtime
-        .execute_unbound_active_proof_attempt_start_and_active_proof_method_challenge_issue_from_headers(
-            &empty_headers,
-            StartAndIssueActiveProofMethodChallengeInput {
-                now: at(20),
-                proof_use: ProofUse::ContributeToFullAuthentication,
-                method: ProofMethodDeclaration::new(ProofFamily::MessageSignature, "ssh_signature")
-                    .expect("method declaration"),
-                method_challenge_request_payload: None,
-            },
-            mismatched_challenge_issue_preflight_response(),
-        )
-        .await
-        .expect_err("mismatched challenge issue preflight gate must reject before writes");
-
-    assert!(matches!(
-        error,
-        super::super::postgres_runtime::AuthPostgresWebRuntimeExecutionError::Core(
-            Error::ChallengeIssuePreflightGateMismatch
-        )
-    ));
-    assert_no_database_operations(
-        &harness.database_operation_observer,
-        "mismatched challenge issue preflight gate must reject before any database operation",
-    );
-    assert_eq!(count_all_active_proof_attempts(pool, store_config).await, 0);
-    assert_eq!(
-        count_all_active_proof_challenges(pool, store_config).await,
-        0
-    );
-
-    harness.drop_schema().await;
-}
-
-#[tokio::test]
-async fn postgres_runtime_rejects_configured_secret_challenge_issue_path() {
-    let _postgres_runtime_test_guard = AUTH_POSTGRES_RUNTIME_TEST_LOCK.lock().await;
-    let harness = PostgresRuntimeTestHarness::connect_required_with_totp_method().await;
-    let pool = &harness.pool;
-    let store_config = &harness.store_config;
-    let runtime = &harness.runtime;
-    let issued_auth = complete_full_authentication_through_runtime(
-        runtime,
-        pool,
-        store_config,
-        email_otp_plugin_for_harness(&harness),
-        "totp-challenge-path-bootstrap",
-        20,
-        id("totp-challenge-path-subject"),
-        false,
-    )
-    .await;
-    let started = start_current_session_active_proof_attempt_through_runtime(
-        runtime,
-        issued_auth.session_cookie_pair.as_str(),
-        at(70),
-        ProofUse::SatisfyStepUp,
-    )
-    .await;
-    let continuation_cookie_pair = started.continuation_cookie_pair;
-    let continuation_headers = headers_from_cookie_pairs(&[continuation_cookie_pair.as_str()]);
-
-    let error = runtime
-        .execute_active_proof_method_challenge_issue_from_headers(
-            &continuation_headers,
-            IssueActiveProofMethodChallengeInput {
-                now: at(80),
-                method: ProofMethodDeclaration::new(ProofFamily::SharedSecretOtp, "totp")
-                    .expect("TOTP method"),
-                method_challenge_request_payload: None,
-            },
-        )
-        .await
-        .expect_err("TOTP must not use active-proof challenge cookie issuance");
-
-    assert!(matches!(
-        error,
-        super::super::postgres_runtime::AuthPostgresWebRuntimeExecutionError::Core(
-            Error::ProofMethodCannotIssueActiveProofMethodChallenge {
-                family: ProofFamily::SharedSecretOtp
-            }
-        )
-    ));
-
-    harness.drop_schema().await;
-}
-
-#[tokio::test]
-async fn postgres_runtime_rejects_direct_active_proof_completion() {
-    let _postgres_runtime_test_guard = AUTH_POSTGRES_RUNTIME_TEST_LOCK.lock().await;
-    let harness = PostgresRuntimeTestHarness::connect_required().await;
-    let runtime = &harness.runtime;
-    let proof = ProofSummary::new(ProofFamily::MessageSignature, "ssh_signature").expect("proof");
-    let direct_command = Command::CompleteActiveProofChallenge(CompleteActiveProofChallenge {
-        now: at(30),
-        attempt_id: id("direct-message-signature-attempt"),
-        challenge_id: None,
-        verified_proof: VerifiedActiveProof::from_summary(proof, Some(id("direct-subject")))
-            .expect("verified proof"),
-        stateless_fast_fail: StatelessFastFailStatus::NotRequired,
-        weak_proof_gate: WeakProofGateStatus::NotRequired,
-        method_commit_work: Vec::new(),
-    });
-
-    let error = runtime
-        .execute_from_headers(&HeaderMap::new(), direct_command)
-        .await
-        .expect_err("runtime must not accept caller-provided verified active proofs");
-
-    assert!(matches!(
-        error,
-        super::super::postgres_runtime::AuthPostgresWebRuntimeExecutionError::Core(
-            Error::ActiveProofCompletionRequiresRuntimeMethodDispatch
-        )
-    ));
-
-    harness.drop_schema().await;
-}
-
-#[tokio::test]
-async fn postgres_runtime_rejects_direct_active_proof_failure_recording() {
-    let _postgres_runtime_test_guard = AUTH_POSTGRES_RUNTIME_TEST_LOCK.lock().await;
-    let harness = PostgresRuntimeTestHarness::connect_required().await;
-    let runtime = &harness.runtime;
-    let direct_command = Command::RecordActiveProofFailure(RecordActiveProofFailure {
-        now: at(30),
-        attempt_id: id("direct-failure-attempt"),
-        challenge_id: None,
-        method: ProofMethodDeclaration::new(ProofFamily::SharedSecretOtp, "totp")
-            .expect("TOTP method"),
-        weak_proof_gate: verified_proof_of_work_gate(),
-    });
-
-    let error = runtime
-        .execute_from_headers(&HeaderMap::new(), direct_command)
-        .await
-        .expect_err("runtime must not accept caller-provided active-proof failures");
-
-    assert!(matches!(
-        error,
-        super::super::postgres_runtime::AuthPostgresWebRuntimeExecutionError::Core(
-            Error::ActiveProofFailureRequiresRuntimeMethodDispatch
-        )
-    ));
-
-    harness.drop_schema().await;
-}
-
-#[tokio::test]
-async fn postgres_runtime_rejects_direct_credential_reset_commands() {
-    let _postgres_runtime_test_guard = AUTH_POSTGRES_RUNTIME_TEST_LOCK.lock().await;
-    let harness = PostgresRuntimeTestHarness::connect_required().await;
-    let runtime = &harness.runtime;
-    let target_credential_id = id("direct-reset-password-credential");
-    let direct_plan = Command::PlanCredentialReset(PlanCredentialReset {
-        now: at(30),
-        lifecycle_context: credential_lifecycle_context(
-            message_signature_credential_metadata("direct-reset-password-credential"),
-            [CredentialRecoveryAuthority::new(
-                target_credential_id.clone(),
-                CredentialLifecycleAction::Reset,
-                id("direct-reset-authority"),
-                RecoveryAuthorityTiming::Immediate,
-            )],
-            [credential_instance_lifecycle_evidence(
-                "direct-reset-source",
-                [id("direct-reset-authority")],
-            )],
-        ),
-        active_proof_attempt_to_close: None,
-        independent_evidence_required:
-            CredentialLifecycleIndependentEvidenceRequirement::NotRequired,
-        pending_action: None,
-        immediate_subject_auth_revocation:
-            CredentialResetSubjectAuthRevocation::RevokeSubjectAuthState,
-    });
-
-    let plan_error = runtime
-        .execute_from_headers(&HeaderMap::new(), direct_plan)
-        .await
-        .expect_err("runtime must not accept caller-provided credential reset lifecycle context");
-
-    assert!(matches!(
-        plan_error,
-        super::super::postgres_runtime::AuthPostgresWebRuntimeExecutionError::Core(
-            Error::CredentialResetPlanningRequiresRuntimeLifecycleDecision
-        )
-    ));
-
-    let direct_execute = Command::ExecuteCredentialReset(ExecuteCredentialReset {
-        now: at(30),
-        execution_authority: CredentialResetExecutionAuthority::Immediate {
-            lifecycle_context: credential_lifecycle_context(
-                message_signature_credential_metadata("direct-reset-password-credential"),
-                [CredentialRecoveryAuthority::new(
-                    target_credential_id,
-                    CredentialLifecycleAction::Reset,
-                    id("direct-reset-authority"),
-                    RecoveryAuthorityTiming::Immediate,
-                )],
-                [credential_instance_lifecycle_evidence(
-                    "direct-reset-source",
-                    [id("direct-reset-authority")],
-                )],
-            ),
-            independent_evidence_required:
-                CredentialLifecycleIndependentEvidenceRequirement::NotRequired,
-        },
-        method_commit_work: vec![password_reset_method_commit_work(b"direct-reset-verifier")],
-        subject_auth_revocation: CredentialResetSubjectAuthRevocation::RevokeSubjectAuthState,
-    });
-
-    let execute_error = runtime
-        .execute_from_headers(&HeaderMap::new(), direct_execute)
-        .await
-        .expect_err("runtime must not accept caller-provided credential reset method work");
-
-    assert!(matches!(
-        execute_error,
-        super::super::postgres_runtime::AuthPostgresWebRuntimeExecutionError::Core(
-            Error::CredentialResetExecutionRequiresRuntimeMethodDispatch
-        )
-    ));
-
-    let direct_cancel = Command::CancelPendingCredentialReset(CancelPendingCredentialReset {
-        now: at(30),
-        target_credential: message_signature_credential_metadata(
-            "direct-reset-password-credential",
-        ),
-        pending_action: PendingCredentialLifecycleActionRecord::new_open(
-            id("direct-reset-pending-action"),
-            id("subject"),
-            id("direct-reset-password-credential"),
-            CredentialLifecycleAction::Reset,
-            at(10),
-            at(100),
-            at(200),
-        )
-        .expect("pending reset action"),
-    });
-
-    let cancel_error = runtime
-        .execute_from_headers(&HeaderMap::new(), direct_cancel)
-        .await
-        .expect_err("runtime must not accept caller-provided credential reset cancellation facts");
-
-    assert!(matches!(
-        cancel_error,
-        super::super::postgres_runtime::AuthPostgresWebRuntimeExecutionError::Core(
-            Error::CredentialResetCancellationRequiresRuntimeLifecycleDecision
-        )
-    ));
-
-    let direct_lifecycle_execute = Command::ExecuteNonResetPendingCredentialLifecycleAction(
-        ExecuteNonResetPendingCredentialLifecycleAction {
-            now: at(30),
-            target_credential: message_signature_credential_metadata(
-                "direct-replacement-password-credential",
-            ),
-            pending_action: PendingCredentialLifecycleActionRecord::new_open(
-                id("direct-replacement-pending-action"),
-                id("subject"),
-                id("direct-replacement-password-credential"),
-                CredentialLifecycleAction::Replace,
-                at(10),
-                at(20),
-                at(200),
-            )
-            .expect("pending replacement action"),
-            method_commit_work: vec![password_reset_method_commit_work(
-                b"direct-replacement-verifier",
-            )],
-            subject_auth_revocation:
-                CredentialLifecycleSubjectAuthRevocation::PreserveExistingAuthState,
-        },
-    );
-
-    let lifecycle_execute_error = runtime
-        .execute_from_headers(&HeaderMap::new(), direct_lifecycle_execute)
-        .await
-        .expect_err("runtime must not accept caller-provided lifecycle execution facts");
-
-    assert!(matches!(
-        lifecycle_execute_error,
-        super::super::postgres_runtime::AuthPostgresWebRuntimeExecutionError::Core(
-            Error::CredentialLifecycleExecutionRequiresRuntimeMethodDispatch
-        )
-    ));
-
-    let direct_lifecycle_cancel = Command::CancelNonResetPendingCredentialLifecycleAction(
-        CancelNonResetPendingCredentialLifecycleAction {
-            now: at(30),
-            target_credential: message_signature_credential_metadata(
-                "direct-replacement-password-credential",
-            ),
-            pending_action: PendingCredentialLifecycleActionRecord::new_open(
-                id("direct-replacement-pending-action"),
-                id("subject"),
-                id("direct-replacement-password-credential"),
-                CredentialLifecycleAction::Replace,
-                at(10),
-                at(100),
-                at(200),
-            )
-            .expect("pending replacement action"),
-        },
-    );
-
-    let lifecycle_cancel_error = runtime
-        .execute_from_headers(&HeaderMap::new(), direct_lifecycle_cancel)
-        .await
-        .expect_err("runtime must not accept caller-provided lifecycle cancellation facts");
-
-    assert!(matches!(
-        lifecycle_cancel_error,
-        super::super::postgres_runtime::AuthPostgresWebRuntimeExecutionError::Core(
-            Error::CredentialLifecycleCancellationRequiresRuntimeLifecycleDecision
-        )
-    ));
-
-    let direct_subject_deletion_schedule =
-        Command::ScheduleSubjectAuthStateDeletion(ScheduleSubjectAuthStateDeletion {
-            now: at(30),
-            subject_id: id("subject"),
-            pending_action: PendingSubjectLifecycleActionSchedule {
-                pending_action_id: id("direct-subject-deletion-pending-action"),
-                earliest_execute_at: at(100),
-                expires_at: at(200),
-            },
-        });
-
-    let subject_deletion_schedule_error = runtime
-        .execute_from_headers(&HeaderMap::new(), direct_subject_deletion_schedule)
-        .await
-        .expect_err("runtime must not accept caller-provided subject deletion schedule facts");
-
-    assert!(matches!(
-        subject_deletion_schedule_error,
-        super::super::postgres_runtime::AuthPostgresWebRuntimeExecutionError::Core(
-            Error::SubjectAuthStateDeletionSchedulingRequiresRuntimeLifecycleDecision
-        )
-    ));
-
-    let direct_subject_deletion_pending_action = PendingSubjectLifecycleActionRecord::new_open(
-        id("direct-subject-deletion-pending-action"),
-        id("subject"),
-        SubjectLifecycleAction::DeleteSubjectAuthState,
-        at(10),
-        at(20),
-        at(200),
-    )
-    .expect("pending subject deletion action");
-
-    let direct_subject_deletion_execute =
-        Command::ExecutePendingSubjectAuthStateDeletion(ExecutePendingSubjectAuthStateDeletion {
-            now: at(30),
-            pending_action: direct_subject_deletion_pending_action.clone(),
-        });
-
-    let subject_deletion_execute_error = runtime
-        .execute_from_headers(&HeaderMap::new(), direct_subject_deletion_execute)
-        .await
-        .expect_err("runtime must not accept caller-provided subject deletion execution facts");
-
-    assert!(matches!(
-        subject_deletion_execute_error,
-        super::super::postgres_runtime::AuthPostgresWebRuntimeExecutionError::Core(
-            Error::SubjectAuthStateDeletionExecutionRequiresRuntimeLifecycleDecision
-        )
-    ));
-
-    let direct_subject_deletion_cancel =
-        Command::CancelPendingSubjectAuthStateDeletion(CancelPendingSubjectAuthStateDeletion {
-            now: at(30),
-            pending_action: direct_subject_deletion_pending_action,
-        });
-
-    let subject_deletion_cancel_error = runtime
-        .execute_from_headers(&HeaderMap::new(), direct_subject_deletion_cancel)
-        .await
-        .expect_err("runtime must not accept caller-provided subject deletion cancellation facts");
-
-    assert!(matches!(
-        subject_deletion_cancel_error,
-        super::super::postgres_runtime::AuthPostgresWebRuntimeExecutionError::Core(
-            Error::SubjectAuthStateDeletionCancellationRequiresRuntimeLifecycleDecision
-        )
-    ));
-
-    harness.drop_schema().await;
-}
-
-#[tokio::test]
-async fn postgres_runtime_authenticated_credential_reset_planning_builds_lifecycle_context_internally()
- {
-    let _postgres_runtime_test_guard = AUTH_POSTGRES_RUNTIME_TEST_LOCK.lock().await;
-    let harness = PostgresRuntimeTestHarness::connect_required_with_email_otp_method().await;
-    let pool = &harness.pool;
-    let store_config = &harness.store_config;
-    let runtime = &harness.runtime;
-    let subject_id = id("authenticated-reset-plan-subject");
-    let issued_auth = complete_full_authentication_through_runtime(
-        runtime,
-        pool,
-        store_config,
-        email_otp_plugin_for_harness(&harness),
-        "authenticated-reset-plan-bootstrap",
-        20,
-        subject_id.clone(),
-        false,
-    )
-    .await;
-    let target_credential_id = id("authenticated-reset-plan-password");
-    let session_authority = id("authenticated-reset-plan-session-authority");
-    let seed_store = super::super::postgres_store::PostgresAuthStore::new(
-        store_config.clone(),
-        test_keyset("tests.auth.postgres-runtime.credentials.v1"),
-    );
-    seed_store
-        .store_credential_lifecycle_metadata_for_test(
-            pool,
-            &[CredentialInstanceMetadata::new(
-                target_credential_id.clone(),
-                subject_id.clone(),
-                CredentialInstanceKind::MessageSignatureVerifier,
-                "password_signature",
-                CredentialLifecycleState::Active,
-            )
-            .expect("credential metadata")],
-            &[CredentialRecoveryAuthority::new(
-                target_credential_id.clone(),
-                CredentialLifecycleAction::Reset,
-                session_authority.clone(),
-                RecoveryAuthorityTiming::Immediate,
-            )],
-            &[LifecycleAuthorityEvidence::authenticated_session(
-                issued_auth.session_id.clone(),
-                [session_authority],
-            )
-            .expect("session lifecycle evidence")],
-            at(50),
-        )
-        .await
-        .expect("seed credential lifecycle metadata");
-    let headers = headers_from_cookie_pairs(&[issued_auth.session_cookie_pair.as_str()]);
-
-    let execution = runtime
-        .execute_authenticated_credential_reset_planning_from_headers(
-            &headers,
-            PlanAuthenticatedCredentialResetInput {
-                now: at(80),
-                target_credential_instance_id: target_credential_id.clone(),
-                independent_evidence_required:
-                    CredentialLifecycleIndependentEvidenceRequirement::NotRequired,
-                pending_action_timing: None,
-                immediate_subject_auth_revocation:
-                    CredentialResetSubjectAuthRevocation::RevokeSubjectAuthState,
-            },
-        )
-        .await
-        .expect("plan authenticated credential reset");
-
-    assert_eq!(
-        execution.outcome(),
-        &Outcome::CredentialResetPlanned(CredentialResetOutcome::AuthorizedImmediate {
-            subject_id: subject_id.clone(),
-            target_credential_instance_id: target_credential_id.clone(),
-        })
-    );
-    assert_eq!(
-        count_security_notification_effects_for_subject(pool, store_config, &subject_id).await,
-        1,
-        "credential reset planning must atomically schedule an authorization notice"
-    );
-    assert_eq!(
-        count_open_pending_credential_reset_actions_for_target(
-            pool,
-            store_config,
-            &target_credential_id,
-        )
-        .await,
-        0,
-        "immediate reset planning must not create a pending action"
-    );
-
-    harness.drop_schema().await;
-}
-
-#[tokio::test]
-async fn postgres_runtime_authenticated_credential_reset_planning_generates_pending_action_internally()
- {
-    let _postgres_runtime_test_guard = AUTH_POSTGRES_RUNTIME_TEST_LOCK.lock().await;
-    let harness = PostgresRuntimeTestHarness::connect_required_with_email_otp_method().await;
-    let pool = &harness.pool;
-    let store_config = &harness.store_config;
-    let runtime = &harness.runtime;
-    let subject_id = id("authenticated-delayed-reset-plan-subject");
-    let issued_auth = complete_full_authentication_through_runtime(
-        runtime,
-        pool,
-        store_config,
-        email_otp_plugin_for_harness(&harness),
-        "authenticated-delayed-reset-plan-bootstrap",
-        20,
-        subject_id.clone(),
-        false,
-    )
-    .await;
-    let target_credential_id = id("authenticated-delayed-reset-password");
-    let session_authority = id("authenticated-delayed-reset-session-authority");
-    let seed_store = super::super::postgres_store::PostgresAuthStore::new(
-        store_config.clone(),
-        test_keyset("tests.auth.postgres-runtime.credentials.v1"),
-    );
-    seed_store
-        .store_credential_lifecycle_metadata_for_test(
-            pool,
-            &[CredentialInstanceMetadata::new(
-                target_credential_id.clone(),
-                subject_id.clone(),
-                CredentialInstanceKind::MessageSignatureVerifier,
-                "password_signature",
-                CredentialLifecycleState::Active,
-            )
-            .expect("credential metadata")],
-            &[CredentialRecoveryAuthority::new(
-                target_credential_id.clone(),
-                CredentialLifecycleAction::Reset,
-                session_authority.clone(),
-                RecoveryAuthorityTiming::Delayed,
-            )],
-            &[LifecycleAuthorityEvidence::authenticated_session(
-                issued_auth.session_id.clone(),
-                [session_authority],
-            )
-            .expect("session lifecycle evidence")],
-            at(50),
-        )
-        .await
-        .expect("seed credential lifecycle metadata");
-    let headers = headers_from_cookie_pairs(&[issued_auth.session_cookie_pair.as_str()]);
-
-    let execution = runtime
-        .execute_authenticated_credential_reset_planning_from_headers(
-            &headers,
-            PlanAuthenticatedCredentialResetInput {
-                now: at(80),
-                target_credential_instance_id: target_credential_id.clone(),
-                independent_evidence_required:
-                    CredentialLifecycleIndependentEvidenceRequirement::NotRequired,
-                pending_action_timing: Some(CredentialResetPendingActionTiming {
-                    earliest_execute_at: at(200),
-                    expires_at: at(300),
-                }),
-                immediate_subject_auth_revocation:
-                    CredentialResetSubjectAuthRevocation::RevokeSubjectAuthState,
-            },
-        )
-        .await
-        .expect("plan delayed authenticated credential reset");
-
-    let pending_action_id = match execution.outcome() {
-        Outcome::CredentialResetPlanned(CredentialResetOutcome::PendingActionCreated {
-            subject_id: actual_subject_id,
-            target_credential_instance_id,
-            pending_action_id,
-            earliest_execute_at,
-            expires_at,
-        }) => {
-            assert_eq!(actual_subject_id, &subject_id);
-            assert_eq!(target_credential_instance_id, &target_credential_id);
-            assert_eq!(earliest_execute_at, &at(200));
-            assert_eq!(expires_at, &at(300));
-            pending_action_id.clone()
-        }
-        outcome => panic!("expected pending reset action, got {outcome:?}"),
-    };
-    assert_eq!(
-        count_open_pending_credential_reset_actions_for_pending_action(
-            pool,
-            store_config,
-            &pending_action_id,
-        )
-        .await,
-        1,
-        "runtime-generated pending action id must be committed"
-    );
-
-    harness.drop_schema().await;
-}
-
-#[tokio::test]
-async fn postgres_runtime_reschedules_reset_after_expiry_with_quiet_cleanup() {
-    let _postgres_runtime_test_guard = AUTH_POSTGRES_RUNTIME_TEST_LOCK.lock().await;
-    let harness = PostgresRuntimeTestHarness::connect_required_with_email_otp_method().await;
-    let pool = &harness.pool;
-    let store_config = &harness.store_config;
-    let runtime = &harness.runtime;
-    let subject_id = id("authenticated-expired-reset-reschedule-subject");
-    let issued_auth = complete_full_authentication_through_runtime(
-        runtime,
-        pool,
-        store_config,
-        email_otp_plugin_for_harness(&harness),
-        "authenticated-expired-reset-reschedule-bootstrap",
-        20,
-        subject_id.clone(),
-        false,
-    )
-    .await;
-    let target_credential_id = id("authenticated-expired-reset-password");
-    let session_authority = id("authenticated-expired-reset-session-authority");
-    let seed_store = super::super::postgres_store::PostgresAuthStore::new(
-        store_config.clone(),
-        test_keyset("tests.auth.postgres-runtime.credentials.v1"),
-    );
-    seed_store
-        .store_credential_lifecycle_metadata_for_test(
-            pool,
-            &[CredentialInstanceMetadata::new(
-                target_credential_id.clone(),
-                subject_id.clone(),
-                CredentialInstanceKind::MessageSignatureVerifier,
-                "password_signature",
-                CredentialLifecycleState::Active,
-            )
-            .expect("credential metadata")],
-            &[CredentialRecoveryAuthority::new(
-                target_credential_id.clone(),
-                CredentialLifecycleAction::Reset,
-                session_authority.clone(),
-                RecoveryAuthorityTiming::Delayed,
-            )],
-            &[LifecycleAuthorityEvidence::authenticated_session(
-                issued_auth.session_id.clone(),
-                [session_authority],
-            )
-            .expect("session lifecycle evidence")],
-            at(50),
-        )
-        .await
-        .expect("seed credential lifecycle metadata");
-    let headers = headers_from_cookie_pairs(&[issued_auth.session_cookie_pair.as_str()]);
-
-    let expired_planned = runtime
-        .execute_authenticated_credential_reset_planning_from_headers(
-            &headers,
-            PlanAuthenticatedCredentialResetInput {
-                now: at(80),
-                target_credential_instance_id: target_credential_id.clone(),
-                independent_evidence_required:
-                    CredentialLifecycleIndependentEvidenceRequirement::NotRequired,
-                pending_action_timing: Some(CredentialResetPendingActionTiming {
-                    earliest_execute_at: at(82),
-                    expires_at: at(83),
-                }),
-                immediate_subject_auth_revocation:
-                    CredentialResetSubjectAuthRevocation::RevokeSubjectAuthState,
-            },
-        )
-        .await
-        .expect("plan soon-expiring authenticated credential reset");
-    let expired_pending_action_id = match expired_planned.outcome() {
-        Outcome::CredentialResetPlanned(CredentialResetOutcome::PendingActionCreated {
-            pending_action_id,
-            ..
-        }) => pending_action_id.clone(),
-        outcome => panic!("expected pending reset action, got {outcome:?}"),
-    };
-    assert_eq!(
-        count_open_pending_credential_reset_actions_for_pending_action(
-            pool,
-            store_config,
-            &expired_pending_action_id,
-        )
-        .await,
-        1,
-        "first pending reset starts open"
-    );
-
-    let replacement_planned = runtime
-        .execute_authenticated_credential_reset_planning_from_headers(
-            &headers,
-            PlanAuthenticatedCredentialResetInput {
-                now: at(84),
-                target_credential_instance_id: target_credential_id.clone(),
-                independent_evidence_required:
-                    CredentialLifecycleIndependentEvidenceRequirement::NotRequired,
-                pending_action_timing: Some(CredentialResetPendingActionTiming {
-                    earliest_execute_at: at(200),
-                    expires_at: at(300),
-                }),
-                immediate_subject_auth_revocation:
-                    CredentialResetSubjectAuthRevocation::RevokeSubjectAuthState,
-            },
-        )
-        .await
-        .expect("expired pending reset must not block replacement scheduling");
-    let replacement_pending_action_id = match replacement_planned.outcome() {
-        Outcome::CredentialResetPlanned(CredentialResetOutcome::PendingActionCreated {
-            pending_action_id,
-            ..
-        }) => pending_action_id.clone(),
-        outcome => panic!("expected replacement pending reset action, got {outcome:?}"),
-    };
-
-    assert_eq!(
-        pending_credential_reset_closed_at_for_pending_action(
-            pool,
-            store_config,
-            &expired_pending_action_id,
-        )
-        .await,
-        Some(84),
-        "expired pending reset cleanup is a quiet close at transition time"
-    );
-    assert_eq!(
-        count_open_pending_credential_reset_actions_for_pending_action(
-            pool,
-            store_config,
-            &replacement_pending_action_id,
-        )
-        .await,
-        1,
-        "replacement pending reset remains open"
-    );
-
-    harness.drop_schema().await;
-}
-
-#[tokio::test]
-async fn postgres_runtime_authenticated_pending_credential_reset_cancellation_closes_open_action() {
-    let _postgres_runtime_test_guard = AUTH_POSTGRES_RUNTIME_TEST_LOCK.lock().await;
-    let harness = PostgresRuntimeTestHarness::connect_required_with_email_otp_method().await;
-    let pool = &harness.pool;
-    let store_config = &harness.store_config;
-    let runtime = &harness.runtime;
-    let subject_id = id("authenticated-reset-cancel-subject");
-    let issued_auth = complete_full_authentication_through_runtime(
-        runtime,
-        pool,
-        store_config,
-        email_otp_plugin_for_harness(&harness),
-        "authenticated-reset-cancel-bootstrap",
-        20,
-        subject_id.clone(),
-        false,
-    )
-    .await;
-    let target_credential_id = id("authenticated-reset-cancel-password");
-    let session_authority = id("authenticated-reset-cancel-session-authority");
-    let seed_store = super::super::postgres_store::PostgresAuthStore::new(
-        store_config.clone(),
-        test_keyset("tests.auth.postgres-runtime.credentials.v1"),
-    );
-    seed_store
-        .store_credential_lifecycle_metadata_for_test(
-            pool,
-            &[CredentialInstanceMetadata::new(
-                target_credential_id.clone(),
-                subject_id.clone(),
-                CredentialInstanceKind::MessageSignatureVerifier,
-                "password_signature",
-                CredentialLifecycleState::Active,
-            )
-            .expect("credential metadata")],
-            &[CredentialRecoveryAuthority::new(
-                target_credential_id.clone(),
-                CredentialLifecycleAction::Reset,
-                session_authority.clone(),
-                RecoveryAuthorityTiming::Delayed,
-            )],
-            &[LifecycleAuthorityEvidence::authenticated_session(
-                issued_auth.session_id.clone(),
-                [session_authority],
-            )
-            .expect("session lifecycle evidence")],
-            at(50),
-        )
-        .await
-        .expect("seed credential lifecycle metadata");
-    let headers = headers_from_cookie_pairs(&[issued_auth.session_cookie_pair.as_str()]);
-
-    let planned = runtime
-        .execute_authenticated_credential_reset_planning_from_headers(
-            &headers,
-            PlanAuthenticatedCredentialResetInput {
-                now: at(80),
-                target_credential_instance_id: target_credential_id.clone(),
-                independent_evidence_required:
-                    CredentialLifecycleIndependentEvidenceRequirement::NotRequired,
-                pending_action_timing: Some(CredentialResetPendingActionTiming {
-                    earliest_execute_at: at(200),
-                    expires_at: at(300),
-                }),
-                immediate_subject_auth_revocation:
-                    CredentialResetSubjectAuthRevocation::RevokeSubjectAuthState,
-            },
-        )
-        .await
-        .expect("plan delayed authenticated credential reset");
-    let pending_action_id = match planned.outcome() {
-        Outcome::CredentialResetPlanned(CredentialResetOutcome::PendingActionCreated {
-            pending_action_id,
-            ..
-        }) => pending_action_id.clone(),
-        outcome => panic!("expected pending reset action, got {outcome:?}"),
-    };
-
-    let cancellation = runtime
-        .execute_authenticated_pending_credential_reset_cancellation_from_headers(
-            &headers,
-            CancelAuthenticatedPendingCredentialResetInput {
-                now: at(90),
-                pending_action_id: pending_action_id.clone(),
-            },
-        )
-        .await
-        .expect("cancel pending credential reset");
-
-    assert_eq!(
-        cancellation.outcome(),
-        &Outcome::CredentialResetPendingActionCancelled(CredentialResetCancellationOutcome {
-            subject_id: subject_id.clone(),
-            target_credential_instance_id: target_credential_id,
-            pending_action_id: pending_action_id.clone(),
-        })
-    );
-    assert_eq!(
-        count_open_pending_credential_reset_actions_for_pending_action(
-            pool,
-            store_config,
-            &pending_action_id,
-        )
-        .await,
-        0,
-        "cancellation must close the pending reset action"
-    );
-    assert_eq!(
-        count_security_notification_effects_for_subject(pool, store_config, &subject_id).await,
-        2,
-        "scheduling and cancellation must both commit security notices"
-    );
-
-    let replay_error = runtime
-        .execute_authenticated_pending_credential_reset_cancellation_from_headers(
-            &headers,
-            CancelAuthenticatedPendingCredentialResetInput {
-                now: at(95),
-                pending_action_id,
-            },
-        )
-        .await
-        .expect_err("closed pending reset cancellation must not replay");
-
-    assert!(matches!(
-        replay_error,
-        super::super::postgres_runtime::AuthPostgresWebRuntimeExecutionError::Core(
-            Error::PendingCredentialLifecycleActionNotCancellable
-        )
-    ));
-
-    harness.drop_schema().await;
-}
-
-#[tokio::test]
-async fn postgres_runtime_unauthenticated_credential_reset_planning_consumes_recovery_attempt() {
-    let _postgres_runtime_test_guard = AUTH_POSTGRES_RUNTIME_TEST_LOCK.lock().await;
-    let harness = PostgresRuntimeTestHarness::connect_required_with_recovery_code_method().await;
-    let pool = &harness.pool;
-    let store_config = &harness.store_config;
-    let runtime = &harness.runtime;
-    let recovery_code_plugin = harness
-        .recovery_code_plugin
-        .as_ref()
-        .expect("recovery code method plugin");
-    let subject_id: SubjectId = id("unauthenticated-reset-plan-subject");
-    let target_credential_id = id("unauthenticated-reset-plan-password");
-    let recovery_authority = id("unauthenticated-reset-plan-recovery-authority");
-    let recovery_code_id = b"recovery-plan-id";
-    let recovery_code_secret = b"correct-recovery";
-    let recovery_code_source = VerifiedProofSource::new(
-        VerifiedProofSourceKind::CredentialInstance,
-        VerifiedProofSourceId::from_bytes(recovery_code_id.as_slice())
-            .expect("recovery code source id"),
-    );
-    recovery_code_plugin
-        .store_recovery_code_for_test(
-            pool,
-            &subject_id,
-            recovery_code_id,
-            recovery_code_secret,
-            at(10),
-        )
-        .await
-        .expect("store recovery code verifier state");
-    let seed_store = super::super::postgres_store::PostgresAuthStore::new(
-        store_config.clone(),
-        test_keyset("tests.auth.postgres-runtime.credentials.v1"),
-    );
-    seed_store
-        .store_credential_lifecycle_metadata_for_test(
-            pool,
-            &[CredentialInstanceMetadata::new(
-                target_credential_id.clone(),
-                subject_id.clone(),
-                CredentialInstanceKind::MessageSignatureVerifier,
-                "password_signature",
-                CredentialLifecycleState::Active,
-            )
-            .expect("credential metadata")],
-            &[CredentialRecoveryAuthority::new(
-                target_credential_id.clone(),
-                CredentialLifecycleAction::Reset,
-                recovery_authority.clone(),
-                RecoveryAuthorityTiming::Delayed,
-            )],
-            &[LifecycleAuthorityEvidence::from_verified_proof_source(
-                recovery_code_source,
-                [recovery_authority],
-            )
-            .expect("recovery code lifecycle evidence")],
-            at(50),
-        )
-        .await
-        .expect("seed credential lifecycle metadata");
-    let issued_auth = complete_full_authentication_through_runtime(
-        runtime,
-        pool,
-        store_config,
-        email_otp_plugin_for_harness(&harness),
-        "unauthenticated-reset-plan-bootstrap",
-        20,
-        subject_id.clone(),
-        false,
-    )
-    .await;
-    let started = start_current_session_active_proof_attempt_through_runtime(
-        runtime,
-        issued_auth.session_cookie_pair.as_str(),
-        at(70),
-        ProofUse::RecoverOrReplaceCredential,
-    )
-    .await;
-    let continuation_headers =
-        headers_from_cookie_pairs(&[started.continuation_cookie_pair.as_str()]);
-    let sealed_response = recovery_code_plugin
-        .sealed_recovery_code_response_for_test(&subject_id, recovery_code_secret)
-        .expect("sealed recovery code response");
-    runtime
-        .execute_known_subject_active_proof_method_response_from_headers(
-            &continuation_headers,
-            CompleteKnownSubjectActiveProofMethodResponse {
-                now: at(80),
-                method: ProofMethodDeclaration::new(ProofFamily::RecoveryCode, "recovery_code")
-                    .expect("recovery code method"),
-                secret_response: sealed_response,
-                weak_proof_gate_response: None,
-            },
-        )
-        .await
-        .expect("complete recovery code proof");
-
-    let execution = runtime
-        .execute_unauthenticated_credential_reset_planning_from_headers(
-            &continuation_headers,
-            PlanUnauthenticatedCredentialResetInput {
-                now: at(90),
-                target_credential_instance_id: target_credential_id.clone(),
-                independent_evidence_required:
-                    CredentialLifecycleIndependentEvidenceRequirement::NotRequired,
-                pending_action_timing: Some(CredentialResetPendingActionTiming {
-                    earliest_execute_at: at(200),
-                    expires_at: at(300),
-                }),
-                immediate_subject_auth_revocation:
-                    CredentialResetSubjectAuthRevocation::RevokeSubjectAuthState,
-            },
-        )
-        .await
-        .expect("plan unauthenticated credential reset");
-
-    let pending_action_id = match execution.outcome() {
-        Outcome::CredentialResetPlanned(CredentialResetOutcome::PendingActionCreated {
-            subject_id: actual_subject_id,
-            target_credential_instance_id,
-            pending_action_id,
-            ..
-        }) => {
-            assert_eq!(actual_subject_id, &subject_id);
-            assert_eq!(target_credential_instance_id, &target_credential_id);
-            pending_action_id.clone()
-        }
-        outcome => panic!("expected pending reset action, got {outcome:?}"),
-    };
-    assert_eq!(
-        count_open_pending_credential_reset_actions_for_pending_action(
-            pool,
-            store_config,
-            &pending_action_id,
-        )
-        .await,
-        1,
-        "recovery planning must create the pending action inside the runtime commit"
-    );
-    assert_eq!(
-        count_active_proof_attempts_for_attempt(pool, store_config, &started.attempt_id).await,
-        0,
-        "recovery planning must consume the active-proof attempt it used as lifecycle evidence"
-    );
-
-    harness.drop_schema().await;
-}
-
-#[tokio::test]
-async fn postgres_runtime_authenticated_credential_reset_builds_method_work_internally() {
-    let _postgres_runtime_test_guard = AUTH_POSTGRES_RUNTIME_TEST_LOCK.lock().await;
-    let harness =
-        PostgresRuntimeTestHarness::connect_required_with_registered_plugins_for_test_method(
-            Some(TestMethodCommitFailureMode::None),
-            true,
-            None,
-            Some(proof_method(ProofFamily::MessageSignature)),
-            TestActiveMethodVerificationMode::BeforeStateLoad,
-        )
-        .await;
-    let pool = &harness.pool;
-    let store_config = &harness.store_config;
-    let runtime = &harness.runtime;
-    let method_plugin = harness
-        .method_plugin
-        .as_ref()
-        .expect("message-signature reset method plugin");
-    let subject_id = id("authenticated-reset-subject");
-    let issued_auth = complete_full_authentication_through_runtime(
-        runtime,
-        pool,
-        store_config,
-        email_otp_plugin_for_harness(&harness),
-        "authenticated-reset-bootstrap",
-        20,
-        subject_id.clone(),
-        false,
-    )
-    .await;
-    let target_credential_id = id("authenticated-reset-password-credential");
-    let session_authority = id("authenticated-reset-session-authority");
-    let seed_store = super::super::postgres_store::PostgresAuthStore::new(
-        store_config.clone(),
-        test_keyset("tests.auth.postgres-runtime.credentials.v1"),
-    );
-    seed_store
-        .store_credential_lifecycle_metadata_for_test(
-            pool,
-            &[CredentialInstanceMetadata::new(
-                target_credential_id.clone(),
-                subject_id.clone(),
-                CredentialInstanceKind::MessageSignatureVerifier,
-                "password_signature",
-                CredentialLifecycleState::Active,
-            )
-            .expect("credential metadata")],
-            &[CredentialRecoveryAuthority::new(
-                target_credential_id.clone(),
-                CredentialLifecycleAction::Reset,
-                session_authority.clone(),
-                RecoveryAuthorityTiming::Immediate,
-            )],
-            &[LifecycleAuthorityEvidence::authenticated_session(
-                issued_auth.session_id.clone(),
-                [session_authority],
-            )
-            .expect("session lifecycle evidence")],
-            at(50),
-        )
-        .await
-        .expect("seed credential lifecycle metadata");
-    let headers = headers_from_cookie_pairs(&[issued_auth.session_cookie_pair.as_str()]);
-
-    let execution = runtime
-        .execute_authenticated_credential_reset_from_headers(
-            &headers,
-            ExecuteAuthenticatedCredentialResetInput {
-                now: at(80),
-                target_credential_instance_id: target_credential_id.clone(),
-                method_payload: CredentialResetMethodPayload::try_from_bytes(
-                    b"new-authenticated-password-verifier".as_slice(),
-                )
-                .expect("reset payload"),
-                independent_evidence_required:
-                    CredentialLifecycleIndependentEvidenceRequirement::NotRequired,
-                subject_auth_revocation:
-                    CredentialResetSubjectAuthRevocation::RevokeSubjectAuthState,
-            },
-        )
-        .await
-        .expect("execute authenticated credential reset");
-
-    assert_eq!(
-        execution.outcome(),
-        &Outcome::CredentialResetExecuted(CredentialResetExecutionOutcome {
-            subject_id: subject_id.clone(),
-            target_credential_instance_id: target_credential_id,
-            pending_action_id: None,
-        })
-    );
-    assert_eq!(
-        method_plugin.count_state_rows(pool).await,
-        1,
-        "method-owned verifier work must be committed through the registered plugin"
-    );
-    assert_eq!(
-        count_security_notification_effects_for_subject(pool, store_config, &subject_id).await,
-        1,
-        "credential reset execution must atomically schedule a security notice"
-    );
-
-    harness.drop_schema().await;
-}
-
-#[tokio::test]
-async fn postgres_runtime_mature_pending_credential_reset_builds_method_work_internally() {
-    let _postgres_runtime_test_guard = AUTH_POSTGRES_RUNTIME_TEST_LOCK.lock().await;
-    let harness =
-        PostgresRuntimeTestHarness::connect_required_with_registered_plugins_for_test_method(
-            Some(TestMethodCommitFailureMode::None),
-            false,
-            None,
-            Some(proof_method(ProofFamily::MessageSignature)),
-            TestActiveMethodVerificationMode::BeforeStateLoad,
-        )
-        .await;
-    let pool = &harness.pool;
-    let store_config = &harness.store_config;
-    let runtime = &harness.runtime;
-    let method_plugin = harness
-        .method_plugin
-        .as_ref()
-        .expect("message-signature reset method plugin");
-    let subject_id = id("pending-reset-subject");
-    let target_credential_id = id("pending-reset-password-credential");
-    let email_authority = id("pending-reset-email-authority");
-    let pending_action_id = id("pending-reset-action");
-    let seed_store = super::super::postgres_store::PostgresAuthStore::new(
-        store_config.clone(),
-        test_keyset("tests.auth.postgres-runtime.credentials.v1"),
-    );
-    seed_store
-        .store_credential_lifecycle_metadata_for_test(
-            pool,
-            &[CredentialInstanceMetadata::new(
-                target_credential_id.clone(),
-                subject_id.clone(),
-                CredentialInstanceKind::MessageSignatureVerifier,
-                "password_signature",
-                CredentialLifecycleState::Active,
-            )
-            .expect("credential metadata")],
-            &[CredentialRecoveryAuthority::new(
-                target_credential_id.clone(),
-                CredentialLifecycleAction::Reset,
-                email_authority.clone(),
-                RecoveryAuthorityTiming::Immediate,
-            )],
-            &[],
-            at(50),
-        )
-        .await
-        .expect("seed credential metadata");
-    seed_pending_credential_reset_for_runtime_test(
-        pool,
-        &seed_store,
-        target_credential_id.clone(),
-        email_authority,
-        pending_action_id.clone(),
-    )
-    .await;
-
-    let execution = runtime
-        .execute_mature_pending_credential_reset_from_headers(
-            &HeaderMap::new(),
-            ExecuteMaturePendingCredentialResetInput {
-                now: at(250),
-                pending_action_id: pending_action_id.clone(),
-                method_payload: CredentialResetMethodPayload::try_from_bytes(
-                    b"new-pending-password-verifier".as_slice(),
-                )
-                .expect("reset payload"),
-                subject_auth_revocation:
-                    CredentialResetSubjectAuthRevocation::RevokeSubjectAuthState,
-            },
-        )
-        .await
-        .expect("execute mature pending credential reset");
-
-    assert_eq!(
-        execution.outcome(),
-        &Outcome::CredentialResetExecuted(CredentialResetExecutionOutcome {
-            subject_id: subject_id.clone(),
-            target_credential_instance_id: target_credential_id,
-            pending_action_id: Some(pending_action_id.clone()),
-        })
-    );
-    assert_eq!(
-        method_plugin.count_state_rows(pool).await,
-        1,
-        "pending reset method work must be committed through the registered plugin"
-    );
-
-    let replay_error = runtime
-        .execute_mature_pending_credential_reset_from_headers(
-            &HeaderMap::new(),
-            ExecuteMaturePendingCredentialResetInput {
-                now: at(260),
-                pending_action_id,
-                method_payload: CredentialResetMethodPayload::try_from_bytes(
-                    b"new-pending-password-verifier".as_slice(),
-                )
-                .expect("reset payload"),
-                subject_auth_revocation:
-                    CredentialResetSubjectAuthRevocation::RevokeSubjectAuthState,
-            },
-        )
-        .await
-        .expect_err("closed pending credential reset must not replay");
-
-    assert!(matches!(
-        replay_error,
-        super::super::postgres_runtime::AuthPostgresWebRuntimeExecutionError::Core(
-            Error::PendingCredentialLifecycleActionNotExecutable
-        )
-    ));
-
-    harness.drop_schema().await;
-}
-
-#[tokio::test]
-async fn postgres_runtime_mature_pending_credential_replacement_builds_method_work_internally() {
-    let _postgres_runtime_test_guard = AUTH_POSTGRES_RUNTIME_TEST_LOCK.lock().await;
-    let harness =
-        PostgresRuntimeTestHarness::connect_required_with_registered_plugins_for_test_method(
-            Some(TestMethodCommitFailureMode::None),
-            false,
-            None,
-            Some(proof_method(ProofFamily::MessageSignature)),
-            TestActiveMethodVerificationMode::BeforeStateLoad,
-        )
-        .await;
-    let pool = &harness.pool;
-    let store_config = &harness.store_config;
-    let runtime = &harness.runtime;
-    let method_plugin = harness
-        .method_plugin
-        .as_ref()
-        .expect("message-signature lifecycle method plugin");
-    let subject_id = id("pending-replacement-subject");
-    let target_credential_id = id("pending-replacement-password-credential");
-    let pending_action_id = id("pending-replacement-action");
-    let seed_store = super::super::postgres_store::PostgresAuthStore::new(
-        store_config.clone(),
-        test_keyset("tests.auth.postgres-runtime.credentials.v1"),
-    );
-    seed_store
-        .store_credential_lifecycle_metadata_for_test(
-            pool,
-            &[CredentialInstanceMetadata::new(
-                target_credential_id.clone(),
-                subject_id.clone(),
-                CredentialInstanceKind::MessageSignatureVerifier,
-                "password_signature",
-                CredentialLifecycleState::Active,
-            )
-            .expect("credential metadata")],
-            &[],
-            &[],
-            at(50),
-        )
-        .await
-        .expect("seed credential metadata");
-    seed_store
-        .store_pending_credential_lifecycle_actions_for_test(
-            pool,
-            &[PendingCredentialLifecycleActionRecord::new_open(
-                pending_action_id.clone(),
-                subject_id.clone(),
-                target_credential_id.clone(),
-                CredentialLifecycleAction::Replace,
-                at(100),
-                at(200),
-                at(300),
-            )
-            .expect("pending replacement action")],
-        )
-        .await
-        .expect("seed pending replacement action");
-
-    let execution = runtime
-        .execute_mature_pending_credential_lifecycle_action_from_headers(
-            &HeaderMap::new(),
-            ExecuteMaturePendingCredentialLifecycleActionInput {
-                now: at(250),
-                pending_action_id: pending_action_id.clone(),
-                method_payload: Some(
-                    CredentialLifecycleMethodPayload::try_from_bytes(
-                        b"replacement-verifier".as_slice(),
-                    )
-                    .expect("lifecycle payload"),
-                ),
-                subject_auth_revocation:
-                    CredentialLifecycleSubjectAuthRevocation::RevokeSubjectAuthState,
-            },
-        )
-        .await
-        .expect("execute mature pending credential replacement");
-
-    assert_eq!(
-        execution.outcome(),
-        &Outcome::NonResetPendingCredentialLifecycleActionExecuted(
-            NonResetPendingCredentialLifecycleActionExecutionOutcome {
-                subject_id: subject_id.clone(),
-                target_credential_instance_id: target_credential_id.clone(),
-                action: CredentialLifecycleAction::Replace,
-                pending_action_id: pending_action_id.clone(),
-            }
-        )
-    );
-    assert_eq!(
-        method_plugin.count_state_rows(pool).await,
-        1,
-        "pending replacement method work must be committed through the registered plugin"
-    );
-    assert_eq!(
-        credential_lifecycle_state_for_runtime_test(pool, store_config, &target_credential_id)
-            .await,
-        CredentialLifecycleState::Superseded,
-        "replacement execution must supersede the old target credential"
-    );
-    assert_eq!(
-        count_open_pending_credential_lifecycle_actions_for_pending_action(
-            pool,
-            store_config,
-            &pending_action_id,
-            CredentialLifecycleAction::Replace,
-        )
-        .await,
-        0,
-        "replacement execution must close the pending action"
-    );
-
-    let replay_error = runtime
-        .execute_mature_pending_credential_lifecycle_action_from_headers(
-            &HeaderMap::new(),
-            ExecuteMaturePendingCredentialLifecycleActionInput {
-                now: at(260),
-                pending_action_id,
-                method_payload: Some(
-                    CredentialLifecycleMethodPayload::try_from_bytes(
-                        b"replacement-verifier".as_slice(),
-                    )
-                    .expect("lifecycle payload"),
-                ),
-                subject_auth_revocation:
-                    CredentialLifecycleSubjectAuthRevocation::RevokeSubjectAuthState,
-            },
-        )
-        .await
-        .expect_err("closed pending credential replacement must not replay");
-
-    assert!(matches!(
-        replay_error,
-        super::super::postgres_runtime::AuthPostgresWebRuntimeExecutionError::Core(
-            Error::PendingCredentialLifecycleActionNotExecutable
-        )
-    ));
-
-    harness.drop_schema().await;
-}
-
-#[tokio::test]
-async fn postgres_runtime_mature_pending_credential_removal_is_core_owned() {
-    let _postgres_runtime_test_guard = AUTH_POSTGRES_RUNTIME_TEST_LOCK.lock().await;
-    let harness = PostgresRuntimeTestHarness::connect_required().await;
-    let pool = &harness.pool;
-    let store_config = &harness.store_config;
-    let runtime = &harness.runtime;
-    let subject_id = id("pending-removal-subject");
-    let target_credential_id = id("pending-removal-totp-credential");
-    let pending_action_id = id("pending-removal-action");
-    let seed_store = super::super::postgres_store::PostgresAuthStore::new(
-        store_config.clone(),
-        test_keyset("tests.auth.postgres-runtime.credentials.v1"),
-    );
-    seed_store
-        .store_credential_lifecycle_metadata_for_test(
-            pool,
-            &[CredentialInstanceMetadata::new(
-                target_credential_id.clone(),
-                subject_id.clone(),
-                CredentialInstanceKind::SharedSecretOtpVerifier,
-                "totp_app",
-                CredentialLifecycleState::Active,
-            )
-            .expect("credential metadata")],
-            &[],
-            &[],
-            at(50),
-        )
-        .await
-        .expect("seed credential metadata");
-    seed_store
-        .store_pending_credential_lifecycle_actions_for_test(
-            pool,
-            &[PendingCredentialLifecycleActionRecord::new_open(
-                pending_action_id.clone(),
-                subject_id.clone(),
-                target_credential_id.clone(),
-                CredentialLifecycleAction::Remove,
-                at(100),
-                at(200),
-                at(300),
-            )
-            .expect("pending removal action")],
-        )
-        .await
-        .expect("seed pending removal action");
-
-    let execution = runtime
-        .execute_mature_pending_credential_lifecycle_action_from_headers(
-            &HeaderMap::new(),
-            ExecuteMaturePendingCredentialLifecycleActionInput {
-                now: at(250),
-                pending_action_id: pending_action_id.clone(),
-                method_payload: None,
-                subject_auth_revocation:
-                    CredentialLifecycleSubjectAuthRevocation::PreserveExistingAuthState,
-            },
-        )
-        .await
-        .expect("execute mature pending credential removal");
-
-    assert_eq!(
-        execution.outcome(),
-        &Outcome::NonResetPendingCredentialLifecycleActionExecuted(
-            NonResetPendingCredentialLifecycleActionExecutionOutcome {
-                subject_id: subject_id.clone(),
-                target_credential_instance_id: target_credential_id.clone(),
-                action: CredentialLifecycleAction::Remove,
-                pending_action_id: pending_action_id.clone(),
-            }
-        )
-    );
-    assert_eq!(
-        credential_lifecycle_state_for_runtime_test(pool, store_config, &target_credential_id)
-            .await,
-        CredentialLifecycleState::Revoked,
-        "removal execution must revoke the target credential metadata"
-    );
-    assert_eq!(
-        count_open_pending_credential_lifecycle_actions_for_pending_action(
-            pool,
-            store_config,
-            &pending_action_id,
-            CredentialLifecycleAction::Remove,
-        )
-        .await,
-        0,
-        "removal execution must close the pending action"
-    );
-
-    harness.drop_schema().await;
-}
-
-#[tokio::test]
-async fn postgres_runtime_authenticated_pending_credential_replacement_cancellation_closes_open_action()
- {
-    let _postgres_runtime_test_guard = AUTH_POSTGRES_RUNTIME_TEST_LOCK.lock().await;
-    let harness = PostgresRuntimeTestHarness::connect_required_with_email_otp_method().await;
-    let pool = &harness.pool;
-    let store_config = &harness.store_config;
-    let runtime = &harness.runtime;
-    let subject_id = id("pending-replacement-cancel-subject");
-    let issued_auth = complete_full_authentication_through_runtime(
-        runtime,
-        pool,
-        store_config,
-        email_otp_plugin_for_harness(&harness),
-        "pending-replacement-cancel-bootstrap",
-        20,
-        subject_id.clone(),
-        false,
-    )
-    .await;
-    let target_credential_id = id("pending-replacement-cancel-credential");
-    let pending_action_id = id("pending-replacement-cancel-action");
-    let seed_store = super::super::postgres_store::PostgresAuthStore::new(
-        store_config.clone(),
-        test_keyset("tests.auth.postgres-runtime.credentials.v1"),
-    );
-    seed_store
-        .store_credential_lifecycle_metadata_for_test(
-            pool,
-            &[CredentialInstanceMetadata::new(
-                target_credential_id.clone(),
-                subject_id.clone(),
-                CredentialInstanceKind::MessageSignatureVerifier,
-                "password_signature",
-                CredentialLifecycleState::Active,
-            )
-            .expect("credential metadata")],
-            &[],
-            &[],
-            at(50),
-        )
-        .await
-        .expect("seed credential metadata");
-    seed_store
-        .store_pending_credential_lifecycle_actions_for_test(
-            pool,
-            &[PendingCredentialLifecycleActionRecord::new_open(
-                pending_action_id.clone(),
-                subject_id.clone(),
-                target_credential_id.clone(),
-                CredentialLifecycleAction::Replace,
-                at(100),
-                at(200),
-                at(300),
-            )
-            .expect("pending replacement action")],
-        )
-        .await
-        .expect("seed pending replacement action");
-    let headers = headers_from_cookie_pairs(&[issued_auth.session_cookie_pair.as_str()]);
-
-    let execution = runtime
-        .execute_authenticated_pending_credential_lifecycle_action_cancellation_from_headers(
-            &headers,
-            CancelAuthenticatedPendingCredentialLifecycleActionInput {
-                now: at(80),
-                pending_action_id: pending_action_id.clone(),
-            },
-        )
-        .await
-        .expect("cancel pending credential replacement");
-
-    assert_eq!(
-        execution.outcome(),
-        &Outcome::NonResetPendingCredentialLifecycleActionCancelled(
-            NonResetPendingCredentialLifecycleActionCancellationOutcome {
-                subject_id,
-                target_credential_instance_id: target_credential_id,
-                action: CredentialLifecycleAction::Replace,
-                pending_action_id: pending_action_id.clone(),
-            }
-        )
-    );
-    assert_eq!(
-        count_open_pending_credential_lifecycle_actions_for_pending_action(
-            pool,
-            store_config,
-            &pending_action_id,
-            CredentialLifecycleAction::Replace,
-        )
-        .await,
-        0,
-        "cancellation must close the pending replacement action"
-    );
-
-    let replay_error = runtime
-        .execute_authenticated_pending_credential_lifecycle_action_cancellation_from_headers(
-            &headers,
-            CancelAuthenticatedPendingCredentialLifecycleActionInput {
-                now: at(90),
-                pending_action_id,
-            },
-        )
-        .await
-        .expect_err("closed pending credential replacement cancellation must not replay");
-
-    assert!(matches!(
-        replay_error,
-        super::super::postgres_runtime::AuthPostgresWebRuntimeExecutionError::Core(
-            Error::PendingCredentialLifecycleActionNotCancellable
-        )
-    ));
-
-    harness.drop_schema().await;
-}
-
-#[tokio::test]
-async fn postgres_runtime_mature_pending_subject_auth_state_deletion_closes_action_and_revokes_auth_state()
- {
-    let _postgres_runtime_test_guard = AUTH_POSTGRES_RUNTIME_TEST_LOCK.lock().await;
-    let harness = PostgresRuntimeTestHarness::connect_required_with_email_otp_method().await;
-    let pool = &harness.pool;
-    let store_config = &harness.store_config;
-    let runtime = &harness.runtime;
-    let subject_id = id("pending-subject-deletion-subject");
-    let issued_auth = complete_full_authentication_through_runtime(
-        runtime,
-        pool,
-        store_config,
-        email_otp_plugin_for_harness(&harness),
-        "pending-subject-deletion-bootstrap",
-        20,
-        subject_id.clone(),
-        false,
-    )
-    .await;
-    let pending_action_id = id("pending-subject-deletion-action");
-    let seed_store = super::super::postgres_store::PostgresAuthStore::new(
-        store_config.clone(),
-        test_keyset("tests.auth.postgres-runtime.credentials.v1"),
-    );
-    seed_store
-        .store_pending_subject_lifecycle_actions_for_test(
-            pool,
-            &[PendingSubjectLifecycleActionRecord::new_open(
-                pending_action_id.clone(),
-                subject_id.clone(),
-                SubjectLifecycleAction::DeleteSubjectAuthState,
-                at(100),
-                at(200),
-                at(300),
-            )
-            .expect("pending subject auth-state deletion action")],
-        )
-        .await
-        .expect("seed pending subject auth-state deletion action");
-
-    let execution = runtime
-        .execute_mature_pending_subject_auth_state_deletion_from_headers(
-            &HeaderMap::new(),
-            ExecuteMaturePendingSubjectAuthStateDeletionInput {
-                now: at(250),
-                pending_action_id: pending_action_id.clone(),
-            },
-        )
-        .await
-        .expect("execute mature pending subject auth-state deletion");
-
-    assert_eq!(
-        execution.outcome(),
-        &Outcome::PendingSubjectAuthStateDeletionExecuted(
-            PendingSubjectAuthStateDeletionExecutionOutcome {
-                subject_id: subject_id.clone(),
-                pending_action_id: pending_action_id.clone(),
-            }
-        )
-    );
-    assert_eq!(
-        count_open_pending_subject_lifecycle_actions_for_pending_action(
-            pool,
-            store_config,
-            &pending_action_id,
-            SubjectLifecycleAction::DeleteSubjectAuthState,
-        )
-        .await,
-        0,
-        "execution must close the pending subject auth-state deletion action"
-    );
-    assert_eq!(
-        count_security_notification_effects_for_subject(pool, store_config, &subject_id).await,
-        1,
-        "execution must commit the subject auth-state deletion security notice"
-    );
-
-    let resolved_after_deletion = runtime
-        .execute_request_resolution_from_headers(
-            &headers_from_cookie_pairs(&[issued_auth.session_cookie_pair.as_str()]),
-            ResolveRequestInput {
-                now: at(260),
-                request_kind: RequestKind::StateChanging,
-            },
-        )
-        .await
-        .expect("resolve original session after subject auth-state deletion");
-    assert_eq!(
-        resolved_after_deletion.outcome(),
-        &Outcome::NeedsFullAuthentication,
-        "subject auth-state deletion must invalidate sessions created before the deletion cutoff"
-    );
-
-    let replay_error = runtime
-        .execute_mature_pending_subject_auth_state_deletion_from_headers(
-            &HeaderMap::new(),
-            ExecuteMaturePendingSubjectAuthStateDeletionInput {
-                now: at(260),
-                pending_action_id,
-            },
-        )
-        .await
-        .expect_err("closed pending subject auth-state deletion must not replay");
-
-    assert!(matches!(
-        replay_error,
-        super::super::postgres_runtime::AuthPostgresWebRuntimeExecutionError::Core(
-            Error::PendingSubjectLifecycleActionNotExecutable
-        )
-    ));
-
-    harness.drop_schema().await;
-}
-
-#[tokio::test]
-async fn postgres_runtime_authenticated_pending_subject_auth_state_deletion_cancellation_closes_open_action()
- {
-    let _postgres_runtime_test_guard = AUTH_POSTGRES_RUNTIME_TEST_LOCK.lock().await;
-    let harness = PostgresRuntimeTestHarness::connect_required_with_email_otp_method().await;
-    let pool = &harness.pool;
-    let store_config = &harness.store_config;
-    let runtime = &harness.runtime;
-    let subject_id = id("pending-subject-deletion-cancel-subject");
-    let issued_auth = complete_full_authentication_through_runtime(
-        runtime,
-        pool,
-        store_config,
-        email_otp_plugin_for_harness(&harness),
-        "pending-subject-deletion-cancel-bootstrap",
-        20,
-        subject_id.clone(),
-        false,
-    )
-    .await;
-    let pending_action_id = id("pending-subject-deletion-cancel-action");
-    let seed_store = super::super::postgres_store::PostgresAuthStore::new(
-        store_config.clone(),
-        test_keyset("tests.auth.postgres-runtime.credentials.v1"),
-    );
-    seed_store
-        .store_pending_subject_lifecycle_actions_for_test(
-            pool,
-            &[PendingSubjectLifecycleActionRecord::new_open(
-                pending_action_id.clone(),
-                subject_id.clone(),
-                SubjectLifecycleAction::DeleteSubjectAuthState,
-                at(100),
-                at(200),
-                at(300),
-            )
-            .expect("pending subject auth-state deletion action")],
-        )
-        .await
-        .expect("seed pending subject auth-state deletion action");
-    let headers = headers_from_cookie_pairs(&[issued_auth.session_cookie_pair.as_str()]);
-
-    let cancellation = runtime
-        .execute_authenticated_pending_subject_auth_state_deletion_cancellation_from_headers(
-            &headers,
-            CancelAuthenticatedPendingSubjectAuthStateDeletionInput {
-                now: at(90),
-                pending_action_id: pending_action_id.clone(),
-            },
-        )
-        .await
-        .expect("cancel pending subject auth-state deletion");
-
-    assert_eq!(
-        cancellation.outcome(),
-        &Outcome::PendingSubjectAuthStateDeletionCancelled(
-            PendingSubjectAuthStateDeletionCancellationOutcome {
-                subject_id: subject_id.clone(),
-                pending_action_id: pending_action_id.clone(),
-            }
-        )
-    );
-    assert_eq!(
-        count_open_pending_subject_lifecycle_actions_for_pending_action(
-            pool,
-            store_config,
-            &pending_action_id,
-            SubjectLifecycleAction::DeleteSubjectAuthState,
-        )
-        .await,
-        0,
-        "cancellation must close the pending subject auth-state deletion action"
-    );
-    assert_eq!(
-        count_security_notification_effects_for_subject(pool, store_config, &subject_id).await,
-        1,
-        "cancellation must commit the subject auth-state deletion cancellation notice"
-    );
-
-    let replay_error = runtime
-        .execute_authenticated_pending_subject_auth_state_deletion_cancellation_from_headers(
-            &headers,
-            CancelAuthenticatedPendingSubjectAuthStateDeletionInput {
-                now: at(100),
-                pending_action_id,
-            },
-        )
-        .await
-        .expect_err("closed pending subject auth-state deletion cancellation must not replay");
-
-    assert!(matches!(
-        replay_error,
-        super::super::postgres_runtime::AuthPostgresWebRuntimeExecutionError::Core(
-            Error::PendingSubjectLifecycleActionNotCancellable
-        )
-    ));
-
-    harness.drop_schema().await;
-}
-
-#[tokio::test]
-async fn postgres_runtime_subject_auth_state_deletion_cancellation_rejects_wrong_subject_session() {
-    let _postgres_runtime_test_guard = AUTH_POSTGRES_RUNTIME_TEST_LOCK.lock().await;
-    let harness = PostgresRuntimeTestHarness::connect_required_with_email_otp_method().await;
-    let pool = &harness.pool;
-    let store_config = &harness.store_config;
-    let runtime = &harness.runtime;
-    let pending_subject_id = id("pending-subject-deletion-owner");
-    let session_subject_id = id("pending-subject-deletion-other-session");
-    let issued_auth = complete_full_authentication_through_runtime(
-        runtime,
-        pool,
-        store_config,
-        email_otp_plugin_for_harness(&harness),
-        "pending-subject-deletion-wrong-session-bootstrap",
-        20,
-        session_subject_id,
-        false,
-    )
-    .await;
-    let pending_action_id = id("pending-subject-deletion-wrong-session-action");
-    let seed_store = super::super::postgres_store::PostgresAuthStore::new(
-        store_config.clone(),
-        test_keyset("tests.auth.postgres-runtime.credentials.v1"),
-    );
-    seed_store
-        .store_pending_subject_lifecycle_actions_for_test(
-            pool,
-            &[PendingSubjectLifecycleActionRecord::new_open(
-                pending_action_id.clone(),
-                pending_subject_id,
-                SubjectLifecycleAction::DeleteSubjectAuthState,
-                at(100),
-                at(200),
-                at(300),
-            )
-            .expect("pending subject auth-state deletion action")],
-        )
-        .await
-        .expect("seed pending subject auth-state deletion action");
-
-    let cancellation_error = runtime
-        .execute_authenticated_pending_subject_auth_state_deletion_cancellation_from_headers(
-            &headers_from_cookie_pairs(&[issued_auth.session_cookie_pair.as_str()]),
-            CancelAuthenticatedPendingSubjectAuthStateDeletionInput {
-                now: at(90),
-                pending_action_id: pending_action_id.clone(),
-            },
-        )
-        .await
-        .expect_err("wrong subject session must not cancel pending subject auth-state deletion");
-
-    assert!(matches!(
-        cancellation_error,
-        super::super::postgres_runtime::AuthPostgresWebRuntimeExecutionError::Core(
-            Error::CredentialLifecycleActionNotAuthorized
-        )
-    ));
-    assert_eq!(
-        count_open_pending_subject_lifecycle_actions_for_pending_action(
-            pool,
-            store_config,
-            &pending_action_id,
-            SubjectLifecycleAction::DeleteSubjectAuthState,
-        )
-        .await,
-        1,
-        "wrong-subject cancellation must leave the pending subject auth-state deletion action open"
-    );
-
-    harness.drop_schema().await;
-}
-
-#[tokio::test]
-async fn postgres_runtime_rejects_out_of_band_completion_without_challenge_runtime() {
-    let _postgres_runtime_test_guard = AUTH_POSTGRES_RUNTIME_TEST_LOCK.lock().await;
-    let harness = PostgresRuntimeTestHarness::connect_required().await;
-    let runtime = &harness.runtime;
-
-    let error = runtime
-        .execute_active_proof_method_response_from_headers(
-            &HeaderMap::new(),
-            CompleteActiveProofMethodResponse {
-                now: at(30),
-                response_payload: ActiveProofMethodResponsePayload::try_from_bytes(
-                    b"out-of-band-response".as_slice(),
-                )
-                .expect("out-of-band response payload"),
-                weak_proof_gate_response: None,
-            },
-        )
-        .await
-        .expect_err("active-proof method completion must use a challenge cookie");
-
-    assert!(matches!(
-        error,
-        super::super::postgres_runtime::AuthPostgresWebRuntimeExecutionError::Core(
-            Error::MissingActiveProofChallengeCookie
-        )
-    ));
-
-    harness.drop_schema().await;
-}
-
-#[tokio::test]
-async fn postgres_runtime_executes_email_otp_method_lifecycle_when_database_is_available() {
-    let _postgres_runtime_test_guard = AUTH_POSTGRES_RUNTIME_TEST_LOCK.lock().await;
-    let harness = PostgresRuntimeTestHarness::connect_required_with_email_otp_method().await;
-    let pool = &harness.pool;
-    let store_config = &harness.store_config;
-    let runtime = &harness.runtime;
-    let email_otp = harness
-        .email_otp_plugin
-        .as_ref()
-        .expect("email otp method plugin");
-    let empty_headers = HeaderMap::new();
-    let subject_id: SubjectId = id("email-otp-method-subject");
-
-    let issued = runtime
-        .execute_unbound_active_proof_attempt_start_and_out_of_band_challenge_issue_from_headers(
-            &empty_headers,
-            StartAndIssueOutOfBandChallengeInput {
-                now: at(20),
-                proof_use: ProofUse::ContributeToFullAuthentication,
-                method: ProofMethodDeclaration::new(ProofFamily::OutOfBandCode, "email_otp")
-                    .expect("method declaration"),
-                challenge_dedupe_key: dedupe_key("email-otp-method:recipient-hash:window"),
-                recipient_handle: recipient_handle_for_test_subject(
-                    "email-otp-method",
-                    &subject_id,
-                ),
-                idempotency_key: "email-otp-method-delivery-1".to_owned(),
-            },
-            email_otp_challenge_issue_preflight_response_at(at(20)),
-        )
-        .await
-        .expect("issue email otp challenge");
-    let (attempt_id, challenge_id) = match issued.outcome() {
-        Outcome::OutOfBandChallengeIssued {
-            attempt_id,
-            challenge_id,
-            ..
-        } => (attempt_id.clone(), challenge_id.clone()),
-        outcome => panic!("expected email otp challenge issue, got {outcome:?}"),
-    };
-    let response_secret = email_otp
-        .fetch_response_secret_for_test(pool, &challenge_id)
-        .await
-        .expect("fetch generated email otp response secret");
-    let challenge_cookie_pair = cookie_pair_from_set_cookie(
-        issued.set_cookie_headers(),
-        "__Host-__paranoid_auth_active_proof_challenge=",
-    )
-    .to_owned();
-    assert_eq!(
-        count_challenges_for_challenge(pool, store_config, &challenge_id).await,
-        1
-    );
-    assert_eq!(
-        count_out_of_band_durable_effects_for_challenge(pool, store_config, &challenge_id).await,
-        1
-    );
-    assert_eq!(
-        email_otp
-            .count_open_method_challenges_for_test(pool)
-            .await
-            .expect("count open email otp challenges"),
-        1
-    );
-    assert_eq!(
-        email_otp
-            .count_delivery_commands_for_test(pool)
-            .await
-            .expect("count email otp delivery commands"),
-        1
-    );
-
-    let resend_request = email_otp
-        .resend_challenge_request(EmailOtpResendChallenge {
-            now: at(40),
-            delivery_idempotency_key: "email-otp-method-delivery-2".to_owned(),
-        })
-        .expect("build email otp resend request");
-    let resend_headers = headers_from_cookie_pairs(&[challenge_cookie_pair.as_str()]);
-    let resent = runtime
-        .execute_out_of_band_challenge_resend_from_headers(&resend_headers, resend_request)
-        .await
-        .expect("resend email otp challenge");
-    assert!(matches!(
-        resent.outcome(),
-        Outcome::OutOfBandChallengeResent {
-            resend_count: 1,
-            ..
-        }
-    ));
-    assert_eq!(
-        fetch_out_of_band_challenge_resend_count(pool, store_config, &challenge_id).await,
-        1
-    );
-    assert_eq!(
-        count_out_of_band_durable_effects_for_challenge(pool, store_config, &challenge_id).await,
-        2
-    );
-    assert_eq!(
-        email_otp
-            .count_delivery_commands_for_test(pool)
-            .await
-            .expect("count email otp delivery commands after resend"),
-        2
-    );
-
-    harness.database_operation_observer.clear();
-    let wrong_response = email_otp
-        .complete_challenge_response(EmailOtpCompleteChallengeResponse {
-            now: at(45),
-            secret_response: ActiveProofChallengeResponseSecret::try_from(
-                b"wrong-email-otp-code".as_slice(),
-            )
-            .expect("wrong email otp response secret"),
-            weak_proof_gate_response: None,
-        })
-        .expect("build wrong email otp response completion");
-    let wrong_completion_error = runtime
-        .execute_out_of_band_challenge_response_from_headers(
-            &headers_from_cookie_pairs(&[challenge_cookie_pair.as_str()]),
-            wrong_response,
-        )
-        .await
-        .expect_err("wrong email otp code must reject before state load");
-    assert!(matches!(
-        wrong_completion_error,
-        super::super::postgres_runtime::AuthPostgresWebRuntimeExecutionError::Core(
-            Error::StatelessFastFailVerificationFailed
-        )
-    ));
-    assert_no_database_operations(
-        &harness.database_operation_observer,
-        "wrong email otp code must reject before any database operation",
-    );
-    assert_eq!(
-        count_open_challenges_for_challenge(pool, store_config, &challenge_id).await,
-        1,
-        "wrong email otp code must leave the authoritative challenge open"
-    );
-    assert_eq!(
-        email_otp
-            .count_open_method_challenges_for_test(pool)
-            .await
-            .expect("count open email otp challenges after wrong code"),
-        1,
-        "wrong email otp code must not consume method-owned challenge state"
-    );
-
-    let response = email_otp
-        .complete_challenge_response(EmailOtpCompleteChallengeResponse {
-            now: at(50),
-            secret_response: response_secret,
-            weak_proof_gate_response: None,
-        })
-        .expect("build email otp response completion");
-    let completion_headers = headers_from_cookie_pairs(&[challenge_cookie_pair.as_str()]);
-    let completed = runtime
-        .execute_out_of_band_challenge_response_from_headers(&completion_headers, response)
-        .await
-        .expect("complete email otp challenge");
-    assert!(matches!(
-        completed.outcome(),
-        Outcome::ActiveProofCompleted { .. }
-    ));
-    assert!(set_cookie_headers_contain_deletion(
-        completed.set_cookie_headers(),
-        "__Host-__paranoid_auth_active_proof_challenge="
-    ));
-    assert_eq!(
-        count_satisfied_proofs_for_attempt(pool, store_config, &attempt_id).await,
-        1
-    );
-    assert_eq!(
-        count_open_challenges_for_challenge(pool, store_config, &challenge_id).await,
-        0
-    );
-    assert_eq!(
-        email_otp
-            .count_open_method_challenges_for_test(pool)
-            .await
-            .expect("count open email otp challenges after completion"),
-        0
-    );
-
-    harness.drop_schema().await;
-}
-
-#[tokio::test]
-async fn postgres_runtime_derives_email_otp_subject_from_method_state() {
-    let _postgres_runtime_test_guard = AUTH_POSTGRES_RUNTIME_TEST_LOCK.lock().await;
-    let recipient_handle = "subject-resolving-email-otp-recipient";
-    let subject_id: SubjectId = id("subject-resolved-by-email-otp-plugin");
-    let source_id: VerifiedProofSourceId = id("verified-email-identifier-binding");
-    let subject_resolver = Arc::new(StaticEmailOtpSubjectResolver::new(
-        recipient_handle,
-        subject_id.clone(),
-        source_id.clone(),
-    ));
-    let harness = PostgresRuntimeTestHarness::connect_required_with_email_otp_subject_resolver(
-        subject_resolver.clone(),
-    )
-    .await;
-    let pool = &harness.pool;
-    let store_config = &harness.store_config;
-    let runtime = &harness.runtime;
-    let email_otp = harness
-        .email_otp_plugin
-        .as_ref()
-        .expect("email otp method plugin");
-    let empty_headers = HeaderMap::new();
-    let issued = runtime
-        .execute_unbound_active_proof_attempt_start_and_out_of_band_challenge_issue_from_headers(
-            &empty_headers,
-            StartAndIssueOutOfBandChallengeInput {
-                now: at(20),
-                proof_use: ProofUse::ContributeToFullAuthentication,
-                method: ProofMethodDeclaration::new(ProofFamily::OutOfBandCode, "email_otp")
-                    .expect("method declaration"),
-                challenge_dedupe_key: dedupe_key("subject-resolving-email-otp:window"),
-                recipient_handle: recipient_handle.to_owned(),
-                idempotency_key: "subject-resolving-email-otp-delivery".to_owned(),
-            },
-            email_otp_challenge_issue_preflight_response_at(at(20)),
-        )
-        .await
-        .expect("issue email otp challenge");
-    let (attempt_id, challenge_id) = match issued.outcome() {
-        Outcome::OutOfBandChallengeIssued {
-            attempt_id,
-            challenge_id,
-            ..
-        } => (attempt_id.clone(), challenge_id.clone()),
-        outcome => panic!("expected email otp challenge issue, got {outcome:?}"),
-    };
-    let response_secret = email_otp
-        .fetch_response_secret_for_test(pool, &challenge_id)
-        .await
-        .expect("fetch generated email otp response secret");
-    let challenge_cookie_pair = cookie_pair_from_set_cookie(
-        issued.set_cookie_headers(),
-        "__Host-__paranoid_auth_active_proof_challenge=",
-    )
-    .to_owned();
-
-    let completed = runtime
-        .execute_out_of_band_challenge_response_from_headers(
-            &headers_from_cookie_pairs(&[challenge_cookie_pair.as_str()]),
-            email_otp
-                .complete_challenge_response(EmailOtpCompleteChallengeResponse {
-                    now: at(40),
-                    secret_response: response_secret,
-                    weak_proof_gate_response: None,
-                })
-                .expect("build email otp response"),
-        )
-        .await
-        .expect("complete email otp challenge");
-    assert_eq!(
-        completed.outcome(),
-        &Outcome::ActiveProofCompleted {
-            attempt_id: attempt_id.clone(),
-            proof: ProofSummary::new(ProofFamily::OutOfBandCode, "email_otp").expect("proof"),
-        }
-    );
-    assert_eq!(
-        fetch_active_proof_attempt_subject_id(pool, store_config, &attempt_id).await,
-        Some(subject_id),
-    );
-    assert_eq!(
-        fetch_satisfied_proof_source_for_attempt(pool, store_config, &attempt_id).await,
-        Some(VerifiedProofSource::new(
-            VerifiedProofSourceKind::OutOfBandIdentifier,
-            source_id,
-        )),
-    );
-    assert_eq!(subject_resolver.call_count(), 1);
-
-    harness.drop_schema().await;
-}
-
-#[tokio::test]
-async fn postgres_runtime_rejects_bad_email_otp_before_subject_resolution() {
-    let _postgres_runtime_test_guard = AUTH_POSTGRES_RUNTIME_TEST_LOCK.lock().await;
-    let recipient_handle = "bad-email-otp-fast-fail-recipient";
-    let subject_resolver = Arc::new(StaticEmailOtpSubjectResolver::new(
-        recipient_handle,
-        id("bad-email-otp-fast-fail-subject"),
-        id("bad-email-otp-fast-fail-source"),
-    ));
-    let harness = PostgresRuntimeTestHarness::connect_required_with_email_otp_subject_resolver(
-        subject_resolver.clone(),
-    )
-    .await;
-    let runtime = &harness.runtime;
-    let email_otp = harness
-        .email_otp_plugin
-        .as_ref()
-        .expect("email otp method plugin");
-    let empty_headers = HeaderMap::new();
-    let issued = runtime
-        .execute_unbound_active_proof_attempt_start_and_out_of_band_challenge_issue_from_headers(
-            &empty_headers,
-            StartAndIssueOutOfBandChallengeInput {
-                now: at(20),
-                proof_use: ProofUse::ContributeToFullAuthentication,
-                method: ProofMethodDeclaration::new(ProofFamily::OutOfBandCode, "email_otp")
-                    .expect("method declaration"),
-                challenge_dedupe_key: dedupe_key("bad-email-otp-fast-fail:window"),
-                recipient_handle: recipient_handle.to_owned(),
-                idempotency_key: "bad-email-otp-fast-fail-delivery".to_owned(),
-            },
-            email_otp_challenge_issue_preflight_response_at(at(20)),
-        )
-        .await
-        .expect("issue email otp challenge");
-    assert!(matches!(
-        issued.outcome(),
-        Outcome::OutOfBandChallengeIssued { .. }
-    ));
-    let challenge_cookie_pair = cookie_pair_from_set_cookie(
-        issued.set_cookie_headers(),
-        "__Host-__paranoid_auth_active_proof_challenge=",
-    )
-    .to_owned();
-    let wrong_response_secret = ActiveProofChallengeResponseSecret::try_from(b"wrong".as_slice())
-        .expect("wrong challenge response secret");
-
-    let error = runtime
-        .execute_out_of_band_challenge_response_from_headers(
-            &headers_from_cookie_pairs(&[challenge_cookie_pair.as_str()]),
-            email_otp
-                .complete_challenge_response(EmailOtpCompleteChallengeResponse {
-                    now: at(40),
-                    secret_response: wrong_response_secret,
-                    weak_proof_gate_response: None,
-                })
-                .expect("build email otp response"),
-        )
-        .await
-        .expect_err("bad OTP must fail before subject resolution");
-
-    assert!(matches!(
-        error,
-        super::super::postgres_runtime::AuthPostgresWebRuntimeExecutionError::Core(
-            Error::StatelessFastFailVerificationFailed
-        )
-    ));
-    assert_eq!(subject_resolver.call_count(), 0);
-
-    harness.drop_schema().await;
-}
-
-#[tokio::test]
-async fn postgres_runtime_executes_session_and_trusted_device_lifecycle_when_database_is_available()
-{
-    let _postgres_runtime_test_guard = AUTH_POSTGRES_RUNTIME_TEST_LOCK.lock().await;
-    let harness = PostgresRuntimeTestHarness::connect_required().await;
-    let pool = &harness.pool;
-    let store_config = &harness.store_config;
-    let runtime = &harness.runtime;
-    let email_otp = email_otp_plugin_for_harness(&harness);
-    let empty_headers = HeaderMap::new();
-
-    let issued = runtime
-        .execute_unbound_active_proof_attempt_start_and_out_of_band_challenge_issue_from_headers(
-            &empty_headers,
-            StartAndIssueOutOfBandChallengeInput {
-                now: at(20),
-                proof_use: ProofUse::ContributeToFullAuthentication,
-                method: ProofMethodDeclaration::new(ProofFamily::OutOfBandCode, "email_otp")
-                    .expect("method declaration"),
-                challenge_dedupe_key: dedupe_key("login:email-hash:window"),
-                recipient_handle: recipient_handle_for_test_subject("login", &id("subject")),
-                idempotency_key: "mail-idempotency-key".to_owned(),
-            },
-            email_otp_challenge_issue_preflight_response_at(at(20)),
-        )
-        .await
-        .expect("issue challenge through Postgres runtime");
-    let (attempt_id, challenge_id) = match issued.outcome() {
-        Outcome::OutOfBandChallengeIssued {
-            attempt_id: issued_attempt_id,
-            challenge_id,
-            expires_at,
-        } => {
-            assert_eq!(expires_at, &at(60));
-            (issued_attempt_id.clone(), challenge_id.clone())
-        }
-        outcome => panic!("expected out-of-band challenge issue, got {outcome:?}"),
-    };
-    let continuation_cookie_pair =
-        active_proof_continuation_cookie_pair_from_set_cookie(issued.set_cookie_headers())
-            .to_owned();
-    let continuation_headers = headers_from_cookie_pairs(&[continuation_cookie_pair.as_str()]);
-    let response_secret = email_otp
-        .fetch_response_secret_for_test(pool, &challenge_id)
-        .await
-        .expect("fetch generated email otp response secret");
-    let challenge_cookie_pair = cookie_pair_from_set_cookie(
-        issued.set_cookie_headers(),
-        "__Host-__paranoid_auth_active_proof_challenge=",
-    );
-    let mut challenge_headers = HeaderMap::new();
-    challenge_headers.insert(
-        COOKIE,
-        HeaderValue::from_str(challenge_cookie_pair).expect("cookie header"),
-    );
-
-    let completed = runtime
-        .execute_out_of_band_challenge_response_from_headers(
-            &challenge_headers,
-            CompleteOutOfBandChallengeResponse {
-                now: at(40),
-                secret_response: response_secret,
-                weak_proof_gate_response: None,
-            },
-        )
-        .await
-        .expect("complete challenge through Postgres runtime");
-    assert_eq!(
-        completed.outcome(),
-        &Outcome::ActiveProofCompleted {
-            attempt_id: attempt_id.clone(),
-            proof: ProofSummary::new(ProofFamily::OutOfBandCode, "email_otp").expect("proof"),
-        }
-    );
-    assert_eq!(completed.set_cookie_headers().as_slice().len(), 1);
-
-    let satisfied_proof_count =
-        count_satisfied_proofs_for_attempt(pool, store_config, &attempt_id).await;
-    assert_eq!(satisfied_proof_count, 1);
-    let open_challenge_count = count_open_challenges(pool, store_config).await;
-    assert_eq!(open_challenge_count, 0);
-
-    let full_authentication = runtime
-        .execute_full_authentication_completion_from_headers(
-            &continuation_headers,
-            CompleteFullAuthenticationInput {
-                now: at(45),
-                trust_device: Some(TrustDeviceAfterFullAuthenticationInput {
-                    display_label: Some("test browser".to_owned()),
-                }),
-            },
-        )
-        .await
-        .expect("complete full authentication through Postgres runtime");
-    let session_id = match full_authentication.outcome() {
-        Outcome::Authenticated(authenticated) => {
-            assert_eq!(authenticated.subject_id, id("subject"));
-            assert_eq!(
-                authenticated.source,
-                AuthenticationSource::FullAuthentication
-            );
-            assert!(authenticated.step_up_is_fresh);
-            authenticated.session_id.clone()
-        }
-        outcome => panic!("expected full authentication, got {outcome:?}"),
-    };
-    let device_id = fetch_trusted_device_id_by_display_label(pool, store_config, "test browser")
-        .await
-        .expect("trusted device id");
-    let session_cookie_pair = cookie_pair_from_set_cookie(
-        full_authentication.set_cookie_headers(),
-        "__Host-__paranoid_auth_session=",
-    );
-    let trusted_device_cookie_pair = cookie_pair_from_set_cookie(
-        full_authentication.set_cookie_headers(),
-        "__Host-__paranoid_auth_trusted_device=",
-    );
-    assert_eq!(count_all_sessions(pool, store_config).await, 1);
-    assert_eq!(
-        count_session_secret_macs_for_session(pool, store_config, &session_id).await,
-        1
-    );
-    assert_eq!(count_all_trusted_devices(pool, store_config).await, 1);
-    assert_eq!(
-        count_trusted_device_secret_macs_for_device(pool, store_config, &device_id).await,
-        1
-    );
-    assert_eq!(
-        count_active_proof_attempts_for_attempt(pool, store_config, &attempt_id).await,
-        0,
-        "full authentication must close and delete the active-proof attempt"
-    );
-
-    let mut session_headers = HeaderMap::new();
-    session_headers.insert(
-        COOKIE,
-        HeaderValue::from_str(session_cookie_pair).expect("session cookie header"),
-    );
-    let resolved = runtime
-        .execute_request_resolution_from_headers(
-            &session_headers,
-            ResolveRequestInput {
-                now: at(50),
-                request_kind: RequestKind::StateChanging,
-            },
-        )
-        .await
-        .expect("resolve issued session through Postgres runtime");
-    assert_eq!(
-        resolved.outcome(),
-        &Outcome::Authenticated(Authenticated {
-            subject_id: id("subject"),
-            session_id: session_id.clone(),
-            source: AuthenticationSource::AuthoritativeSession,
-            step_up_is_fresh: true,
-        })
-    );
-    assert!(
-        resolved
-            .set_cookie_headers()
-            .as_slice()
-            .iter()
-            .any(|header| header
-                .as_str()
-                .starts_with("__Host-__paranoid_auth_session=")),
-        "authoritative request resolution should reissue a safe-read-capable session cookie"
-    );
-    assert_eq!(
-        count_session_secret_macs_for_session(pool, store_config, &session_id).await,
-        1,
-        "non-refresh request resolution must reuse the presented session secret without creating another MAC row"
-    );
-
-    let mut trusted_device_headers = HeaderMap::new();
-    trusted_device_headers.insert(
-        COOKIE,
-        HeaderValue::from_str(trusted_device_cookie_pair).expect("trusted-device cookie header"),
-    );
-    let revived = runtime
-        .execute_request_resolution_from_headers(
-            &trusted_device_headers,
-            ResolveRequestInput {
-                now: at(60),
-                request_kind: RequestKind::StateChanging,
-            },
-        )
-        .await
-        .expect("silently revive session from trusted-device cookie through Postgres runtime");
-    let revived_session_id = match revived.outcome() {
-        Outcome::Authenticated(authenticated) => {
-            assert_eq!(authenticated.subject_id, id("subject"));
-            assert_eq!(
-                authenticated.source,
-                AuthenticationSource::SilentTrustedDeviceRevival
-            );
-            assert!(!authenticated.step_up_is_fresh);
-            authenticated.session_id.clone()
-        }
-        outcome => panic!("expected silent trusted-device revival, got {outcome:?}"),
-    };
-    assert!(
-        revived
-            .set_cookie_headers()
-            .as_slice()
-            .iter()
-            .any(|header| header
-                .as_str()
-                .starts_with("__Host-__paranoid_auth_session=")),
-        "trusted-device silent revival must issue a fresh session cookie"
-    );
-    assert!(
-        revived
-            .set_cookie_headers()
-            .as_slice()
-            .iter()
-            .any(|header| header
-                .as_str()
-                .starts_with("__Host-__paranoid_auth_trusted_device=")),
-        "trusted-device silent revival must rotate and reissue the trusted-device cookie"
-    );
-    assert_eq!(count_all_sessions(pool, store_config).await, 2);
-    assert_eq!(
-        count_session_secret_macs_for_session(pool, store_config, &revived_session_id).await,
-        1
-    );
-    assert_eq!(
-        count_trusted_device_secret_macs_for_device(pool, store_config, &device_id).await,
-        2
-    );
-    assert_eq!(
-        fetch_trusted_device_current_secret_version(pool, store_config, &device_id).await,
-        2
-    );
-
-    let rotated_trusted_device_cookie_pair = cookie_pair_from_set_cookie(
-        revived.set_cookie_headers(),
-        "__Host-__paranoid_auth_trusted_device=",
-    );
-    let mut rotated_trusted_device_headers = HeaderMap::new();
-    rotated_trusted_device_headers.insert(
-        COOKIE,
-        HeaderValue::from_str(rotated_trusted_device_cookie_pair)
-            .expect("rotated trusted-device cookie header"),
-    );
-    let needs_active_proof = runtime
-        .execute_request_resolution_from_headers(
-            &rotated_trusted_device_headers,
-            ResolveRequestInput {
-                now: at(600),
-                request_kind: RequestKind::StateChanging,
-            },
-        )
-        .await
-        .expect("resolve trusted-device cookie after silent revival window");
-    assert_eq!(
-        needs_active_proof.outcome(),
-        &Outcome::NeedsActiveProofFromTrustedDevice {
-            device_credential_id: device_id.clone(),
-            subject_id: id("subject"),
-        }
-    );
-    assert!(needs_active_proof.set_cookie_headers().is_empty());
-
-    let active_revival_attempt = runtime
-        .execute_current_trusted_device_active_proof_attempt_start_from_headers(
-            &rotated_trusted_device_headers,
-            StartCurrentTrustedDeviceActiveProofAttemptInput {
-                now: at(610),
-                proof_use: ProofUse::ReviveTrustedDeviceWithActiveProof,
-            },
-        )
-        .await
-        .expect("start trusted-device active-proof revival attempt through Postgres runtime");
-    let revival_attempt_id = match active_revival_attempt.outcome() {
-        Outcome::ActiveProofAttemptStarted {
-            attempt_id,
-            expires_at,
-        } => {
-            assert_eq!(expires_at, &at(730));
-            attempt_id.clone()
-        }
-        outcome => panic!("expected revival active proof attempt start, got {outcome:?}"),
-    };
-    let revival_continuation_cookie_pair = active_proof_continuation_cookie_pair_from_set_cookie(
-        active_revival_attempt.set_cookie_headers(),
-    )
-    .to_owned();
-    let revival_continuation_headers =
-        headers_from_cookie_pairs(&[revival_continuation_cookie_pair.as_str()]);
-
-    let active_revival_challenge = runtime
-        .execute_out_of_band_challenge_issue_from_headers(
-            &revival_continuation_headers,
-            IssueOutOfBandChallengeInput {
-                now: at(620),
-                method: ProofMethodDeclaration::new(ProofFamily::OutOfBandCode, "email_otp")
-                    .expect("active-revival method declaration"),
-                challenge_dedupe_key: dedupe_key("revival:email-hash:window"),
-                recipient_handle: "opaque-email-handle".to_owned(),
-                idempotency_key: "revival-mail-idempotency-key".to_owned(),
-            },
-        )
-        .await
-        .expect("issue trusted-device active-revival challenge through Postgres runtime");
-    let revival_challenge_id = match active_revival_challenge.outcome() {
-        Outcome::OutOfBandChallengeIssued {
-            attempt_id,
-            challenge_id,
-            expires_at,
-        } => {
-            assert_eq!(attempt_id, &revival_attempt_id);
-            assert_eq!(expires_at, &at(660));
-            challenge_id.clone()
-        }
-        outcome => panic!("expected active-revival challenge issue, got {outcome:?}"),
-    };
-    let active_revival_response_secret = email_otp
-        .fetch_response_secret_for_test(pool, &revival_challenge_id)
-        .await
-        .expect("fetch generated active-revival email otp response secret");
-    let active_revival_challenge_cookie_pair = cookie_pair_from_set_cookie(
-        active_revival_challenge.set_cookie_headers(),
-        "__Host-__paranoid_auth_active_proof_challenge=",
-    );
-    let mut active_revival_challenge_headers = HeaderMap::new();
-    active_revival_challenge_headers.insert(
-        COOKIE,
-        HeaderValue::from_str(active_revival_challenge_cookie_pair)
-            .expect("active-revival challenge cookie header"),
-    );
-
-    let active_revival_proof = runtime
-        .execute_out_of_band_challenge_response_from_headers(
-            &active_revival_challenge_headers,
-            CompleteOutOfBandChallengeResponse {
-                now: at(630),
-                secret_response: active_revival_response_secret,
-                weak_proof_gate_response: None,
-            },
-        )
-        .await
-        .expect("complete trusted-device active-revival proof through Postgres runtime");
-    assert_eq!(
-        active_revival_proof.outcome(),
-        &Outcome::ActiveProofCompleted {
-            attempt_id: revival_attempt_id.clone(),
-            proof: ProofSummary::new(ProofFamily::OutOfBandCode, "email_otp").expect("proof"),
-        }
-    );
-
-    let active_revival = runtime
-        .execute_trusted_device_revival_completion_from_headers(
-            &headers_from_cookie_pairs(&[
-                rotated_trusted_device_cookie_pair,
-                revival_continuation_cookie_pair.as_str(),
-            ]),
-            CompleteTrustedDeviceRevivalWithActiveProofInput { now: at(640) },
-        )
-        .await
-        .expect("complete trusted-device active-proof revival through Postgres runtime");
-    let active_revival_session_id = match active_revival.outcome() {
-        Outcome::Authenticated(authenticated) => {
-            assert_eq!(authenticated.subject_id, id("subject"));
-            assert_eq!(
-                authenticated.source,
-                AuthenticationSource::TrustedDeviceRevivalWithActiveProof
-            );
-            assert!(authenticated.step_up_is_fresh);
-            authenticated.session_id.clone()
-        }
-        outcome => panic!("expected active trusted-device revival, got {outcome:?}"),
-    };
-    assert!(
-        active_revival
-            .set_cookie_headers()
-            .as_slice()
-            .iter()
-            .any(|header| header
-                .as_str()
-                .starts_with("__Host-__paranoid_auth_session=")),
-        "trusted-device active-proof revival must issue a fresh session cookie"
-    );
-    assert!(
-        active_revival
-            .set_cookie_headers()
-            .as_slice()
-            .iter()
-            .any(|header| header
-                .as_str()
-                .starts_with("__Host-__paranoid_auth_trusted_device=")),
-        "trusted-device active-proof revival must rotate and reissue the trusted-device cookie"
-    );
-    assert_eq!(count_all_sessions(pool, store_config).await, 3);
-    assert_eq!(
-        count_session_secret_macs_for_session(pool, store_config, &active_revival_session_id).await,
-        1
-    );
-    assert_eq!(
-        count_trusted_device_secret_macs_for_device(pool, store_config, &device_id).await,
-        3
-    );
-    assert_eq!(
-        fetch_trusted_device_current_secret_version(pool, store_config, &device_id).await,
-        3
-    );
-    assert_eq!(
-        count_active_proof_attempts_for_attempt(pool, store_config, &revival_attempt_id).await,
-        0,
-        "trusted-device active-proof revival must close and delete the revival attempt"
-    );
-
-    harness.drop_schema().await;
-}
-
-#[tokio::test]
-async fn postgres_runtime_tripwires_replayed_previous_secrets_after_grace() {
-    let _postgres_runtime_test_guard = AUTH_POSTGRES_RUNTIME_TEST_LOCK.lock().await;
-    let harness = PostgresRuntimeTestHarness::connect_required().await;
-    let pool = &harness.pool;
-    let store_config = &harness.store_config;
-    let runtime = &harness.runtime;
-
-    let session_tripwire_state = complete_full_authentication_through_runtime(
-        runtime,
-        pool,
-        store_config,
-        email_otp_plugin_for_harness(&harness),
-        "session-tripwire",
-        20,
-        id("session-tripwire-subject"),
-        true,
-    )
-    .await;
-    let session_tripwire_device_id = session_tripwire_state
-        .trusted_device_credential_id
-        .clone()
-        .expect("session-tripwire trusted device id");
-    let original_session_cookie_pair = session_tripwire_state.session_cookie_pair.as_str();
-    let original_trusted_device_cookie_pair = session_tripwire_state
-        .trusted_device_cookie_pair
-        .as_deref()
-        .expect("session-tripwire trusted-device cookie");
-
-    let refreshed = runtime
-        .execute_request_resolution_from_headers(
-            &headers_from_cookie_pairs(&[original_session_cookie_pair]),
-            ResolveRequestInput {
-                now: at(130),
-                request_kind: RequestKind::StateChanging,
-            },
-        )
-        .await
-        .expect("refresh session before session tripwire replay");
-    assert!(matches!(
-        refreshed.outcome(),
-        Outcome::Authenticated(Authenticated {
-            source: AuthenticationSource::RefreshedSession,
-            ..
-        })
-    ));
-    assert_eq!(
-        count_session_secret_macs_for_session(
-            pool,
-            store_config,
-            &session_tripwire_state.session_id
-        )
-        .await,
-        2,
-        "session refresh must leave one current and one previous secret MAC"
-    );
-
-    let replayed_old_session = runtime
-        .execute_request_resolution_from_headers(
-            &headers_from_cookie_pairs(&[
-                original_session_cookie_pair,
-                original_trusted_device_cookie_pair,
-            ]),
-            ResolveRequestInput {
-                now: at(136),
-                request_kind: RequestKind::StateChanging,
-            },
-        )
-        .await
-        .expect("replay old session cookie after grace through Postgres runtime");
-    assert_eq!(
-        replayed_old_session.outcome(),
-        &Outcome::NeedsFullAuthentication
-    );
-    assert!(
-        set_cookie_headers_contain_deletion(
-            replayed_old_session.set_cookie_headers(),
-            "__Host-__paranoid_auth_session="
-        ),
-        "session tripwire must delete the presented session cookie"
-    );
-    assert!(
-        set_cookie_headers_contain_deletion(
-            replayed_old_session.set_cookie_headers(),
-            "__Host-__paranoid_auth_trusted_device="
-        ),
-        "session tripwire must delete the associated trusted-device cookie"
-    );
-    assert_eq!(
-        fetch_session_revoked_at(pool, store_config, &session_tripwire_state.session_id).await,
-        Some(136)
-    );
-    assert_eq!(
-        fetch_trusted_device_revoked_at(pool, store_config, &session_tripwire_device_id).await,
-        Some(136)
-    );
-
-    let trusted_device_tripwire_state = complete_full_authentication_through_runtime(
-        runtime,
-        pool,
-        store_config,
-        email_otp_plugin_for_harness(&harness),
-        "trusted-device-tripwire",
-        180,
-        id("trusted-device-tripwire-subject"),
-        true,
-    )
-    .await;
-    let trusted_device_tripwire_device_id = trusted_device_tripwire_state
-        .trusted_device_credential_id
-        .clone()
-        .expect("trusted-device-tripwire trusted device id");
-    let original_device_cookie_pair = trusted_device_tripwire_state
-        .trusted_device_cookie_pair
-        .as_deref()
-        .expect("trusted-device-tripwire trusted-device cookie");
-
-    let revived_from_device = runtime
-        .execute_request_resolution_from_headers(
-            &headers_from_cookie_pairs(&[original_device_cookie_pair]),
-            ResolveRequestInput {
-                now: at(220),
-                request_kind: RequestKind::StateChanging,
-            },
-        )
-        .await
-        .expect("silently revive from trusted-device before device tripwire replay");
-    assert!(matches!(
-        revived_from_device.outcome(),
-        Outcome::Authenticated(Authenticated {
-            source: AuthenticationSource::SilentTrustedDeviceRevival,
-            ..
-        })
-    ));
-    assert_eq!(
-        count_trusted_device_secret_macs_for_device(
-            pool,
-            store_config,
-            &trusted_device_tripwire_device_id
-        )
-        .await,
-        2,
-        "trusted-device rotation must leave one current and one previous secret MAC"
-    );
-    let session_count_before_device_tripwire = count_all_sessions(pool, store_config).await;
-
-    let replayed_old_device = runtime
-        .execute_request_resolution_from_headers(
-            &headers_from_cookie_pairs(&[original_device_cookie_pair]),
-            ResolveRequestInput {
-                now: at(226),
-                request_kind: RequestKind::StateChanging,
-            },
-        )
-        .await
-        .expect("replay old trusted-device cookie after grace through Postgres runtime");
-    assert_eq!(
-        replayed_old_device.outcome(),
-        &Outcome::NeedsFullAuthentication
-    );
-    assert!(
-        set_cookie_headers_contain_deletion(
-            replayed_old_device.set_cookie_headers(),
-            "__Host-__paranoid_auth_trusted_device="
-        ),
-        "trusted-device tripwire must delete the presented trusted-device cookie"
-    );
-    assert_eq!(
-        fetch_trusted_device_revoked_at(pool, store_config, &trusted_device_tripwire_device_id)
-            .await,
-        Some(226)
-    );
-    assert_eq!(
-        count_all_sessions(pool, store_config).await,
-        session_count_before_device_tripwire,
-        "trusted-device tripwire must not create a replacement session"
-    );
-
-    harness.drop_schema().await;
-}
-
-#[tokio::test]
-async fn postgres_runtime_executes_step_up_completion_when_database_is_available() {
-    let _postgres_runtime_test_guard = AUTH_POSTGRES_RUNTIME_TEST_LOCK.lock().await;
-    let harness = PostgresRuntimeTestHarness::connect_required().await;
-    let pool = &harness.pool;
-    let store_config = &harness.store_config;
-    let runtime = &harness.runtime;
-    let email_otp = email_otp_plugin_for_harness(&harness);
-    let subject_id: SubjectId = id("step-up-postgres-subject");
-
-    let issued_auth = complete_full_authentication_through_runtime(
-        runtime,
-        pool,
-        store_config,
-        email_otp,
-        "step-up-postgres",
-        20,
-        subject_id.clone(),
-        false,
-    )
-    .await;
-    let session_headers = headers_from_cookie_pairs(&[issued_auth.session_cookie_pair.as_str()]);
-    let sensitive_before_step_up = runtime
-        .execute_request_resolution_from_headers(
-            &session_headers,
-            ResolveRequestInput {
-                now: at(80),
-                request_kind: RequestKind::Sensitive,
-            },
-        )
-        .await
-        .expect("sensitive request should resolve through Postgres runtime");
-    assert_eq!(
-        sensitive_before_step_up.outcome(),
-        &Outcome::NeedsStepUp {
-            session_id: issued_auth.session_id.clone(),
-            subject_id: subject_id.clone(),
-        }
-    );
-
-    let started_step_up = runtime
-        .execute_current_session_active_proof_attempt_start_from_headers(
-            &session_headers,
-            StartCurrentSessionActiveProofAttemptInput {
-                now: at(85),
-                proof_use: ProofUse::SatisfyStepUp,
-            },
-        )
-        .await
-        .expect("start step-up active proof attempt through Postgres runtime");
-    let step_up_attempt_id = match started_step_up.outcome() {
-        Outcome::ActiveProofAttemptStarted { attempt_id, .. } => attempt_id.clone(),
-        outcome => panic!("expected active proof attempt start, got {outcome:?}"),
-    };
-    let continuation_cookie_pair =
-        active_proof_continuation_cookie_pair_from_set_cookie(started_step_up.set_cookie_headers())
-            .to_owned();
-    let continuation_headers = headers_from_cookie_pairs(&[continuation_cookie_pair.as_str()]);
-
-    let issued_challenge = runtime
-        .execute_out_of_band_challenge_issue_from_headers(
-            &continuation_headers,
-            IssueOutOfBandChallengeInput {
-                now: at(90),
-                method: ProofMethodDeclaration::new(ProofFamily::OutOfBandCode, "email_otp")
-                    .expect("step-up method declaration"),
-                challenge_dedupe_key: dedupe_key("step-up-postgres:email-hash:window"),
-                recipient_handle: "step-up-postgres-opaque-email-handle".to_owned(),
-                idempotency_key: "step-up-postgres-mail-idempotency-key".to_owned(),
-            },
-        )
-        .await
-        .expect("issue step-up challenge through Postgres runtime");
-    let step_up_challenge_id = match issued_challenge.outcome() {
-        Outcome::OutOfBandChallengeIssued {
-            attempt_id,
-            challenge_id,
-            ..
-        } => {
-            assert_eq!(attempt_id, &step_up_attempt_id);
-            challenge_id.clone()
-        }
-        outcome => panic!("expected out-of-band challenge issue, got {outcome:?}"),
-    };
-    let step_up_response_secret = email_otp
-        .fetch_response_secret_for_test(pool, &step_up_challenge_id)
-        .await
-        .expect("fetch generated step-up email otp response secret");
-    let step_up_challenge_cookie_pair = cookie_pair_from_set_cookie(
-        issued_challenge.set_cookie_headers(),
-        "__Host-__paranoid_auth_active_proof_challenge=",
-    );
-    let step_up_challenge_headers = headers_from_cookie_pairs(&[step_up_challenge_cookie_pair]);
-    let completed_step_up_proof = runtime
-        .execute_out_of_band_challenge_response_from_headers(
-            &step_up_challenge_headers,
-            CompleteOutOfBandChallengeResponse {
-                now: at(95),
-                secret_response: step_up_response_secret,
-                weak_proof_gate_response: None,
-            },
-        )
-        .await
-        .expect("complete step-up challenge through Postgres runtime");
-    assert_eq!(
-        completed_step_up_proof.outcome(),
-        &Outcome::ActiveProofCompleted {
-            attempt_id: step_up_attempt_id.clone(),
-            proof: ProofSummary::new(ProofFamily::OutOfBandCode, "email_otp").expect("proof"),
-        }
-    );
-
-    let step_up_headers = headers_from_cookie_pairs(&[
-        issued_auth.session_cookie_pair.as_str(),
-        continuation_cookie_pair.as_str(),
-    ]);
-    let step_up = runtime
-        .execute_step_up_completion_from_headers(
-            &step_up_headers,
-            CompleteStepUpInput { now: at(100) },
-        )
-        .await
-        .expect("complete step-up through Postgres runtime");
-    assert_eq!(
-        step_up.outcome(),
-        &Outcome::Authenticated(Authenticated {
-            subject_id: subject_id.clone(),
-            session_id: issued_auth.session_id.clone(),
-            source: AuthenticationSource::StepUp,
-            step_up_is_fresh: true,
-        })
-    );
-    assert!(
-        step_up
-            .set_cookie_headers()
-            .as_slice()
-            .iter()
-            .any(|header| header
-                .as_str()
-                .starts_with("__Host-__paranoid_auth_session=")),
-        "step-up must rotate and reissue the session cookie"
-    );
-    assert!(
-        set_cookie_headers_contain_deletion(
-            step_up.set_cookie_headers(),
-            "__Host-__paranoid_auth_active_proof_continuation="
-        ),
-        "step-up must clear the active-proof continuation cookie"
-    );
-    assert_eq!(
-        count_session_secret_macs_for_session(pool, store_config, &issued_auth.session_id).await,
-        2,
-        "step-up must store the newly rotated session secret MAC"
-    );
-    assert_eq!(
-        count_active_proof_attempts_for_attempt(pool, store_config, &step_up_attempt_id).await,
-        0,
-        "step-up must close and delete the active-proof attempt"
-    );
-
-    let stepped_up_session_cookie_pair = cookie_pair_from_set_cookie(
-        step_up.set_cookie_headers(),
-        "__Host-__paranoid_auth_session=",
-    );
-    let sensitive_after_step_up = runtime
-        .execute_request_resolution_from_headers(
-            &headers_from_cookie_pairs(&[stepped_up_session_cookie_pair]),
-            ResolveRequestInput {
-                now: at(105),
-                request_kind: RequestKind::Sensitive,
-            },
-        )
-        .await
-        .expect("resolve sensitive request after step-up through Postgres runtime");
-    assert_eq!(
-        sensitive_after_step_up.outcome(),
-        &Outcome::Authenticated(Authenticated {
-            subject_id,
-            session_id: issued_auth.session_id,
-            source: AuthenticationSource::AuthoritativeSession,
-            step_up_is_fresh: true,
-        })
-    );
-
-    harness.drop_schema().await;
-}
-
-#[tokio::test]
-async fn postgres_runtime_executes_revocation_paths_when_database_is_available() {
-    let _postgres_runtime_test_guard = AUTH_POSTGRES_RUNTIME_TEST_LOCK.lock().await;
-    let harness = PostgresRuntimeTestHarness::connect_required().await;
-    let pool = &harness.pool;
-    let store_config = &harness.store_config;
-    let runtime = &harness.runtime;
-
-    let logout_state = complete_full_authentication_through_runtime(
-        runtime,
-        pool,
-        store_config,
-        email_otp_plugin_for_harness(&harness),
-        "logout",
-        20,
-        id("subject"),
-        false,
-    )
-    .await;
-    let logout_headers = headers_from_cookie_pairs(&[logout_state.session_cookie_pair.as_str()]);
-    let logout = runtime
-        .execute_from_headers(
-            &logout_headers,
-            Command::LogoutCurrentSession(LogoutCurrentSession { now: at(50) }),
-        )
-        .await
-        .expect("logout current session through Postgres runtime");
-    assert_eq!(
-        logout.outcome(),
-        &Outcome::RevocationPlanned(RevocationOutcome {
-            subject_id: Some(id("subject")),
-            target: RevocationTarget::CurrentSession,
-        })
-    );
-    assert!(
-        set_cookie_headers_contain_deletion(
-            logout.set_cookie_headers(),
-            "__Host-__paranoid_auth_session="
-        ),
-        "logout must delete the current session cookie"
-    );
-    let stale_logged_out_session = runtime
-        .execute_request_resolution_from_headers(
-            &logout_headers,
-            ResolveRequestInput {
-                now: at(55),
-                request_kind: RequestKind::StateChanging,
-            },
-        )
-        .await
-        .expect("resolve logged-out session through Postgres runtime");
-    assert_eq!(
-        stale_logged_out_session.outcome(),
-        &Outcome::NeedsFullAuthentication
-    );
-    assert!(
-        set_cookie_headers_contain_deletion(
-            stale_logged_out_session.set_cookie_headers(),
-            "__Host-__paranoid_auth_session="
-        ),
-        "stale logged-out session cookie must be cleared"
-    );
-
-    let targeted_session_state = complete_full_authentication_through_runtime(
-        runtime,
-        pool,
-        store_config,
-        email_otp_plugin_for_harness(&harness),
-        "targeted-session",
-        60,
-        id("subject"),
-        false,
-    )
-    .await;
-    let targeted_session_revocation = runtime
-        .execute_from_headers(
-            &HeaderMap::new(),
-            Command::RevokeSession(RevokeSession {
-                now: at(90),
-                subject_id: id("subject"),
-                session_id: targeted_session_state.session_id.clone(),
-                reason: RevocationReason::RemoteRevocation,
-            }),
-        )
-        .await
-        .expect("targeted session revocation through Postgres runtime");
-    assert_eq!(
-        targeted_session_revocation.outcome(),
-        &Outcome::RevocationPlanned(RevocationOutcome {
-            subject_id: Some(id("subject")),
-            target: RevocationTarget::Session(targeted_session_state.session_id.clone()),
-        })
-    );
-    let targeted_session_headers =
-        headers_from_cookie_pairs(&[targeted_session_state.session_cookie_pair.as_str()]);
-    let stale_targeted_session = runtime
-        .execute_request_resolution_from_headers(
-            &targeted_session_headers,
-            ResolveRequestInput {
-                now: at(95),
-                request_kind: RequestKind::StateChanging,
-            },
-        )
-        .await
-        .expect("resolve targeted-revoked session through Postgres runtime");
-    assert_eq!(
-        stale_targeted_session.outcome(),
-        &Outcome::NeedsFullAuthentication
-    );
-    assert!(
-        set_cookie_headers_contain_deletion(
-            stale_targeted_session.set_cookie_headers(),
-            "__Host-__paranoid_auth_session="
-        ),
-        "targeted-revoked session cookie must be cleared on reuse"
-    );
-
-    let targeted_device_state = complete_full_authentication_through_runtime(
-        runtime,
-        pool,
-        store_config,
-        email_otp_plugin_for_harness(&harness),
-        "targeted-device",
-        100,
-        id("subject"),
-        true,
-    )
-    .await;
-    let targeted_device_cookie_pair = targeted_device_state
-        .trusted_device_cookie_pair
-        .as_deref()
-        .expect("trusted-device cookie");
-    let targeted_device_headers = headers_from_cookie_pairs(&[targeted_device_cookie_pair]);
-    let targeted_device_revocation = runtime
-        .execute_from_headers(
-            &targeted_device_headers,
-            Command::RevokeTrustedDevice(RevokeTrustedDevice {
-                now: at(130),
-                subject_id: id("subject"),
-                device_credential_id: targeted_device_state
-                    .trusted_device_credential_id
-                    .clone()
-                    .expect("targeted device id"),
-                reason: RevocationReason::RemoteRevocation,
-            }),
-        )
-        .await
-        .expect("targeted trusted-device revocation through Postgres runtime");
-    assert_eq!(
-        targeted_device_revocation.outcome(),
-        &Outcome::RevocationPlanned(RevocationOutcome {
-            subject_id: Some(id("subject")),
-            target: RevocationTarget::TrustedDevice(
-                targeted_device_state
-                    .trusted_device_credential_id
-                    .clone()
-                    .expect("targeted device id"),
-            ),
-        })
-    );
-    assert!(
-        set_cookie_headers_contain_deletion(
-            targeted_device_revocation.set_cookie_headers(),
-            "__Host-__paranoid_auth_trusted_device="
-        ),
-        "targeted trusted-device revocation must delete the presented device cookie"
-    );
-    let stale_targeted_device = runtime
-        .execute_request_resolution_from_headers(
-            &targeted_device_headers,
-            ResolveRequestInput {
-                now: at(135),
-                request_kind: RequestKind::StateChanging,
-            },
-        )
-        .await
-        .expect("resolve targeted-revoked trusted device through Postgres runtime");
-    assert_eq!(
-        stale_targeted_device.outcome(),
-        &Outcome::NeedsFullAuthentication
-    );
-    assert!(
-        set_cookie_headers_contain_deletion(
-            stale_targeted_device.set_cookie_headers(),
-            "__Host-__paranoid_auth_trusted_device="
-        ),
-        "targeted-revoked trusted-device cookie must be cleared on reuse"
-    );
-
-    let subject_wide_state = complete_full_authentication_through_runtime(
-        runtime,
-        pool,
-        store_config,
-        email_otp_plugin_for_harness(&harness),
-        "subject-wide",
-        140,
-        id("subject"),
-        true,
-    )
-    .await;
-    let subject_wide_device_cookie_pair = subject_wide_state
-        .trusted_device_cookie_pair
-        .as_deref()
-        .expect("subject-wide trusted-device cookie");
-    let subject_wide_headers = headers_from_cookie_pairs(&[
-        subject_wide_state.session_cookie_pair.as_str(),
-        subject_wide_device_cookie_pair,
-    ]);
-    let subject_wide_revocation = runtime
-        .execute_from_headers(
-            &subject_wide_headers,
-            Command::RevokeSubjectAuthState(RevokeSubjectAuthState {
-                now: at(170),
-                subject_id: id("subject"),
-                reason: RevocationReason::SubjectAuthStateChanged,
-            }),
-        )
-        .await
-        .expect("subject-wide revocation through Postgres runtime");
-    assert_eq!(
-        subject_wide_revocation.outcome(),
-        &Outcome::RevocationPlanned(RevocationOutcome {
-            subject_id: Some(id("subject")),
-            target: RevocationTarget::SubjectAuthState(id("subject")),
-        })
-    );
-    assert!(
-        set_cookie_headers_contain_deletion(
-            subject_wide_revocation.set_cookie_headers(),
-            "__Host-__paranoid_auth_session="
-        ),
-        "subject-wide revocation must delete the presented session cookie"
-    );
-    assert!(
-        set_cookie_headers_contain_deletion(
-            subject_wide_revocation.set_cookie_headers(),
-            "__Host-__paranoid_auth_trusted_device="
-        ),
-        "subject-wide revocation must delete the presented trusted-device cookie"
-    );
-    let stale_subject_wide_session_headers =
-        headers_from_cookie_pairs(&[subject_wide_state.session_cookie_pair.as_str()]);
-    let stale_subject_wide_session = runtime
-        .execute_request_resolution_from_headers(
-            &stale_subject_wide_session_headers,
-            ResolveRequestInput {
-                now: at(175),
-                request_kind: RequestKind::StateChanging,
-            },
-        )
-        .await
-        .expect("resolve subject-wide-revoked session through Postgres runtime");
-    assert_eq!(
-        stale_subject_wide_session.outcome(),
-        &Outcome::NeedsFullAuthentication
-    );
-    let stale_subject_wide_device_headers =
-        headers_from_cookie_pairs(&[subject_wide_device_cookie_pair]);
-    let stale_subject_wide_device = runtime
-        .execute_request_resolution_from_headers(
-            &stale_subject_wide_device_headers,
-            ResolveRequestInput {
-                now: at(175),
-                request_kind: RequestKind::StateChanging,
-            },
-        )
-        .await
-        .expect("resolve subject-wide-revoked trusted device through Postgres runtime");
-    assert_eq!(
-        stale_subject_wide_device.outcome(),
-        &Outcome::NeedsFullAuthentication
-    );
-
-    assert_eq!(
-        fetch_session_revoked_at(pool, store_config, &logout_state.session_id).await,
-        Some(50)
-    );
-    assert_eq!(
-        fetch_session_revoked_at(pool, store_config, &targeted_session_state.session_id).await,
-        Some(90)
-    );
-    assert_eq!(
-        fetch_trusted_device_revoked_at(
-            pool,
-            store_config,
-            &targeted_device_state
-                .trusted_device_credential_id
-                .clone()
-                .expect("targeted device id"),
-        )
-        .await,
-        Some(130)
-    );
-    assert_eq!(
-        fetch_subject_revocation_cutoff(pool, store_config, &id("subject")).await,
-        Some(170)
-    );
-
-    harness.drop_schema().await;
-}
-
-#[tokio::test]
-async fn postgres_runtime_rejects_stale_loaded_state_commits_after_revocation_when_database_is_available()
- {
-    let _postgres_runtime_test_guard = AUTH_POSTGRES_RUNTIME_TEST_LOCK.lock().await;
-    let harness = PostgresRuntimeTestHarness::connect_required().await;
-    let pool = &harness.pool;
-    let store_config = &harness.store_config;
-    let runtime = &harness.runtime;
-    let store = postgres_runtime_test_store(store_config);
-
-    let logout_race_state = complete_full_authentication_through_runtime(
-        runtime,
-        pool,
-        store_config,
-        email_otp_plugin_for_harness(&harness),
-        "logout-race",
-        20,
-        id("subject"),
-        false,
-    )
-    .await;
-    let logout_race_headers =
-        headers_from_cookie_pairs(&[logout_race_state.session_cookie_pair.as_str()]);
-    let mut stale_logout_refresh_tx = pool
-        .begin_transaction()
-        .await
-        .expect("begin stale logout-refresh transaction");
-    let stale_logout_refresh_plan = plan_loaded_state_command_in_current_transaction(
-        &mut stale_logout_refresh_tx,
-        &store,
-        &logout_race_headers,
-        Command::ResolveRequest(ResolveRequest {
-            now: at(130),
-            request_kind: RequestKind::StateChanging,
-            fresh_session_id: None,
-        }),
-    )
-    .await;
-    assert_eq!(
-        stale_logout_refresh_plan.planned.outcome(),
-        &Outcome::Authenticated(Authenticated {
-            subject_id: id("subject"),
-            session_id: logout_race_state.session_id.clone(),
-            source: AuthenticationSource::RefreshedSession,
-            step_up_is_fresh: false,
-        })
-    );
-    runtime
-        .execute_from_headers(
-            &logout_race_headers,
-            Command::LogoutCurrentSession(LogoutCurrentSession { now: at(131) }),
-        )
-        .await
-        .expect("commit logout racing stale session refresh");
-    let logout_refresh_error =
-        commit_planned_work_in_current_transaction_expect_precondition_error(
-            &mut stale_logout_refresh_tx,
-            &store,
-            &stale_logout_refresh_plan,
-        )
-        .await;
-    assert_precondition_failed(
-        &logout_refresh_error,
-        "session no longer matches loaded state",
-    );
-    stale_logout_refresh_tx
-        .rollback()
-        .await
-        .expect("roll back failed stale logout-refresh transaction");
-    assert_eq!(
-        fetch_session_revoked_at(pool, store_config, &logout_race_state.session_id).await,
-        Some(131)
-    );
-    assert_eq!(
-        count_session_secret_macs_for_session(pool, store_config, &logout_race_state.session_id)
-            .await,
-        1,
-        "failed stale refresh must not insert a replacement session secret MAC"
-    );
-
-    let subject_race_state = complete_full_authentication_through_runtime(
-        runtime,
-        pool,
-        store_config,
-        email_otp_plugin_for_harness(&harness),
-        "subject-race",
-        140,
-        id("subject"),
-        false,
-    )
-    .await;
-    let subject_race_headers =
-        headers_from_cookie_pairs(&[subject_race_state.session_cookie_pair.as_str()]);
-    let mut stale_subject_refresh_tx = pool
-        .begin_transaction()
-        .await
-        .expect("begin stale subject-refresh transaction");
-    let stale_subject_refresh_plan = plan_loaded_state_command_in_current_transaction(
-        &mut stale_subject_refresh_tx,
-        &store,
-        &subject_race_headers,
-        Command::ResolveRequest(ResolveRequest {
-            now: at(250),
-            request_kind: RequestKind::StateChanging,
-            fresh_session_id: None,
-        }),
-    )
-    .await;
-    assert_eq!(
-        stale_subject_refresh_plan.planned.outcome(),
-        &Outcome::Authenticated(Authenticated {
-            subject_id: id("subject"),
-            session_id: subject_race_state.session_id.clone(),
-            source: AuthenticationSource::RefreshedSession,
-            step_up_is_fresh: false,
-        })
-    );
-    runtime
-        .execute_from_headers(
-            &HeaderMap::new(),
-            Command::RevokeSubjectAuthState(RevokeSubjectAuthState {
-                now: at(251),
-                subject_id: id("subject"),
-                reason: RevocationReason::SubjectAuthStateChanged,
-            }),
-        )
-        .await
-        .expect("commit subject-wide revocation racing stale session refresh");
-    let subject_refresh_error =
-        commit_planned_work_in_current_transaction_expect_precondition_error(
-            &mut stale_subject_refresh_tx,
-            &store,
-            &stale_subject_refresh_plan,
-        )
-        .await;
-    assert_precondition_failed(
-        &subject_refresh_error,
-        "subject auth state invalidates target",
-    );
-    stale_subject_refresh_tx
-        .rollback()
-        .await
-        .expect("roll back failed stale subject-refresh transaction");
-    assert_eq!(
-        fetch_subject_revocation_cutoff(pool, store_config, &id("subject")).await,
-        Some(251)
-    );
-    assert_eq!(
-        count_session_secret_macs_for_session(pool, store_config, &subject_race_state.session_id)
-            .await,
-        1,
-        "failed stale subject-revoked refresh must not insert a replacement session secret MAC"
-    );
-
-    let device_race_state = complete_full_authentication_through_runtime(
-        runtime,
-        pool,
-        store_config,
-        email_otp_plugin_for_harness(&harness),
-        "device-race",
-        300,
-        id("device-race-subject"),
-        true,
-    )
-    .await;
-    let device_race_cookie_pair = device_race_state
-        .trusted_device_cookie_pair
-        .as_deref()
-        .expect("device-race trusted-device cookie");
-    let device_race_headers = headers_from_cookie_pairs(&[device_race_cookie_pair]);
-    let mut stale_device_rotation_tx = pool
-        .begin_transaction()
-        .await
-        .expect("begin stale device-rotation transaction");
-    let stale_device_rotation_plan = plan_loaded_state_command_in_current_transaction(
-        &mut stale_device_rotation_tx,
-        &store,
-        &device_race_headers,
-        Command::ResolveRequest(ResolveRequest {
-            now: at(360),
-            request_kind: RequestKind::StateChanging,
-            fresh_session_id: Some(id("device-race-stale-revival-session")),
-        }),
-    )
-    .await;
-    assert_eq!(
-        stale_device_rotation_plan.planned.outcome(),
-        &Outcome::Authenticated(Authenticated {
-            subject_id: id("device-race-subject"),
-            session_id: id("device-race-stale-revival-session"),
-            source: AuthenticationSource::SilentTrustedDeviceRevival,
-            step_up_is_fresh: false,
-        })
-    );
-    runtime
-        .execute_from_headers(
-            &device_race_headers,
-            Command::RevokeTrustedDevice(RevokeTrustedDevice {
-                now: at(361),
-                subject_id: id("device-race-subject"),
-                device_credential_id: device_race_state
-                    .trusted_device_credential_id
-                    .clone()
-                    .expect("device-race device id"),
-                reason: RevocationReason::RemoteRevocation,
-            }),
-        )
-        .await
-        .expect("commit trusted-device revocation racing stale device rotation");
-    let device_rotation_error =
-        commit_planned_work_in_current_transaction_expect_precondition_error(
-            &mut stale_device_rotation_tx,
-            &store,
-            &stale_device_rotation_plan,
-        )
-        .await;
-    assert_precondition_failed(
-        &device_rotation_error,
-        "trusted device does not belong to subject",
-    );
-    stale_device_rotation_tx
-        .rollback()
-        .await
-        .expect("roll back failed stale device-rotation transaction");
-    assert_eq!(
-        fetch_trusted_device_revoked_at(
-            pool,
-            store_config,
-            &device_race_state
-                .trusted_device_credential_id
-                .clone()
-                .expect("device-race device id"),
-        )
-        .await,
-        Some(361)
-    );
-    assert_eq!(
-        fetch_trusted_device_current_secret_version(
-            pool,
-            store_config,
-            &device_race_state
-                .trusted_device_credential_id
-                .clone()
-                .expect("device-race device id"),
-        )
-        .await,
-        1,
-        "failed stale device rotation must not advance the credential version"
-    );
-    assert_eq!(
-        count_trusted_device_secret_macs_for_device(
-            pool,
-            store_config,
-            &device_race_state
-                .trusted_device_credential_id
-                .clone()
-                .expect("device-race device id"),
-        )
-        .await,
-        1,
-        "failed stale device rotation must not insert a replacement trusted-device secret MAC"
-    );
-    assert_eq!(
-        count_sessions_for_session(pool, store_config, &id("device-race-stale-revival-session"))
-            .await,
-        0,
-        "failed stale device rotation must not create its replacement session"
-    );
-
-    harness.drop_schema().await;
-}
-
-#[tokio::test]
-async fn postgres_runtime_rejects_stale_active_proof_commits_when_database_is_available() {
-    let _postgres_runtime_test_guard = AUTH_POSTGRES_RUNTIME_TEST_LOCK.lock().await;
-    let harness = PostgresRuntimeTestHarness::connect_required().await;
-    let pool = &harness.pool;
-    let store_config = &harness.store_config;
-    let runtime = &harness.runtime;
-    let store = postgres_runtime_test_store(store_config);
-
-    let challenge_completion_race = start_and_issue_out_of_band_challenge_through_runtime(
-        runtime,
-        pool,
-        email_otp_plugin_for_harness(&harness),
-        "challenge-completion-race",
-        20,
-        id("challenge-completion-race-subject"),
-    )
-    .await;
-    let challenge_completion_headers =
-        headers_from_cookie_pairs(&[challenge_completion_race.challenge_cookie_pair.as_str()]);
-    let mut stale_challenge_completion_tx = pool
-        .begin_transaction()
-        .await
-        .expect("begin stale challenge-completion transaction");
-    let stale_challenge_completion_plan = plan_loaded_state_command_in_current_transaction(
-        &mut stale_challenge_completion_tx,
-        &store,
-        &challenge_completion_headers,
-        complete_out_of_band_challenge_command(
-            &challenge_completion_race,
-            at(40),
-            id("challenge-completion-race-subject"),
-        ),
-    )
-    .await;
-    assert!(matches!(
-        stale_challenge_completion_plan.planned.outcome(),
-        Outcome::ActiveProofCompleted { .. }
-    ));
-    runtime
-        .execute_from_headers(
-            &HeaderMap::new(),
-            Command::RevokeSubjectAuthState(RevokeSubjectAuthState {
-                now: at(41),
-                subject_id: id("challenge-completion-race-subject"),
-                reason: RevocationReason::SubjectAuthStateChanged,
-            }),
-        )
-        .await
-        .expect("commit subject revocation racing challenge completion");
-    let challenge_completion_error =
-        commit_planned_work_in_current_transaction_expect_precondition_error(
-            &mut stale_challenge_completion_tx,
-            &store,
-            &stale_challenge_completion_plan,
-        )
-        .await;
-    assert_precondition_failed(
-        &challenge_completion_error,
-        "subject auth state invalidates target",
-    );
-    stale_challenge_completion_tx
-        .rollback()
-        .await
-        .expect("roll back failed stale challenge-completion transaction");
-    assert_eq!(
-        count_satisfied_proofs_for_attempt(
-            pool,
-            store_config,
-            &challenge_completion_race.attempt_id
-        )
-        .await,
-        0,
-        "failed stale challenge completion must not record a proof"
-    );
-    assert_eq!(
-        count_open_challenges_for_challenge(
-            pool,
-            store_config,
-            &challenge_completion_race.challenge_id
-        )
-        .await,
-        1,
-        "failed stale challenge completion must not close the challenge"
-    );
-
-    let resend_race_subject: SubjectId = id("resend-race-subject");
-    let resend_race_session = complete_full_authentication_through_runtime(
-        runtime,
-        pool,
-        store_config,
-        email_otp_plugin_for_harness(&harness),
-        "resend-race-bootstrap",
-        60,
-        resend_race_subject.clone(),
-        false,
-    )
-    .await;
-    let resend_race = start_current_session_and_issue_out_of_band_challenge_through_runtime(
-        runtime,
-        pool,
-        email_otp_plugin_for_harness(&harness),
-        "resend-race",
-        90,
-        resend_race_subject.clone(),
-        resend_race_session.session_cookie_pair.as_str(),
-    )
-    .await;
-    let mut stale_resend_tx = pool
-        .begin_transaction()
-        .await
-        .expect("begin stale resend transaction");
-    let stale_resend_plan = plan_loaded_state_command_in_current_transaction(
-        &mut stale_resend_tx,
-        &store,
-        &HeaderMap::new(),
-        Command::ResendOutOfBandChallenge(ResendOutOfBandChallenge {
-            now: at(110),
-            attempt_id: resend_race.attempt_id.clone(),
-            challenge_id: resend_race.challenge_id.clone(),
-            idempotency_key: "resend-race-mail-idempotency-key-2".to_owned(),
-            method_commit_work: Vec::new(),
-        }),
-    )
-    .await;
-    assert_eq!(
-        stale_resend_plan.planned.outcome(),
-        &Outcome::OutOfBandChallengeResent {
-            attempt_id: resend_race.attempt_id.clone(),
-            challenge_id: resend_race.challenge_id.clone(),
-            resend_count: 1,
-            expires_at: at(140),
-        }
-    );
-    runtime
-        .execute_from_headers(
-            &HeaderMap::new(),
-            Command::RevokeSubjectAuthState(RevokeSubjectAuthState {
-                now: at(111),
-                subject_id: resend_race_subject,
-                reason: RevocationReason::SubjectAuthStateChanged,
-            }),
-        )
-        .await
-        .expect("commit subject revocation racing challenge resend");
-    let resend_error = commit_planned_work_in_current_transaction_expect_precondition_error(
-        &mut stale_resend_tx,
-        &store,
-        &stale_resend_plan,
-    )
-    .await;
-    assert_precondition_failed(&resend_error, "subject auth state invalidates target");
-    stale_resend_tx
-        .rollback()
-        .await
-        .expect("roll back failed stale resend transaction");
-    assert_eq!(
-        fetch_out_of_band_challenge_resend_count(pool, store_config, &resend_race.challenge_id)
-            .await,
-        0,
-        "failed stale resend must not advance resend count"
-    );
-    assert_eq!(
-        count_challenge_delivery_keys(pool, store_config, &resend_race.challenge_id).await,
-        1,
-        "failed stale resend must not record a new delivery key"
-    );
-
-    let full_auth_race = start_and_issue_out_of_band_challenge_through_runtime(
-        runtime,
-        pool,
-        email_otp_plugin_for_harness(&harness),
-        "full-auth-race",
-        100,
-        id("full-auth-race-subject"),
-    )
-    .await;
-    complete_out_of_band_challenge_response_through_runtime(runtime, &full_auth_race, at(120))
-        .await;
-    let mut stale_full_auth_tx = pool
-        .begin_transaction()
-        .await
-        .expect("begin stale full-authentication transaction");
-    let stale_full_auth_plan = plan_loaded_state_command_in_current_transaction(
-        &mut stale_full_auth_tx,
-        &store,
-        &HeaderMap::new(),
-        Command::CompleteFullAuthentication(CompleteFullAuthentication {
-            now: at(125),
-            attempt_id: full_auth_race.attempt_id.clone(),
-            fresh_session_id: id("full-auth-race-session"),
-            trust_device: None,
-        }),
-    )
-    .await;
-    assert_eq!(
-        stale_full_auth_plan.planned.outcome(),
-        &Outcome::Authenticated(Authenticated {
-            subject_id: id("full-auth-race-subject"),
-            session_id: id("full-auth-race-session"),
-            source: AuthenticationSource::FullAuthentication,
-            step_up_is_fresh: true,
-        })
-    );
-    runtime
-        .execute_from_headers(
-            &HeaderMap::new(),
-            Command::RevokeSubjectAuthState(RevokeSubjectAuthState {
-                now: at(126),
-                subject_id: id("full-auth-race-subject"),
-                reason: RevocationReason::SubjectAuthStateChanged,
-            }),
-        )
-        .await
-        .expect("commit subject revocation racing full authentication");
-    let full_auth_error = commit_planned_work_in_current_transaction_expect_precondition_error(
-        &mut stale_full_auth_tx,
-        &store,
-        &stale_full_auth_plan,
-    )
-    .await;
-    assert_precondition_failed(&full_auth_error, "subject auth state invalidates target");
-    stale_full_auth_tx
-        .rollback()
-        .await
-        .expect("roll back failed stale full-authentication transaction");
-    assert_eq!(
-        count_sessions_for_session(pool, store_config, &id("full-auth-race-session")).await,
-        0,
-        "failed stale full authentication must not create a session"
-    );
-    assert_eq!(
-        count_session_secret_macs_for_session(pool, store_config, &id("full-auth-race-session"))
-            .await,
-        0,
-        "failed stale full authentication must not insert a session secret MAC"
-    );
-    assert_eq!(
-        count_active_proof_attempts_for_attempt(pool, store_config, &full_auth_race.attempt_id)
-            .await,
-        1,
-        "failed stale full authentication must not delete the attempt"
-    );
-
-    let replay_race = start_and_issue_out_of_band_challenge_through_runtime(
-        runtime,
-        pool,
-        email_otp_plugin_for_harness(&harness),
-        "replay-race",
-        140,
-        id("replay-race-subject"),
-    )
-    .await;
-    let replay_headers = headers_from_cookie_pairs(&[replay_race.challenge_cookie_pair.as_str()]);
-    let mut stale_replay_tx = pool
-        .begin_transaction()
-        .await
-        .expect("begin stale replay transaction");
-    let stale_replay_plan = plan_loaded_state_command_in_current_transaction(
-        &mut stale_replay_tx,
-        &store,
-        &replay_headers,
-        complete_out_of_band_challenge_command(&replay_race, at(160), id("replay-race-subject")),
-    )
-    .await;
-    assert!(matches!(
-        stale_replay_plan.planned.outcome(),
-        Outcome::ActiveProofCompleted { .. }
-    ));
-    complete_out_of_band_challenge_response_through_runtime(runtime, &replay_race, at(161)).await;
-    let replay_error = commit_planned_work_in_current_transaction_expect_precondition_error(
-        &mut stale_replay_tx,
-        &store,
-        &stale_replay_plan,
-    )
-    .await;
-    assert_precondition_failed(&replay_error, "active proof challenge is no longer open");
-    stale_replay_tx
-        .rollback()
-        .await
-        .expect("roll back failed stale replay transaction");
-    assert_eq!(
-        count_satisfied_proofs_for_attempt(pool, store_config, &replay_race.attempt_id).await,
-        1,
-        "stale replay must not duplicate the satisfied proof"
-    );
-    assert_eq!(
-        count_open_challenges_for_challenge(pool, store_config, &replay_race.challenge_id).await,
-        0,
-        "successful first completion must be the only challenge closure"
-    );
-
-    harness.drop_schema().await;
-}
-
-#[tokio::test]
-async fn postgres_runtime_commits_core_durable_effects_atomically_when_database_is_available() {
-    let _postgres_runtime_test_guard = AUTH_POSTGRES_RUNTIME_TEST_LOCK.lock().await;
-    let harness = PostgresRuntimeTestHarness::connect_required().await;
-    let pool = &harness.pool;
-    let store_config = &harness.store_config;
-    let runtime = &harness.runtime;
-
-    let challenge = start_and_issue_out_of_band_challenge_through_runtime(
-        runtime,
-        pool,
-        email_otp_plugin_for_harness(&harness),
-        "durable-effect",
-        20,
-        id("durable-effect-subject"),
-    )
-    .await;
-    assert_eq!(
-        count_core_durable_effect_commands(pool, store_config).await,
-        1
-    );
-    assert_eq!(
-        count_out_of_band_durable_effects_for_challenge(
-            pool,
-            store_config,
-            &challenge.challenge_id
-        )
-        .await,
-        1
-    );
-
-    let resent = runtime
-        .execute_out_of_band_challenge_resend_from_headers(
-            &headers_from_cookie_pairs(&[challenge.challenge_cookie_pair.as_str()]),
-            ResendOutOfBandChallengeRequest {
-                now: at(40),
-                idempotency_key: "durable-effect-mail-idempotency-key-2".to_owned(),
-            },
-        )
-        .await
-        .expect("resend challenge through Postgres runtime");
-    assert!(matches!(
-        resent.outcome(),
-        Outcome::OutOfBandChallengeResent { .. }
-    ));
-    assert_eq!(
-        count_core_durable_effect_commands(pool, store_config).await,
-        2
-    );
-    assert_eq!(
-        count_out_of_band_durable_effects_for_challenge(
-            pool,
-            store_config,
-            &challenge.challenge_id
-        )
-        .await,
-        2
-    );
-
-    complete_out_of_band_challenge_response_through_runtime(runtime, &challenge, at(50)).await;
-    let continuation_headers =
-        headers_from_cookie_pairs(&[challenge.continuation_cookie_pair.as_str()]);
-    let full_authentication = runtime
-        .execute_full_authentication_completion_from_headers(
-            &continuation_headers,
-            CompleteFullAuthenticationInput {
-                now: at(55),
-                trust_device: Some(TrustDeviceAfterFullAuthenticationInput {
-                    display_label: Some("durable effect browser".to_owned()),
-                }),
-            },
-        )
-        .await
-        .expect("complete full authentication through Postgres runtime");
-    assert!(matches!(
-        full_authentication.outcome(),
-        Outcome::Authenticated(_)
-    ));
-    assert_eq!(
-        count_core_durable_effect_commands(pool, store_config).await,
-        3
-    );
-    assert_eq!(
-        count_security_notification_effects_for_subject(
-            pool,
-            store_config,
-            &id("durable-effect-subject")
-        )
-        .await,
-        1
-    );
-
-    harness.drop_schema().await;
-}
-
-#[tokio::test]
-async fn postgres_runtime_rejects_method_facades_until_registry_is_configured_when_database_is_available()
- {
-    let _postgres_runtime_test_guard = AUTH_POSTGRES_RUNTIME_TEST_LOCK.lock().await;
-    let harness = PostgresRuntimeTestHarness::connect_required().await;
-    let pool = &harness.pool;
-    let store_config = &harness.store_config;
-    let registry_runtime = &harness.runtime;
-    let no_registry_store = super::super::postgres_store::PostgresAuthStore::new(
-        store_config.clone(),
-        test_keyset("tests.auth.postgres-runtime.credentials.v1"),
-    );
-    let no_registry_runtime = super::super::postgres_runtime::PostgresAuthWebRuntime::new(
-        AuthWebRuntime::new(config(), auth_web_transport()),
-        pool.clone(),
-        no_registry_store,
-        Arc::new(hashcash_verifier_for_test()),
-    );
-    let runtime = &no_registry_runtime;
-    let empty_headers = HeaderMap::new();
-    let session_state_for_registry_errors = complete_full_authentication_through_runtime(
-        registry_runtime,
-        pool,
-        store_config,
-        email_otp_plugin_for_harness(&harness),
-        "method-registry-errors-bootstrap",
-        10,
-        id("method-registry-errors-subject"),
-        false,
-    )
-    .await;
-    let durable_effect_count_after_bootstrap =
-        count_core_durable_effect_commands(pool, store_config).await;
-
-    let started = start_current_session_active_proof_attempt_through_runtime(
-        runtime,
-        session_state_for_registry_errors
-            .session_cookie_pair
-            .as_str(),
-        at(60),
-        ProofUse::SatisfyStepUp,
-    )
-    .await;
-    let continuation_cookie_pair = started.continuation_cookie_pair;
-    let continuation_headers = headers_from_cookie_pairs(&[continuation_cookie_pair.as_str()]);
-    let issue_error = runtime
-        .execute_out_of_band_challenge_issue_from_headers(
-            &continuation_headers,
-            IssueOutOfBandChallengeInput {
-                now: at(70),
-                method: ProofMethodDeclaration::new(ProofFamily::OutOfBandCode, "email_otp")
-                    .expect("method declaration"),
-                challenge_dedupe_key: dedupe_key("method-issue:email-hash:window"),
-                recipient_handle: "method-issue-opaque-email-handle".to_owned(),
-                idempotency_key: "method-issue-mail-idempotency-key".to_owned(),
-            },
-        )
-        .await
-        .expect_err("registered method must be required on challenge issue");
-    assert_method_registry_not_configured(&issue_error);
-    assert_eq!(
-        count_all_active_proof_challenges(pool, store_config).await,
-        0
-    );
-    assert_eq!(
-        count_core_durable_effect_commands(pool, store_config).await,
-        durable_effect_count_after_bootstrap
-    );
-
-    let fused_issue_error = runtime
-        .execute_unbound_active_proof_attempt_start_and_out_of_band_challenge_issue_from_headers(
-            &empty_headers,
-            StartAndIssueOutOfBandChallengeInput {
-                now: at(40),
-                proof_use: ProofUse::ContributeToFullAuthentication,
-                method: ProofMethodDeclaration::new(ProofFamily::OutOfBandCode, "email_otp")
-                    .expect("method declaration"),
-                challenge_dedupe_key: dedupe_key("method-fused-issue:email-hash:window"),
-                recipient_handle: "method-fused-issue-opaque-email-handle".to_owned(),
-                idempotency_key: "method-fused-issue-mail-idempotency-key".to_owned(),
-            },
-            email_otp_challenge_issue_preflight_response_at(at(40)),
-        )
-        .await
-        .expect_err("fused unbound start and issue must roll back when method registry is missing");
-    assert_method_registry_not_configured(&fused_issue_error);
-    assert_eq!(count_all_active_proof_attempts(pool, store_config).await, 1);
-    assert_eq!(
-        count_all_active_proof_challenges(pool, store_config).await,
-        0
-    );
-
-    harness.database_operation_observer.clear();
-    let missing_cookie_resend_error = runtime
-        .execute_out_of_band_challenge_resend_from_headers(
-            &empty_headers,
-            ResendOutOfBandChallengeRequest {
-                now: at(40),
-                idempotency_key: "method-resend-missing-cookie-mail-idempotency-key".to_owned(),
-            },
-        )
-        .await
-        .expect_err("challenge resend must require the encrypted challenge cookie");
-    assert!(matches!(
-        missing_cookie_resend_error,
-        super::super::postgres_runtime::AuthPostgresWebRuntimeExecutionError::Core(
-            Error::MissingActiveProofChallengeCookie
-        )
-    ));
-    assert_no_database_operations(
-        &harness.database_operation_observer,
-        "missing out-of-band resend challenge cookie must reject before any database operation",
-    );
-
-    harness.database_operation_observer.clear();
-    let malformed_cookie_resend_error = runtime
-        .execute_out_of_band_challenge_resend_from_headers(
-            &headers_from_cookie_pairs(&[
-                "__Host-__paranoid_auth_active_proof_challenge=not-a-valid-encrypted-cookie",
-            ]),
-            ResendOutOfBandChallengeRequest {
-                now: at(40),
-                idempotency_key: "method-resend-malformed-cookie-mail-idempotency-key".to_owned(),
-            },
-        )
-        .await
-        .expect_err("malformed challenge cookie must fail during transport decode");
-    assert!(matches!(
-        malformed_cookie_resend_error,
-        super::super::postgres_runtime::AuthPostgresWebRuntimeExecutionError::Web(_)
-    ));
-    assert_no_database_operations(
-        &harness.database_operation_observer,
-        "malformed out-of-band resend challenge cookie must reject before any database operation",
-    );
-
-    let message_signature_challenge_cookie =
-        ActiveProofChallengeCookieDraft::new_without_response_mac(
-            ActiveProofChallengeCookieContext::new(
-                id("wrong-family-resend-attempt"),
-                id("wrong-family-resend-challenge"),
-                ProofSummary::new(ProofFamily::MessageSignature, "ssh_signature").expect("proof"),
-                at(30),
-                at(70),
-                ActiveProofChallengeFastFailNonce::from_bytes(
-                    &[88_u8; ACTIVE_PROOF_CHALLENGE_FAST_FAIL_NONCE_BYTES],
-                )
-                .expect("nonce"),
-            )
-            .expect("message-signature challenge-cookie context"),
-        )
-        .expect("message-signature challenge cookie");
-    let message_signature_challenge_effects = MaterializedResponseEffects::from_vec(vec![
-        MaterializedResponseEffect::IssueActiveProofChallengeCookie(
-            message_signature_challenge_cookie,
-        ),
-    ]);
-    let message_signature_challenge_headers = auth_web_transport()
-        .render_set_cookie_headers(at(30), message_signature_challenge_effects)
-        .expect("message-signature challenge set-cookie headers");
-    let message_signature_challenge_cookie_pair = cookie_pair_from_set_cookie(
-        &message_signature_challenge_headers,
-        "__Host-__paranoid_auth_active_proof_challenge=",
-    );
-    harness.database_operation_observer.clear();
-    let wrong_family_resend_error = runtime
-        .execute_out_of_band_challenge_resend_from_headers(
-            &headers_from_cookie_pairs(&[message_signature_challenge_cookie_pair]),
-            ResendOutOfBandChallengeRequest {
-                now: at(40),
-                idempotency_key: "method-resend-wrong-family-mail-idempotency-key".to_owned(),
-            },
-        )
-        .await
-        .expect_err("non-out-of-band challenge cookie must fail before resend state load");
-    assert!(matches!(
-        wrong_family_resend_error,
-        super::super::postgres_runtime::AuthPostgresWebRuntimeExecutionError::Core(
-            Error::ActiveProofChallengeCookieProofFamilyCannotUseResponseSecret {
-                family: ProofFamily::MessageSignature
-            }
-        )
-    ));
-    assert_no_database_operations(
-        &harness.database_operation_observer,
-        "non-out-of-band resend challenge cookie must reject before any database operation",
-    );
-
-    let resend = start_and_issue_out_of_band_challenge_through_runtime(
-        registry_runtime,
-        pool,
-        email_otp_plugin_for_harness(&harness),
-        "method-resend",
-        60,
-        id("method-resend-subject"),
-    )
-    .await;
-    let resend_error = runtime
-        .execute_out_of_band_challenge_resend_from_headers(
-            &headers_from_cookie_pairs(&[resend.challenge_cookie_pair.as_str()]),
-            ResendOutOfBandChallengeRequest {
-                now: at(80),
-                idempotency_key: "method-resend-mail-idempotency-key-2".to_owned(),
-            },
-        )
-        .await
-        .expect_err("registered method must be required on challenge resend");
-    assert_method_registry_not_configured(&resend_error);
-    assert_eq!(
-        fetch_out_of_band_challenge_resend_count(pool, store_config, &resend.challenge_id).await,
-        0
-    );
-    assert_eq!(
-        count_challenge_delivery_keys(pool, store_config, &resend.challenge_id).await,
-        1
-    );
-    assert_eq!(
-        count_out_of_band_durable_effects_for_challenge(pool, store_config, &resend.challenge_id)
-            .await,
-        1
-    );
-
-    harness.database_operation_observer.clear();
-    let expired_cookie_resend_error = runtime
-        .execute_out_of_band_challenge_resend_from_headers(
-            &headers_from_cookie_pairs(&[resend.challenge_cookie_pair.as_str()]),
-            ResendOutOfBandChallengeRequest {
-                now: at(111),
-                idempotency_key: "method-resend-expired-cookie-mail-idempotency-key".to_owned(),
-            },
-        )
-        .await
-        .expect_err("expired challenge cookie must fail before method dispatch");
-    assert!(matches!(
-        expired_cookie_resend_error,
-        super::super::postgres_runtime::AuthPostgresWebRuntimeExecutionError::Core(
-            Error::ActiveProofChallengeCookieExpired
-        )
-    ));
-    assert_no_database_operations(
-        &harness.database_operation_observer,
-        "expired out-of-band resend challenge cookie must reject before any database operation",
-    );
-    assert_eq!(
-        fetch_out_of_band_challenge_resend_count(pool, store_config, &resend.challenge_id).await,
-        0
-    );
-    assert_eq!(
-        count_challenge_delivery_keys(pool, store_config, &resend.challenge_id).await,
-        1
-    );
-
-    let completion = start_and_issue_out_of_band_challenge_through_runtime(
-        registry_runtime,
-        pool,
-        email_otp_plugin_for_harness(&harness),
-        "method-completion",
-        100,
-        id("method-completion-subject"),
-    )
-    .await;
-    let completion_headers =
-        headers_from_cookie_pairs(&[completion.challenge_cookie_pair.as_str()]);
-    let completion_error = runtime
-        .execute_out_of_band_challenge_response_from_headers(
-            &completion_headers,
-            CompleteOutOfBandChallengeResponse {
-                now: at(120),
-                secret_response: ActiveProofChallengeResponseSecret::try_from(
-                    completion.response_secret.expose_secret(),
-                )
-                .expect("challenge response secret"),
-                weak_proof_gate_response: None,
-            },
-        )
-        .await
-        .expect_err("registered method must be required on challenge completion");
-    assert_method_registry_not_configured(&completion_error);
-    assert_eq!(
-        count_satisfied_proofs_for_attempt(pool, store_config, &completion.attempt_id).await,
-        0
-    );
-    assert_eq!(
-        count_open_challenges_for_challenge(pool, store_config, &completion.challenge_id).await,
-        1
-    );
-
-    let known_subject_started = start_current_session_active_proof_attempt_through_runtime(
-        runtime,
-        session_state_for_registry_errors
-            .session_cookie_pair
-            .as_str(),
-        at(130),
-        ProofUse::SatisfyStepUp,
-    )
-    .await;
-    let known_subject_attempt_id = known_subject_started.attempt_id.clone();
-    let known_subject_continuation_cookie_pair = known_subject_started.continuation_cookie_pair;
-    let known_subject_headers =
-        headers_from_cookie_pairs(&[known_subject_continuation_cookie_pair.as_str()]);
-    let known_subject_method =
-        ProofMethodDeclaration::new(ProofFamily::SharedSecretOtp, "totp").expect("TOTP method");
-    let known_subject_secret_response =
-        known_subject_test_method_response_payload(&id("method-known-subject"));
-    let known_subject_weak_proof_gate_response =
-        bound_proof_of_work_gate_response_for_known_subject_completion(
-            &known_subject_headers,
-            &known_subject_method,
-            &known_subject_secret_response,
-            at(140),
-        );
-    let known_subject_error = runtime
-        .execute_known_subject_active_proof_method_response_from_headers(
-            &known_subject_headers,
-            CompleteKnownSubjectActiveProofMethodResponse {
-                now: at(140),
-                method: known_subject_method,
-                secret_response: known_subject_secret_response,
-                weak_proof_gate_response: Some(known_subject_weak_proof_gate_response),
-            },
-        )
-        .await
-        .expect_err("registered method must be required on known-subject completion");
-    assert_method_registry_not_configured(&known_subject_error);
-    assert_eq!(
-        count_satisfied_proofs_for_attempt(pool, store_config, &known_subject_attempt_id,).await,
-        0
-    );
-
-    harness.drop_schema().await;
-}
-
-#[tokio::test]
-async fn postgres_runtime_commits_method_work_atomically_with_core_work_when_database_is_available()
-{
-    let _postgres_runtime_test_guard = AUTH_POSTGRES_RUNTIME_TEST_LOCK.lock().await;
-    let harness = PostgresRuntimeTestHarness::connect_required_with_method_plugin(Some(
-        TestMethodCommitFailureMode::None,
-    ))
-    .await;
-    let pool = &harness.pool;
-    let store_config = &harness.store_config;
-    let runtime = &harness.runtime;
-    let method_plugin = harness.method_plugin.as_ref().expect("test method plugin");
-
-    let issued = runtime
-        .execute_unbound_active_proof_attempt_start_and_out_of_band_challenge_issue_from_headers(
-            &HeaderMap::new(),
-            StartAndIssueOutOfBandChallengeInput {
-                now: at(20),
-                proof_use: ProofUse::ContributeToFullAuthentication,
-                method: ProofMethodDeclaration::new(ProofFamily::OutOfBandCode, "email_otp")
-                    .expect("method declaration"),
-                challenge_dedupe_key: dedupe_key("method-atomic-success:email-hash:window"),
-                recipient_handle: "method-atomic-success-recipient".to_owned(),
-                idempotency_key: "method-atomic-success-mail-key".to_owned(),
-            },
-            email_otp_challenge_issue_preflight_response_at(at(20)),
-        )
-        .await
-        .expect("issue challenge with method registry");
-    let success_challenge_id = match issued.outcome() {
-        Outcome::OutOfBandChallengeIssued { challenge_id, .. } => challenge_id.clone(),
-        outcome => panic!("expected out-of-band challenge issue, got {outcome:?}"),
-    };
-    assert_eq!(
-        count_challenges_for_challenge(pool, store_config, &success_challenge_id).await,
-        1
-    );
-    assert_eq!(
-        count_out_of_band_durable_effects_for_challenge(pool, store_config, &success_challenge_id)
-            .await,
-        1
-    );
-    assert_eq!(method_plugin.count_state_rows(pool).await, 1);
-    assert_eq!(method_plugin.count_durable_effect_rows(pool).await, 1);
-
-    let precondition_error = runtime
-        .execute_unbound_active_proof_attempt_start_and_out_of_band_challenge_issue_from_headers(
-            &HeaderMap::new(),
-            StartAndIssueOutOfBandChallengeInput {
-                now: at(40),
-                proof_use: ProofUse::ContributeToFullAuthentication,
-                method: ProofMethodDeclaration::new(ProofFamily::OutOfBandCode, "email_otp")
-                    .expect("method declaration"),
-                challenge_dedupe_key: dedupe_key(
-                    "method-atomic-precondition-failure:email-hash:window",
-                ),
-                recipient_handle: "method-atomic-precondition-failure-recipient".to_owned(),
-                idempotency_key: "method-atomic-precondition-failure-mail-key".to_owned(),
-            },
-            email_otp_challenge_issue_preflight_response_at(at(40)),
-        )
-        .await
-        .expect_err("method precondition failure must abort the whole commit");
-    assert_method_commit_work_failed(
-        &precondition_error,
-        super::super::postgres_store::PostgresAuthMethodCommitStage::EnforcePrecondition,
-        "otp_state_absent",
-    );
-    assert_eq!(
-        count_all_active_proof_challenges(pool, store_config).await,
-        1
-    );
-    assert_eq!(
-        count_core_durable_effect_commands(pool, store_config).await,
-        1
-    );
-    assert_eq!(count_all_active_proof_attempts(pool, store_config).await, 1);
-    assert_eq!(method_plugin.count_state_rows(pool).await, 1);
-    assert_eq!(method_plugin.count_durable_effect_rows(pool).await, 1);
-
-    harness.drop_schema().await;
-}
-
-#[tokio::test]
-async fn postgres_runtime_rolls_back_core_work_when_method_mutation_fails_when_database_is_available()
- {
-    let _postgres_runtime_test_guard = AUTH_POSTGRES_RUNTIME_TEST_LOCK.lock().await;
-    let harness = PostgresRuntimeTestHarness::connect_required_with_method_plugin(Some(
-        TestMethodCommitFailureMode::FailMutation,
-    ))
-    .await;
-    let pool = &harness.pool;
-    let store_config = &harness.store_config;
-    let runtime = &harness.runtime;
-    let method_plugin = harness.method_plugin.as_ref().expect("test method plugin");
-
-    let error = runtime
-        .execute_unbound_active_proof_attempt_start_and_out_of_band_challenge_issue_from_headers(
-            &HeaderMap::new(),
-            StartAndIssueOutOfBandChallengeInput {
-                now: at(20),
-                proof_use: ProofUse::ContributeToFullAuthentication,
-                method: ProofMethodDeclaration::new(ProofFamily::OutOfBandCode, "email_otp")
-                    .expect("method declaration"),
-                challenge_dedupe_key: dedupe_key("method-mutation-failure:email-hash:window"),
-                recipient_handle: "method-mutation-failure-recipient".to_owned(),
-                idempotency_key: "method-mutation-failure-mail-key".to_owned(),
-            },
-            email_otp_challenge_issue_preflight_response_at(at(20)),
-        )
-        .await
-        .expect_err("method mutation failure must abort the whole commit");
-    assert_method_commit_work_failed(
-        &error,
-        super::super::postgres_store::PostgresAuthMethodCommitStage::ApplyMutation,
-        "store_otp_state",
-    );
-    assert_eq!(
-        count_all_active_proof_challenges(pool, store_config).await,
-        0
-    );
-    assert_eq!(
-        count_core_durable_effect_commands(pool, store_config).await,
-        0
-    );
-    assert_eq!(count_all_active_proof_attempts(pool, store_config).await, 0);
-    assert_eq!(method_plugin.count_state_rows(pool).await, 0);
-    assert_eq!(method_plugin.count_durable_effect_rows(pool).await, 0);
-
-    harness.drop_schema().await;
-}
-
-#[tokio::test]
-async fn postgres_runtime_rolls_back_core_work_when_method_durable_effect_fails_when_database_is_available()
- {
-    let _postgres_runtime_test_guard = AUTH_POSTGRES_RUNTIME_TEST_LOCK.lock().await;
-    let harness = PostgresRuntimeTestHarness::connect_required_with_method_plugin(Some(
-        TestMethodCommitFailureMode::FailDurableEffectCommand,
-    ))
-    .await;
-    let pool = &harness.pool;
-    let store_config = &harness.store_config;
-    let runtime = &harness.runtime;
-    let method_plugin = harness.method_plugin.as_ref().expect("test method plugin");
-
-    let error = runtime
-        .execute_unbound_active_proof_attempt_start_and_out_of_band_challenge_issue_from_headers(
-            &HeaderMap::new(),
-            StartAndIssueOutOfBandChallengeInput {
-                now: at(20),
-                proof_use: ProofUse::ContributeToFullAuthentication,
-                method: ProofMethodDeclaration::new(ProofFamily::OutOfBandCode, "email_otp")
-                    .expect("method declaration"),
-                challenge_dedupe_key: dedupe_key("method-effect-failure:email-hash:window"),
-                recipient_handle: "method-effect-failure-recipient".to_owned(),
-                idempotency_key: "method-effect-failure-mail-key".to_owned(),
-            },
-            email_otp_challenge_issue_preflight_response_at(at(20)),
-        )
-        .await
-        .expect_err("method durable effect failure must abort the whole commit");
-    assert_method_commit_work_failed(
-        &error,
-        super::super::postgres_store::PostgresAuthMethodCommitStage::AppendDurableEffectCommand,
-        "queue_email_body",
-    );
-    assert_eq!(
-        count_challenges_for_challenge(pool, store_config, &id("method-effect-failure-challenge"))
-            .await,
-        0
-    );
-    assert_eq!(
-        count_core_durable_effect_commands(pool, store_config).await,
-        0
-    );
-    assert_eq!(count_all_active_proof_attempts(pool, store_config).await, 0);
-    assert_eq!(method_plugin.count_state_rows(pool).await, 0);
-    assert_eq!(method_plugin.count_durable_effect_rows(pool).await, 0);
-
-    harness.drop_schema().await;
-}
+mod active_proof_start_and_direct_guards;
+mod admin_support_runtime;
+mod bootstrap_and_schema;
+mod credential_lifecycle_planning;
+mod credential_removal_regeneration_execution;
+mod credential_reset_replacement_execution;
+mod durable_effects_queue;
+mod message_signature_methods;
+mod method_work_atomicity;
+mod mounted_admin_and_delayed_routes;
+mod mounted_credential_addition_inventory;
+mod mounted_credential_mutation_routes;
+mod mounted_recovery_routes;
+mod mounted_route_guards;
+mod mounted_subject_lifecycle_routes;
+mod out_of_band_identifier_change;
+mod pending_credential_lifecycle_execution;
+mod recovery_code_methods;
+mod revocation_and_stale_commits;
+mod session_device_request_resolution;
+mod subject_lifecycle_deletion;
+mod totp_methods;
+mod unauthenticated_recovery_reset_execution;
+mod unauthenticated_recovery_reset_scheduling;
 
 fn auth_web_transport() -> AuthWebTransport {
     let cookie_manager =
@@ -8912,6 +2754,16 @@ fn postgres_runtime_test_store(
         store_config.clone(),
         test_keyset("tests.auth.postgres-runtime.credentials.v1"),
     )
+}
+
+fn postgres_runtime_test_store_with_method_registry_for_harness(
+    harness: &PostgresRuntimeTestHarness,
+) -> super::super::postgres_store::PostgresAuthStore {
+    let store = postgres_runtime_test_store(&harness.store_config);
+    match harness.method_registry.as_ref() {
+        Some(registry) => store.with_method_registry(Arc::clone(registry)),
+        None => store,
+    }
 }
 
 fn first_party_postgres_auth_bootstrap_for_test(
@@ -8994,12 +2846,202 @@ async fn count_auth_schema_ledger_rows(
     )
 }
 
+async fn seed_admin_support_target_credential_for_runtime_test(
+    pool: &Pool,
+    store_config: &super::super::postgres_store::PostgresAuthStoreConfig,
+    subject_id: SubjectId,
+    target_credential_id: VerifiedProofSourceId,
+    support_authority_timing: RecoveryAuthorityTiming,
+    now: UnixSeconds,
+) {
+    let seed_store = postgres_runtime_test_store(store_config);
+    seed_store
+        .store_credential_lifecycle_metadata_for_test(
+            pool,
+            &[CredentialInstanceMetadata::new(
+                target_credential_id.clone(),
+                subject_id,
+                CredentialInstanceKind::MessageSignatureVerifier,
+                "password_signature",
+                CredentialResetPolicyRole::OrdinaryCredential,
+                CredentialLifecycleState::Active,
+            )
+            .expect("support target credential metadata")],
+            &[CredentialRecoveryAuthority::new(
+                target_credential_id,
+                CredentialLifecycleAction::Reset,
+                id("support-authority"),
+                support_authority_timing,
+            )],
+            &[],
+            now,
+        )
+        .await
+        .expect("seed support target credential metadata");
+}
+
+async fn request_and_approve_delayed_support_reset_for_runtime_test(
+    mounted_service: &MountedAdminSupportPostgresService<'_>,
+    subject_id: &SubjectId,
+    target_credential_id: &VerifiedProofSourceId,
+    requested_at: UnixSeconds,
+    approved_at: UnixSeconds,
+) -> PendingCredentialLifecycleActionId {
+    let requested = mounted_service
+        .request_intervention_from_headers(
+            &HeaderMap::new(),
+            RequestAdminSupportInterventionInput {
+                now: requested_at,
+                subject_id: subject_id.clone(),
+                target_credential_instance_id: target_credential_id.clone(),
+                action: CredentialLifecycleAction::Reset,
+            },
+        )
+        .await
+        .expect("request delayed support reset intervention");
+    let intervention_id = match requested.committed_outcome() {
+        MountedAdminSupportCommittedOutcome::InterventionRequested {
+            intervention_id,
+            subject_id: actual_subject_id,
+            target_credential_instance_id,
+            action,
+            ..
+        } => {
+            assert_eq!(actual_subject_id, subject_id);
+            assert_eq!(target_credential_instance_id, target_credential_id);
+            assert_eq!(*action, CredentialLifecycleAction::Reset);
+            intervention_id.clone()
+        }
+        outcome => panic!("expected support intervention request outcome, got {outcome:?}"),
+    };
+    let authorizer = RecordingMountedSupportStaffAuthorizer::new(
+        MountedAdminSupportStaffAuthorization::Authorized,
+    );
+    let approved = mounted_service
+        .approve_intervention_from_headers(
+            &HeaderMap::new(),
+            ApproveAdminSupportInterventionInput {
+                now: approved_at,
+                intervention_id: intervention_id.clone(),
+            },
+            &authorizer,
+        )
+        .await
+        .expect("approve delayed support reset intervention");
+    match approved.committed_outcome() {
+        MountedAdminSupportCommittedOutcome::ApprovalScheduledDelayedAction {
+            intervention_id: actual_intervention_id,
+            subject_id: actual_subject_id,
+            target_credential_instance_id,
+            action,
+            pending_action_id,
+            ..
+        } => {
+            assert_eq!(actual_intervention_id, &intervention_id);
+            assert_eq!(actual_subject_id, subject_id);
+            assert_eq!(target_credential_instance_id, target_credential_id);
+            assert_eq!(*action, CredentialLifecycleAction::Reset);
+            pending_action_id.clone()
+        }
+        outcome => panic!("expected delayed support approval outcome, got {outcome:?}"),
+    }
+}
+
+async fn load_admin_support_intervention_for_runtime_test(
+    pool: &Pool,
+    store_config: &super::super::postgres_store::PostgresAuthStoreConfig,
+    intervention_id: &AdminSupportInterventionId,
+) -> Option<AdminSupportInterventionRecord> {
+    let store = postgres_runtime_test_store(store_config);
+    let mut tx = pool
+        .begin_transaction()
+        .await
+        .expect("begin support intervention read transaction");
+    let record = store
+        .load_admin_support_intervention_in_current_transaction(&mut tx, intervention_id)
+        .await
+        .expect("load support intervention record");
+    tx.rollback()
+        .await
+        .expect("rollback support intervention read transaction");
+    record
+}
+
+async fn count_admin_support_interventions_for_subject_target_and_action(
+    pool: &Pool,
+    store_config: &super::super::postgres_store::PostgresAuthStoreConfig,
+    subject_id: &SubjectId,
+    target_credential_instance_id: &VerifiedProofSourceId,
+    action: CredentialLifecycleAction,
+) -> i64 {
+    let table = store_config
+        .table_name(PostgresAuthCoreTable::AdminSupportIntervention)
+        .expect("admin support intervention table");
+    let statement = format!(
+        "SELECT count(*) FROM {} WHERE subject_id = $1 AND target_credential_instance_id = $2 AND lifecycle_action = $3",
+        table.quoted()
+    );
+    auth_runtime_test_fetch_one_in_transaction!(
+        pool,
+        pooler_safe_query_scalar::<i64>(sqlx::AssertSqlSafe(statement.as_str()))
+            .bind(subject_id.as_bytes())
+            .bind(target_credential_instance_id.as_bytes())
+            .bind(super::super::postgres_store::i32_from_credential_lifecycle_action(action),),
+        "count admin support interventions for subject target and action"
+    )
+}
+
 async fn drop_auth_runtime_test_schema(pool: &Pool, schema: &PgSchemaName) {
     let drop_schema = format!("DROP SCHEMA {} CASCADE", schema.identifier().quoted());
     unparameterized_simple_query(sqlx::AssertSqlSafe(drop_schema.as_str()))
         .execute(pool.sqlx_pool())
         .await
         .expect("drop auth runtime test schema");
+}
+
+async fn drop_first_check_constraint_matching_for_auth_runtime_test(
+    pool: &Pool,
+    table: &PgQualifiedTableName,
+    expression_pattern: &str,
+) {
+    let find_constraint_statement = r#"
+        SELECT con.conname
+        FROM pg_constraint con
+        WHERE con.conrelid = to_regclass($1)
+          AND con.contype = 'c'
+          AND pg_get_expr(con.conbin, con.conrelid) LIKE $2
+        LIMIT 1
+        "#;
+    let constraint_name = auth_runtime_test_fetch_one_in_transaction!(
+        pool,
+        pooler_safe_query_scalar::<String>(find_constraint_statement)
+            .bind(table.quoted().to_string())
+            .bind(expression_pattern),
+        "find auth method check constraint"
+    );
+    let constraint_name = PgIdentifier::new(constraint_name).expect("constraint identifier");
+    let drop_constraint_statement = format!(
+        "ALTER TABLE {} DROP CONSTRAINT {}",
+        table.quoted(),
+        constraint_name.quoted()
+    );
+    unparameterized_simple_query(sqlx::AssertSqlSafe(drop_constraint_statement.as_str()))
+        .execute(pool.sqlx_pool())
+        .await
+        .expect("drop auth method check constraint");
+}
+
+async fn drop_auth_runtime_test_index(
+    pool: &Pool,
+    table: &PgQualifiedTableName,
+    index_name: PgIdentifier,
+) {
+    let qualified_index_name = PgQualifiedTableName::new(table.schema().cloned(), index_name);
+    let drop_index_statement = format!("DROP INDEX {}", qualified_index_name.quoted());
+    unparameterized_simple_query(sqlx::AssertSqlSafe(drop_index_statement.as_str()))
+        .execute(pool.sqlx_pool())
+        .await
+        .expect("drop auth method index");
 }
 
 fn cookie_pair_from_set_cookie<'a>(
@@ -9023,6 +3065,49 @@ fn active_proof_continuation_cookie_pair_from_set_cookie(headers: &AuthSetCookie
     cookie_pair_from_set_cookie(headers, "__Host-__paranoid_auth_active_proof_continuation=")
 }
 
+fn cookie_pair_from_http_response_set_cookie<B>(
+    response: &http::Response<B>,
+    cookie_prefix: &str,
+) -> String {
+    response
+        .headers()
+        .get_all(http::header::SET_COOKIE)
+        .iter()
+        .find_map(|header| {
+            header
+                .to_str()
+                .ok()?
+                .split(';')
+                .next()
+                .filter(|pair| pair.starts_with(cookie_prefix))
+                .map(str::to_owned)
+        })
+        .expect("HTTP response set-cookie pair")
+}
+
+fn csrf_cookie_pair_from_set_cookie(headers: &AuthSetCookieHeaders) -> &str {
+    cookie_pair_from_set_cookie(headers, "__Host-csrf_token=")
+}
+
+fn set_cookie_headers_contain_prefix(headers: &AuthSetCookieHeaders, cookie_prefix: &str) -> bool {
+    headers
+        .as_slice()
+        .iter()
+        .any(|header| header.as_str().starts_with(cookie_prefix))
+}
+
+fn assert_http_response_has_no_set_cookie<B>(response: &http::Response<B>, context: &str) {
+    assert!(
+        response
+            .headers()
+            .get_all(http::header::SET_COOKIE)
+            .iter()
+            .next()
+            .is_none(),
+        "{context}"
+    );
+}
+
 fn headers_from_cookie_pairs(cookie_pairs: &[&str]) -> HeaderMap {
     let mut headers = HeaderMap::new();
     headers.insert(
@@ -9030,6 +3115,53 @@ fn headers_from_cookie_pairs(cookie_pairs: &[&str]) -> HeaderMap {
         HeaderValue::from_str(&cookie_pairs.join("; ")).expect("cookie header"),
     );
     headers
+}
+
+fn request_with_cookie_pairs(method: Method, cookie_pairs: &[&str]) -> Request<()> {
+    request_with_body_and_cookie_pairs(method, cookie_pairs, ())
+}
+
+fn request_with_body_and_cookie_pairs<B>(
+    method: Method,
+    cookie_pairs: &[&str],
+    body: B,
+) -> Request<B> {
+    let mut builder = Request::builder()
+        .method(method)
+        .uri("https://example.com/auth");
+    if !cookie_pairs.is_empty() {
+        builder = builder.header(COOKIE, cookie_pairs.join("; "));
+    }
+    builder.body(body).expect("auth route request")
+}
+
+fn unsafe_request_with_valid_csrf_and_cookie_pairs(cookie_pairs: &[&str]) -> Request<()> {
+    let csrf_issue_request = request_with_cookie_pairs(Method::GET, &[]);
+    let csrf_cookie_header = auth_web_transport()
+        .issue_csrf_token_cookie_if_needed_for_request(&csrf_issue_request)
+        .expect("issue csrf cookie for auth route test")
+        .expect("csrf cookie was needed");
+    let csrf_cookie_pair = csrf_cookie_header
+        .as_str()
+        .split(';')
+        .next()
+        .expect("csrf Set-Cookie starts with name=value")
+        .to_owned();
+    let csrf_token = csrf_cookie_pair
+        .split_once('=')
+        .expect("csrf cookie pair contains equals")
+        .1
+        .to_owned();
+    let mut all_cookie_pairs = Vec::with_capacity(cookie_pairs.len() + 1);
+    all_cookie_pairs.extend(cookie_pairs.iter().copied());
+    all_cookie_pairs.push(csrf_cookie_pair.as_str());
+    Request::builder()
+        .method(Method::POST)
+        .uri("https://example.com/auth")
+        .header(COOKIE, all_cookie_pairs.join("; "))
+        .header(crate::web::DEFAULT_CSRF_HEADER_NAME, csrf_token)
+        .body(())
+        .expect("csrf-protected auth route request")
 }
 
 fn bound_proof_of_work_gate_response_for_active_method_completion(
@@ -9199,6 +3331,7 @@ async fn seed_pending_credential_reset_for_runtime_test(
                     id("pending-reset-subject"),
                     CredentialInstanceKind::MessageSignatureVerifier,
                     "password_signature",
+                    CredentialResetPolicyRole::OrdinaryCredential,
                     CredentialLifecycleState::Active,
                 )
                 .expect("pending reset credential metadata"),
@@ -9221,8 +3354,6 @@ async fn seed_pending_credential_reset_for_runtime_test(
                 earliest_execute_at: at(200),
                 expires_at: at(300),
             }),
-            immediate_subject_auth_revocation:
-                CredentialResetSubjectAuthRevocation::RevokeSubjectAuthState,
         }),
         &LoadedState::default(),
     )
@@ -9351,6 +3482,40 @@ async fn start_current_session_active_proof_attempt_through_runtime(
     let attempt_id = match started.outcome() {
         Outcome::ActiveProofAttemptStarted { attempt_id, .. } => attempt_id.clone(),
         outcome => panic!("expected active proof attempt start, got {outcome:?}"),
+    };
+    let continuation_cookie_pair =
+        active_proof_continuation_cookie_pair_from_set_cookie(started.set_cookie_headers())
+            .to_owned();
+    StartedRuntimeAttempt {
+        attempt_id,
+        continuation_cookie_pair,
+    }
+}
+
+async fn start_unauthenticated_recovery_active_proof_attempt_through_runtime(
+    runtime: &super::super::postgres_runtime::PostgresAuthWebRuntime,
+    now: UnixSeconds,
+) -> StartedRuntimeAttempt {
+    let empty_headers = HeaderMap::new();
+    let method = proof_method(ProofFamily::RecoveryCode);
+    let started = runtime
+        .execute_unauthenticated_recovery_active_proof_attempt_start_from_headers(
+            &empty_headers,
+            StartUnauthenticatedRecoveryActiveProofAttemptInput {
+                now,
+                method: method.clone(),
+            },
+            challenge_issue_preflight_response_for_test(
+                now,
+                ProofUse::RecoverOrReplaceCredential,
+                &method,
+            ),
+        )
+        .await
+        .expect("start unauthenticated recovery active-proof attempt through Postgres runtime");
+    let attempt_id = match started.outcome() {
+        Outcome::ActiveProofAttemptStarted { attempt_id, .. } => attempt_id.clone(),
+        outcome => panic!("expected recovery active proof attempt start, got {outcome:?}"),
     };
     let continuation_cookie_pair =
         active_proof_continuation_cookie_pair_from_set_cookie(started.set_cookie_headers())
@@ -9743,6 +3908,134 @@ async fn fetch_satisfied_proof_source_for_attempt(
     }
 }
 
+async fn fetch_out_of_band_identifier_binding_for_source(
+    pool: &Pool,
+    store_config: &super::super::postgres_store::PostgresAuthStoreConfig,
+    source_id: &VerifiedProofSourceId,
+) -> Option<(SubjectId, String, OutOfBandIdentifierBindingLifecycleState)> {
+    let table = store_config
+        .table_name(PostgresAuthCoreTable::OutOfBandIdentifierBinding)
+        .expect("identifier binding table");
+    let statement = format!(
+        "SELECT subject_id, proof_method_label, lifecycle_state FROM {} WHERE source_id = $1",
+        table.quoted()
+    );
+    let row = auth_runtime_test_fetch_optional_in_transaction!(
+        pool,
+        pooler_safe_query_as::<(Vec<u8>, String, i32)>(sqlx::AssertSqlSafe(statement.as_str(),))
+            .bind(source_id.as_bytes()),
+        "fetch out-of-band identifier binding"
+    )?;
+    Some((
+        SubjectId::from_bytes(row.0).expect("parse identifier binding subject id"),
+        row.1,
+        super::super::postgres_store::out_of_band_identifier_binding_lifecycle_state_from_i32(
+            row.2,
+        )
+        .expect("parse identifier binding lifecycle state"),
+    ))
+}
+
+async fn seed_out_of_band_identifier_change_runtime_state(
+    pool: &Pool,
+    store_config: &super::super::postgres_store::PostgresAuthStoreConfig,
+    subject_id: &SubjectId,
+    session_id: &SessionId,
+    current_identifier_source_id: &VerifiedProofSourceId,
+    candidate_identifier_source_id: &VerifiedProofSourceId,
+    current_identifier_authority: RecoveryAuthorityId,
+    session_authority: RecoveryAuthorityId,
+    authority_timing: RecoveryAuthorityTiming,
+) {
+    let seed_store = super::super::postgres_store::PostgresAuthStore::new(
+        store_config.clone(),
+        test_keyset("tests.auth.postgres-runtime.identifier-change.v1"),
+    );
+    seed_store
+        .store_subject_lifecycle_metadata_for_test(
+            pool,
+            &[SubjectLifecycleAuthority::new(
+                subject_id.clone(),
+                SubjectLifecycleAction::ChangeOutOfBandIdentifier,
+                session_authority.clone(),
+                authority_timing,
+            )],
+            &[
+                LifecycleAuthorityEvidence::authenticated_session(
+                    session_id.clone(),
+                    [session_authority],
+                )
+                .expect("session lifecycle evidence"),
+                LifecycleAuthorityEvidence::from_verified_proof_source(
+                    VerifiedProofSource::new(
+                        VerifiedProofSourceKind::OutOfBandIdentifier,
+                        current_identifier_source_id.clone(),
+                    ),
+                    [current_identifier_authority],
+                )
+                .expect("current identifier lifecycle evidence"),
+            ],
+            at(50),
+        )
+        .await
+        .expect("seed identifier-change lifecycle metadata");
+    seed_store
+        .store_out_of_band_identifier_bindings_for_test(
+            pool,
+            &[
+                OutOfBandIdentifierBindingRecord::new(
+                    VerifiedProofSource::new(
+                        VerifiedProofSourceKind::OutOfBandIdentifier,
+                        current_identifier_source_id.clone(),
+                    ),
+                    subject_id.clone(),
+                    "email_otp",
+                    OutOfBandIdentifierBindingLifecycleState::Active,
+                )
+                .expect("current identifier binding"),
+                OutOfBandIdentifierBindingRecord::new(
+                    VerifiedProofSource::new(
+                        VerifiedProofSourceKind::OutOfBandIdentifier,
+                        candidate_identifier_source_id.clone(),
+                    ),
+                    subject_id.clone(),
+                    "email_otp",
+                    OutOfBandIdentifierBindingLifecycleState::PendingActivation,
+                )
+                .expect("candidate identifier binding"),
+            ],
+            at(50),
+        )
+        .await
+        .expect("seed identifier-change bindings");
+}
+
+async fn load_pending_subject_lifecycle_action_for_runtime_test(
+    pool: &Pool,
+    store_config: &super::super::postgres_store::PostgresAuthStoreConfig,
+    pending_action_id: &PendingSubjectLifecycleActionId,
+) -> Option<PendingSubjectLifecycleActionRecord> {
+    let seed_store = super::super::postgres_store::PostgresAuthStore::new(
+        store_config.clone(),
+        test_keyset("tests.auth.postgres-runtime.pending-subject-action-read.v1"),
+    );
+    let mut tx = pool
+        .begin_transaction()
+        .await
+        .expect("begin pending subject action read transaction");
+    let value = seed_store
+        .load_pending_subject_lifecycle_action_for_execution_in_current_transaction(
+            &mut tx,
+            pending_action_id,
+        )
+        .await
+        .expect("load pending subject action");
+    tx.rollback()
+        .await
+        .expect("rollback pending subject action read transaction");
+    value
+}
+
 async fn fetch_active_proof_attempt_subject_id(
     pool: &Pool,
     store_config: &super::super::postgres_store::PostgresAuthStoreConfig,
@@ -9789,6 +4082,33 @@ async fn count_open_pending_credential_reset_actions_for_target(
                 ),
             ),
         "count open pending credential reset actions for target"
+    )
+}
+
+async fn count_open_pending_credential_reset_actions_for_subject_and_target(
+    pool: &Pool,
+    store_config: &super::super::postgres_store::PostgresAuthStoreConfig,
+    subject_id: &SubjectId,
+    target_credential_instance_id: &VerifiedProofSourceId,
+) -> i64 {
+    let table = store_config
+        .table_name(PostgresAuthCoreTable::PendingCredentialLifecycleAction)
+        .expect("pending credential lifecycle action table");
+    let statement = format!(
+        "SELECT count(*) FROM {} WHERE subject_id = $1 AND target_credential_instance_id = $2 AND lifecycle_action = $3 AND closed_at IS NULL",
+        table.quoted()
+    );
+    auth_runtime_test_fetch_one_in_transaction!(
+        pool,
+        pooler_safe_query_scalar::<i64>(sqlx::AssertSqlSafe(statement.as_str()))
+            .bind(subject_id.as_bytes())
+            .bind(target_credential_instance_id.as_bytes())
+            .bind(
+                super::super::postgres_store::i32_from_credential_lifecycle_action(
+                    CredentialLifecycleAction::Reset,
+                ),
+            ),
+        "count open pending credential reset actions for subject and target"
     )
 }
 
@@ -9886,6 +4206,28 @@ async fn count_open_pending_subject_lifecycle_actions_for_pending_action(
     )
 }
 
+async fn count_open_pending_subject_lifecycle_actions_for_subject(
+    pool: &Pool,
+    store_config: &super::super::postgres_store::PostgresAuthStoreConfig,
+    subject_id: &SubjectId,
+    action: SubjectLifecycleAction,
+) -> i64 {
+    let table = store_config
+        .table_name(PostgresAuthCoreTable::PendingSubjectLifecycleAction)
+        .expect("pending subject lifecycle action table");
+    let statement = format!(
+        "SELECT count(*) FROM {} WHERE subject_id = $1 AND subject_lifecycle_action = $2 AND closed_at IS NULL",
+        table.quoted()
+    );
+    auth_runtime_test_fetch_one_in_transaction!(
+        pool,
+        pooler_safe_query_scalar::<i64>(sqlx::AssertSqlSafe(statement.as_str()))
+            .bind(subject_id.as_bytes())
+            .bind(super::super::postgres_store::i32_from_subject_lifecycle_action(action),),
+        "count open pending subject lifecycle actions for subject"
+    )
+}
+
 async fn credential_lifecycle_state_for_runtime_test(
     pool: &Pool,
     store_config: &super::super::postgres_store::PostgresAuthStoreConfig,
@@ -9906,6 +4248,152 @@ async fn credential_lifecycle_state_for_runtime_test(
     );
     super::super::postgres_store::credential_lifecycle_state_from_i32(raw_state)
         .expect("stored credential lifecycle state")
+}
+
+async fn count_active_credential_instances_for_subject_for_runtime_test(
+    pool: &Pool,
+    store_config: &super::super::postgres_store::PostgresAuthStoreConfig,
+    subject_id: &SubjectId,
+) -> i64 {
+    let table = store_config
+        .table_name(PostgresAuthCoreTable::CredentialInstance)
+        .expect("credential instance table");
+    let statement = format!(
+        "SELECT count(*) FROM {} WHERE subject_id = $1 AND lifecycle_state = $2",
+        table.quoted()
+    );
+    auth_runtime_test_fetch_one_in_transaction!(
+        pool,
+        pooler_safe_query_scalar::<i64>(sqlx::AssertSqlSafe(statement.as_str()))
+            .bind(subject_id.as_bytes())
+            .bind(
+                super::super::postgres_store::i32_from_credential_lifecycle_state(
+                    CredentialLifecycleState::Active,
+                ),
+            ),
+        "count active credential instances for subject"
+    )
+}
+
+async fn count_credential_recovery_authorities_for_runtime_test(
+    pool: &Pool,
+    store_config: &super::super::postgres_store::PostgresAuthStoreConfig,
+    credential_instance_id: &VerifiedProofSourceId,
+) -> i64 {
+    let table = store_config
+        .table_name(PostgresAuthCoreTable::CredentialRecoveryAuthority)
+        .expect("credential recovery authority table");
+    let statement = format!(
+        "SELECT count(*) FROM {} WHERE target_credential_instance_id = $1",
+        table.quoted()
+    );
+    auth_runtime_test_fetch_one_in_transaction!(
+        pool,
+        pooler_safe_query_scalar::<i64>(sqlx::AssertSqlSafe(statement.as_str()))
+            .bind(credential_instance_id.as_bytes()),
+        "count credential recovery authorities"
+    )
+}
+
+async fn fetch_credential_recovery_authorities_for_runtime_test(
+    pool: &Pool,
+    store_config: &super::super::postgres_store::PostgresAuthStoreConfig,
+    credential_instance_id: &VerifiedProofSourceId,
+) -> Vec<CredentialRecoveryAuthority> {
+    let table = store_config
+        .table_name(PostgresAuthCoreTable::CredentialRecoveryAuthority)
+        .expect("credential recovery authority table");
+    let statement = format!(
+        "SELECT lifecycle_action, authority_id, authority_timing FROM {} WHERE target_credential_instance_id = $1 ORDER BY lifecycle_action ASC, authority_id ASC, authority_timing ASC",
+        table.quoted()
+    );
+    let rows = {
+        let mut tx = pool
+            .begin_transaction()
+            .await
+            .expect("begin credential recovery authority fetch transaction");
+        let rows =
+            pooler_safe_query_as::<(i32, Vec<u8>, i32)>(sqlx::AssertSqlSafe(statement.as_str()))
+                .bind(credential_instance_id.as_bytes())
+                .fetch_all(tx.sqlx_transaction().as_mut())
+                .await
+                .expect("fetch credential recovery authorities");
+        tx.rollback()
+            .await
+            .expect("rollback credential recovery authority fetch transaction");
+        rows
+    };
+    rows.into_iter()
+        .map(|(action, authority_id, timing)| {
+            CredentialRecoveryAuthority::new(
+                credential_instance_id.clone(),
+                super::super::postgres_store::credential_lifecycle_action_from_i32(action)
+                    .expect("stored credential lifecycle action should parse"),
+                RecoveryAuthorityId::from_bytes(authority_id)
+                    .expect("stored recovery authority id should parse"),
+                super::super::postgres_store::recovery_authority_timing_from_i32(timing)
+                    .expect("stored recovery authority timing should parse"),
+            )
+        })
+        .collect()
+}
+
+async fn count_lifecycle_authority_sources_for_runtime_test(
+    pool: &Pool,
+    store_config: &super::super::postgres_store::PostgresAuthStoreConfig,
+    source_kind: LifecycleAuthoritySourceKind,
+    source_id: &VerifiedProofSourceId,
+) -> i64 {
+    let table = store_config
+        .table_name(PostgresAuthCoreTable::LifecycleAuthoritySource)
+        .expect("lifecycle authority source table");
+    let statement = format!(
+        "SELECT count(*) FROM {} WHERE source_kind = $1 AND source_id = $2",
+        table.quoted()
+    );
+    auth_runtime_test_fetch_one_in_transaction!(
+        pool,
+        pooler_safe_query_scalar::<i64>(sqlx::AssertSqlSafe(statement.as_str()))
+            .bind(
+                super::super::postgres_store::i32_from_lifecycle_authority_source_kind(source_kind,)
+            )
+            .bind(source_id.as_bytes()),
+        "count lifecycle authority sources"
+    )
+}
+
+async fn fetch_lifecycle_authority_ids_for_runtime_test(
+    pool: &Pool,
+    store_config: &super::super::postgres_store::PostgresAuthStoreConfig,
+    source_kind: LifecycleAuthoritySourceKind,
+    source_id: &VerifiedProofSourceId,
+) -> Vec<RecoveryAuthorityId> {
+    let mut tx = pool
+        .begin_transaction()
+        .await
+        .expect("begin lifecycle authority id fetch transaction");
+    let table = store_config
+        .table_name(PostgresAuthCoreTable::LifecycleAuthoritySource)
+        .expect("lifecycle authority source table");
+    let statement = format!(
+        "SELECT authority_id FROM {} WHERE source_kind = $1 AND source_id = $2 ORDER BY authority_id ASC",
+        table.quoted()
+    );
+    let rows = pooler_safe_query_scalar::<Vec<u8>>(sqlx::AssertSqlSafe(statement.as_str()))
+        .bind(super::super::postgres_store::i32_from_lifecycle_authority_source_kind(source_kind))
+        .bind(source_id.as_bytes())
+        .fetch_all(tx.sqlx_transaction().as_mut())
+        .await
+        .expect("fetch lifecycle authority ids");
+    tx.rollback()
+        .await
+        .expect("rollback lifecycle authority id fetch transaction");
+    rows.into_iter()
+        .map(|authority_id| {
+            RecoveryAuthorityId::from_bytes(authority_id)
+                .expect("stored lifecycle authority id should parse")
+        })
+        .collect()
 }
 
 async fn count_open_challenges(
@@ -10011,6 +4499,110 @@ async fn count_core_durable_effect_commands(
     )
 }
 
+async fn count_auth_audit_events(
+    pool: &Pool,
+    store_config: &super::super::postgres_store::PostgresAuthStoreConfig,
+) -> i64 {
+    let table = store_config
+        .table_name(PostgresAuthCoreTable::AuditEvent)
+        .expect("auth audit event table");
+    let statement = format!("SELECT count(*) FROM {}", table.quoted());
+    auth_runtime_test_fetch_one_in_transaction!(
+        pool,
+        pooler_safe_query_scalar::<i64>(sqlx::AssertSqlSafe(statement.as_str())),
+        "count auth audit events"
+    )
+}
+
+async fn count_core_durable_effect_queue_dispatches(
+    pool: &Pool,
+    store_config: &super::super::postgres_store::PostgresAuthStoreConfig,
+) -> i64 {
+    let table = store_config
+        .table_name(PostgresAuthCoreTable::CoreDurableEffectQueueDispatch)
+        .expect("core durable effect queue dispatch table");
+    let statement = format!("SELECT count(*) FROM {}", table.quoted());
+    auth_runtime_test_fetch_one_in_transaction!(
+        pool,
+        pooler_safe_query_scalar::<i64>(sqlx::AssertSqlSafe(statement.as_str())),
+        "count core durable effect queue dispatches"
+    )
+}
+
+async fn count_queue_jobs_for_task(
+    pool: &Pool,
+    jobs_table: &PgQualifiedTableName,
+    task_name: &str,
+) -> i64 {
+    let statement = format!(
+        r#"SELECT count(*) FROM {} WHERE task_name = $1"#,
+        jobs_table.quoted()
+    );
+    auth_runtime_test_fetch_one_in_transaction!(
+        pool,
+        pooler_safe_query_scalar::<i64>(sqlx::AssertSqlSafe(statement.as_str())).bind(task_name),
+        "count auth delivery queue jobs for task"
+    )
+}
+
+struct QueueJobRetryState {
+    status: String,
+    retry_count: i32,
+    last_error: Option<String>,
+}
+
+async fn fetch_one_queue_job_retry_state_for_task(
+    pool: &Pool,
+    jobs_table: &PgQualifiedTableName,
+    task_name: &str,
+) -> QueueJobRetryState {
+    let statement = format!(
+        r#"
+        SELECT status::text, retry_count, last_error
+        FROM {}
+        WHERE task_name = $1
+        ORDER BY id
+        LIMIT 1
+        "#,
+        jobs_table.quoted()
+    );
+    let row = auth_runtime_test_fetch_one_in_transaction!(
+        pool,
+        pooler_safe_query_as::<(String, i32, Option<String>)>(sqlx::AssertSqlSafe(
+            statement.as_str()
+        ))
+        .bind(task_name),
+        "fetch auth delivery queue retry state"
+    );
+    QueueJobRetryState {
+        status: row.0,
+        retry_count: row.1,
+        last_error: row.2,
+    }
+}
+
+async fn fetch_one_queue_payload_json_for_task(
+    pool: &Pool,
+    jobs_table: &PgQualifiedTableName,
+    task_name: &str,
+) -> serde_json::Value {
+    let statement = format!(
+        r#"
+        SELECT payload::text FROM {}
+        WHERE task_name = $1
+        ORDER BY id
+        LIMIT 1
+        "#,
+        jobs_table.quoted()
+    );
+    let payload_json = auth_runtime_test_fetch_one_in_transaction!(
+        pool,
+        pooler_safe_query_scalar::<String>(sqlx::AssertSqlSafe(statement.as_str())).bind(task_name),
+        "fetch auth delivery queue payload"
+    );
+    serde_json::from_str(payload_json.as_str()).expect("queued payload must be JSON")
+}
+
 async fn count_all_active_proof_attempts(
     pool: &Pool,
     store_config: &super::super::postgres_store::PostgresAuthStoreConfig,
@@ -10039,6 +4631,41 @@ async fn count_all_active_proof_challenges(
         pooler_safe_query_scalar::<i64>(sqlx::AssertSqlSafe(statement.as_str())),
         "count active proof challenges"
     )
+}
+
+async fn fetch_only_active_proof_challenge_id(
+    pool: &Pool,
+    store_config: &super::super::postgres_store::PostgresAuthStoreConfig,
+) -> ActiveProofChallengeId {
+    let table = store_config
+        .table_name(PostgresAuthCoreTable::ActiveProofChallenge)
+        .expect("active proof challenge table");
+    let statement = format!("SELECT challenge_id FROM {} LIMIT 1", table.quoted());
+    let challenge_id = auth_runtime_test_fetch_one_in_transaction!(
+        pool,
+        pooler_safe_query_scalar::<Vec<u8>>(sqlx::AssertSqlSafe(statement.as_str())),
+        "fetch only active proof challenge id"
+    );
+    ActiveProofChallengeId::from_bytes(challenge_id).expect("parse active proof challenge id")
+}
+
+async fn fetch_only_open_active_proof_challenge_id(
+    pool: &Pool,
+    store_config: &super::super::postgres_store::PostgresAuthStoreConfig,
+) -> ActiveProofChallengeId {
+    let table = store_config
+        .table_name(PostgresAuthCoreTable::ActiveProofChallenge)
+        .expect("active proof challenge table");
+    let statement = format!(
+        "SELECT challenge_id FROM {} WHERE closed_at IS NULL",
+        table.quoted()
+    );
+    let challenge_id = auth_runtime_test_fetch_one_in_transaction!(
+        pool,
+        pooler_safe_query_scalar::<Vec<u8>>(sqlx::AssertSqlSafe(statement.as_str())),
+        "fetch only open active proof challenge id"
+    );
+    ActiveProofChallengeId::from_bytes(challenge_id).expect("parse active proof challenge id")
 }
 
 async fn count_out_of_band_durable_effects_for_challenge(
@@ -10073,6 +4700,7 @@ async fn count_security_notification_effects_for_subject(
         r#"
         SELECT count(*) FROM {}
         WHERE subject_id = $1
+            AND kind = $2
             AND challenge_id IS NULL
             AND delivery_idempotency_key IS NULL
         "#,
@@ -10081,8 +4709,37 @@ async fn count_security_notification_effects_for_subject(
     auth_runtime_test_fetch_one_in_transaction!(
         pool,
         pooler_safe_query_scalar::<i64>(sqlx::AssertSqlSafe(statement.as_str()))
-            .bind(subject_id.as_bytes()),
+            .bind(subject_id.as_bytes())
+            .bind(super::super::postgres_store::DURABLE_EFFECT_KIND_NOTIFY_SECURITY_EVENT),
         "count security notification effects"
+    )
+}
+
+async fn count_application_subject_data_lifecycle_effects_for_subject_and_kind(
+    pool: &Pool,
+    store_config: &super::super::postgres_store::PostgresAuthStoreConfig,
+    subject_id: &SubjectId,
+    effect_kind: i32,
+) -> i64 {
+    let table = store_config
+        .table_name(PostgresAuthCoreTable::CoreDurableEffectCommand)
+        .expect("core durable effect command table");
+    let statement = format!(
+        r#"
+        SELECT count(*) FROM {}
+        WHERE subject_id = $1
+            AND kind = $2
+            AND challenge_id IS NULL
+            AND delivery_idempotency_key IS NULL
+        "#,
+        table.quoted()
+    );
+    auth_runtime_test_fetch_one_in_transaction!(
+        pool,
+        pooler_safe_query_scalar::<i64>(sqlx::AssertSqlSafe(statement.as_str()))
+            .bind(subject_id.as_bytes())
+            .bind(effect_kind),
+        "count application subject data lifecycle effects"
     )
 }
 
@@ -10277,6 +4934,28 @@ async fn fetch_subject_revocation_cutoff(
             .bind(subject_id.as_bytes()),
         "fetch subject revocation cutoff"
     )
+    .map(|value| u64::try_from(value).expect("stored cutoff must fit u64"))
+}
+
+async fn fetch_optional_subject_revocation_cutoff_for_runtime_test(
+    pool: &Pool,
+    store_config: &super::super::postgres_store::PostgresAuthStoreConfig,
+    subject_id: &SubjectId,
+) -> Option<u64> {
+    let table = store_config
+        .table_name(PostgresAuthCoreTable::SubjectAuthState)
+        .expect("subject auth state table");
+    let statement = format!(
+        "SELECT revoke_records_created_at_or_before FROM {} WHERE subject_id = $1",
+        table.quoted()
+    );
+    auth_runtime_test_fetch_optional_in_transaction!(
+        pool,
+        pooler_safe_query_scalar::<Option<i64>>(sqlx::AssertSqlSafe(statement.as_str()))
+            .bind(subject_id.as_bytes()),
+        "fetch optional subject revocation cutoff"
+    )
+    .flatten()
     .map(|value| u64::try_from(value).expect("stored cutoff must fit u64"))
 }
 

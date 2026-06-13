@@ -98,10 +98,12 @@ fn issuing_out_of_band_challenge_queues_delivery_and_dedupe_precondition() {
             Precondition::ActiveProofAttemptStillOpen { attempt_id, .. },
             Precondition::NoOpenOutOfBandChallengeForDedupeKey {
                 challenge_dedupe_key,
+                replaceable_created_at_or_before,
                 ..
             },
         ] if *attempt_id == id("attempt")
             && challenge_dedupe_key.as_str() == "login:email-hash:window"
+            && *replaceable_created_at_or_before == Some(at(10))
     ));
     assert!(matches!(
         transition.commit_plan.mutations.as_slice(),

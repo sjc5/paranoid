@@ -89,7 +89,7 @@ pub use bootstrap::{
     BOOTSTRAP_FLEET_STATE_TABLE_NAME, BOOTSTRAP_KV_TABLE_NAME,
     BOOTSTRAP_QUEUE_DEAD_LETTER_TABLE_NAME, BOOTSTRAP_QUEUE_JOBS_TABLE_NAME,
     BOOTSTRAP_QUEUE_PAUSE_TABLE_NAME, BOOTSTRAP_SCHEMA_LEDGER_TABLE_NAME, BootstrapConfig,
-    BootstrapError, BootstrapStores, BootstrapTableNames, DEFAULT_BOOTSTRAP_SCHEMA_NAME,
+    BootstrapError, BootstrapStores, BootstrapTableNames,
 };
 pub use component_schema::{
     ComponentSchema, ComponentSchemaMigration, ComponentSchemaMigrationOutcome,

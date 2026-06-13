@@ -3,7 +3,7 @@ use std::fmt;
 
 use http::HeaderMap;
 
-use super::*;
+use super::prelude::*;
 
 /// Storage adapter used by the internal web runtime facade.
 pub(crate) trait AuthRuntimeStorageAdapter: AtomicCommitAdapter {
@@ -308,9 +308,13 @@ impl AuthWebRuntime {
                 request.now,
             )
             .map_err(AuthWebRuntimeExecutionError::core)?;
+        let replaceable_created_at_or_before = request
+            .now
+            .checked_sub_duration(self.config.out_of_band_challenge_replacement_cooldown);
         let request = request.into_request(
             continuation.attempt_id.clone(),
             generate_auth_id().map_err(AuthWebRuntimeExecutionError::core)?,
+            replaceable_created_at_or_before,
         );
         let now = request.now;
         let (presented_cookies, presented_cookie_secrets) = decoded.into_parts();
@@ -525,10 +529,7 @@ impl AuthWebRuntime {
             .web_transport
             .render_set_cookie_headers(now, materialized_response_effects)
             .map_err(AuthWebRuntimeExecutionError::web)?;
-        Ok(AuthWebRuntimeExecution {
-            outcome,
-            set_cookie_headers,
-        })
+        Ok(AuthWebRuntimeExecution::new(outcome, set_cookie_headers))
     }
 }
 
@@ -537,6 +538,7 @@ impl AuthWebRuntime {
 pub(crate) struct AuthWebRuntimeExecution {
     outcome: Outcome,
     set_cookie_headers: AuthSetCookieHeaders,
+    post_commit_method_response_material: PostCommitMethodResponseMaterial,
 }
 
 impl AuthWebRuntimeExecution {
@@ -544,11 +546,19 @@ impl AuthWebRuntimeExecution {
         Self {
             outcome,
             set_cookie_headers,
+            post_commit_method_response_material: PostCommitMethodResponseMaterial::empty(),
         }
     }
 
     pub(crate) fn prepend_set_cookie_headers(&mut self, headers: AuthSetCookieHeaders) {
         self.set_cookie_headers.prepend(headers);
+    }
+
+    pub(crate) fn append_post_commit_method_response_material(
+        &mut self,
+        material: PostCommitMethodResponseMaterial,
+    ) -> Result<(), Error> {
+        self.post_commit_method_response_material.append(material)
     }
 
     /// Returns the semantic reducer outcome.
@@ -561,9 +571,104 @@ impl AuthWebRuntimeExecution {
         &self.set_cookie_headers
     }
 
+    pub(crate) fn post_commit_method_response_material(&self) -> &PostCommitMethodResponseMaterial {
+        &self.post_commit_method_response_material
+    }
+
+    pub(crate) fn into_post_commit_method_response_material(
+        self,
+    ) -> PostCommitMethodResponseMaterial {
+        self.post_commit_method_response_material
+    }
+
+    pub(crate) fn into_response_projection_parts(
+        self,
+    ) -> (AuthSetCookieHeaders, PostCommitMethodResponseMaterial) {
+        (
+            self.set_cookie_headers,
+            self.post_commit_method_response_material,
+        )
+    }
+
     /// Consumes the execution result.
     pub(crate) fn into_parts(self) -> (Outcome, AuthSetCookieHeaders) {
         (self.outcome, self.set_cookie_headers)
+    }
+}
+
+/// Response-only projection of a committed web runtime execution.
+#[derive(Debug)]
+pub(crate) struct AuthWebRuntimeResponseProjection {
+    #[cfg(not(test))]
+    set_cookie_headers: AuthSetCookieHeaders,
+    #[cfg(not(test))]
+    post_commit_method_response_material: PostCommitMethodResponseMaterial,
+    #[cfg(test)]
+    runtime_execution: AuthWebRuntimeExecution,
+}
+
+impl AuthWebRuntimeResponseProjection {
+    pub(crate) fn from_runtime_execution(runtime_execution: AuthWebRuntimeExecution) -> Self {
+        #[cfg(not(test))]
+        {
+            let (set_cookie_headers, post_commit_method_response_material) =
+                runtime_execution.into_response_projection_parts();
+            Self {
+                set_cookie_headers,
+                post_commit_method_response_material,
+            }
+        }
+        #[cfg(test)]
+        {
+            Self { runtime_execution }
+        }
+    }
+
+    pub(crate) fn set_cookie_headers(&self) -> &AuthSetCookieHeaders {
+        #[cfg(not(test))]
+        {
+            &self.set_cookie_headers
+        }
+        #[cfg(test)]
+        {
+            self.runtime_execution.set_cookie_headers()
+        }
+    }
+
+    pub(crate) fn post_commit_method_response_material(&self) -> &PostCommitMethodResponseMaterial {
+        #[cfg(not(test))]
+        {
+            &self.post_commit_method_response_material
+        }
+        #[cfg(test)]
+        {
+            self.runtime_execution
+                .post_commit_method_response_material()
+        }
+    }
+
+    pub(crate) fn into_post_commit_method_response_material(
+        self,
+    ) -> PostCommitMethodResponseMaterial {
+        #[cfg(not(test))]
+        {
+            self.post_commit_method_response_material
+        }
+        #[cfg(test)]
+        {
+            self.runtime_execution
+                .into_post_commit_method_response_material()
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn runtime_execution(&self) -> &AuthWebRuntimeExecution {
+        &self.runtime_execution
+    }
+
+    #[cfg(test)]
+    pub(crate) fn into_runtime_execution(self) -> AuthWebRuntimeExecution {
+        self.runtime_execution
     }
 }
 

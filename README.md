@@ -163,9 +163,9 @@ The `db` feature is Postgres-only and SQLx-backed. Paranoid owns pool constructi
 internal queries use conservative connection settings, including transaction-pooler-safe
 prepared-statement behavior.
 
-Paranoid's blessed DB setup path is to own one dedicated schema. The default schema name
-is `__paranoid`; applications may choose a different schema name, but Paranoid owns the
-schema-local table layout.
+Paranoid's blessed DB setup path is to own one dedicated schema. The application must
+choose that schema name explicitly. The examples below use `__paranoid`, but Paranoid does
+not silently pick a schema for the application.
 
 ```rust,no_run
 use paranoid::db::{BootstrapConfig, PoolConfig, WritePool};
@@ -177,7 +177,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let database_url = secrecy::SecretString::from(std::env::var("DATABASE_URL")?);
     let pool = WritePool::connect(PoolConfig::new(database_url)).await?;
 
-    let stores = BootstrapConfig::default().migrate_schema(&pool).await?;
+    let stores = BootstrapConfig::from_schema_name_text("__paranoid")?
+        .migrate_schema(&pool)
+        .await?;
 
     let key = Key::from_parts(["account", "acct_123", "status"])?;
     stores
@@ -226,7 +228,9 @@ let pages_table = PgQualifiedTableName::with_schema("__app", "md_pages")?;
 let pages_label = PgIdentifier::new("pages")?;
 let instance_key = component_schema_instance_key_for_tables([(&pages_label, &pages_table)]);
 
-let stores = BootstrapConfig::default().migrate_schema(pool).await?;
+let stores = BootstrapConfig::from_schema_name_text("__paranoid")?
+    .migrate_schema(pool)
+    .await?;
 let install = [
     ComponentSchemaStatement::from_static_sql(r#"CREATE SCHEMA IF NOT EXISTS "__app""#)?,
     ComponentSchemaStatement::from_audited_dynamic_sql(AuditedSql::new(format!(
@@ -266,7 +270,7 @@ isolated embedded Postgres plus transaction-mode PgBouncer substrate Paranoid us
 let harness = paranoid::db::testing::IsolatedPostgresTestHarness::start().await?;
 let pool = harness.connect_standard_write_pool().await?;
 
-let stores = paranoid::db::BootstrapConfig::default()
+let stores = paranoid::db::BootstrapConfig::from_schema_name_text("__paranoid")?
     .migrate_schema(&pool)
     .await?;
 
@@ -291,7 +295,7 @@ other keyed state that benefits from Postgres atomicity and visibility.
 
 ```rust,no_run
 # async fn example(pool: paranoid::db::WritePool) -> Result<(), Box<dyn std::error::Error>> {
-let stores = paranoid::db::BootstrapConfig::default()
+let stores = paranoid::db::BootstrapConfig::from_schema_name_text("__paranoid")?
     .migrate_schema(&pool)
     .await?;
 let key = paranoid::kv::Key::from_parts(["tenant", "t_123", "feature-flag"])?;
@@ -325,7 +329,7 @@ use std::time::Duration;
 use paranoid::fleet::{ClaimDuration, MutexGuardConfig, MutexKey, MutexTryRunTaskResult};
 
 # async fn example(pool: paranoid::db::WritePool) -> Result<(), Box<dyn std::error::Error>> {
-let stores = paranoid::db::BootstrapConfig::default()
+let stores = paranoid::db::BootstrapConfig::from_schema_name_text("__paranoid")?
     .migrate_schema(&pool)
     .await?;
 let mutex = stores.fleet.new_mutex(
@@ -352,7 +356,7 @@ must be scheduled atomically with app-owned state changes.
 
 ```rust,no_run
 # async fn example(pool: paranoid::db::WritePool) -> Result<(), Box<dyn std::error::Error>> {
-let stores = paranoid::db::BootstrapConfig::default()
+let stores = paranoid::db::BootstrapConfig::from_schema_name_text("__paranoid")?
     .migrate_schema(&pool)
     .await?;
 

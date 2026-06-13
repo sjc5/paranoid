@@ -19,10 +19,16 @@ pub(super) struct InMemoryCommitStore {
     pub(super) active_proof_challenges:
         BTreeMap<ActiveProofChallengeId, ActiveProofChallengeRecord>,
     pub(super) credential_instances: BTreeMap<VerifiedProofSourceId, CredentialInstanceMetadata>,
+    pub(super) credential_recovery_authorities: Vec<CredentialRecoveryAuthority>,
+    pub(super) lifecycle_authority_sources: Vec<(LifecycleAuthoritySource, RecoveryAuthorityId)>,
+    pub(super) out_of_band_identifier_bindings:
+        BTreeMap<VerifiedProofSourceId, OutOfBandIdentifierBindingRecord>,
     pub(super) pending_credential_lifecycle_actions:
         BTreeMap<PendingCredentialLifecycleActionId, PendingCredentialLifecycleActionRecord>,
     pub(super) pending_subject_lifecycle_actions:
         BTreeMap<PendingSubjectLifecycleActionId, PendingSubjectLifecycleActionRecord>,
+    pub(super) admin_support_interventions:
+        BTreeMap<AdminSupportInterventionId, AdminSupportInterventionRecord>,
     pub(super) subject_revocations: BTreeMap<SubjectId, SubjectRevocationState>,
     pub(super) audit_events: Vec<AuditEvent>,
     pub(super) method_commit_work: Vec<MethodCommitWork>,
@@ -188,8 +194,8 @@ impl InMemoryCommitStore {
     ) -> Result<(), InMemoryCommitError> {
         work.validate_for_commit()
             .map_err(InMemoryCommitError::CoreCommitWorkInvalid)?;
-        self.ensure_preconditions(&work.preconditions)?;
         let mut next = self.clone();
+        next.ensure_preconditions(&work.preconditions)?;
         for mutation in work.mutations {
             next.apply_mutation(mutation)?;
         }
@@ -201,7 +207,7 @@ impl InMemoryCommitStore {
     }
 
     pub(super) fn ensure_preconditions(
-        &self,
+        &mut self,
         preconditions: &[Precondition],
     ) -> Result<(), InMemoryCommitError> {
         for precondition in preconditions {
@@ -211,7 +217,7 @@ impl InMemoryCommitStore {
     }
 
     pub(super) fn ensure_precondition(
-        &self,
+        &mut self,
         precondition: &Precondition,
     ) -> Result<(), InMemoryCommitError> {
         match precondition {
@@ -374,7 +380,18 @@ impl InMemoryCommitStore {
             Precondition::NoOpenOutOfBandChallengeForDedupeKey {
                 challenge_dedupe_key,
                 now,
+                replaceable_created_at_or_before,
             } => {
+                for challenge in self.active_proof_challenges.values_mut() {
+                    let is_same_dedupe_key =
+                        challenge.challenge_dedupe_key.as_ref() == Some(challenge_dedupe_key);
+                    let is_replaceable = *now >= challenge.expires_at
+                        || replaceable_created_at_or_before
+                            .is_some_and(|cutoff| challenge.created_at <= cutoff);
+                    if is_same_dedupe_key && challenge.closed_at.is_none() && is_replaceable {
+                        challenge.closed_at = Some(*now);
+                    }
+                }
                 if self.active_proof_challenges.values().any(|challenge| {
                     challenge.challenge_dedupe_key.as_ref() == Some(challenge_dedupe_key)
                         && challenge.closed_at.is_none()
@@ -398,6 +415,59 @@ impl InMemoryCommitStore {
                 if credential.subject_id() != subject_id || !credential.can_produce_new_proofs() {
                     return Err(InMemoryCommitError::PreconditionFailed(
                         "credential instance still active",
+                    ));
+                }
+            }
+            Precondition::SubjectRetainsRequiredCredentialPostureAfterRemoval {
+                subject_id,
+                removed_credential_instance_id,
+                removed_credential_reset_policy_role,
+            } => {
+                if !subject_retains_required_credential_posture_after_removal(
+                    self.credential_instances.values(),
+                    &self.credential_recovery_authorities,
+                    subject_id,
+                    removed_credential_instance_id,
+                    *removed_credential_reset_policy_role,
+                ) {
+                    return Err(InMemoryCommitError::PreconditionFailed(
+                        "subject retains required credential posture after removal",
+                    ));
+                }
+            }
+            Precondition::SubjectRetainsRequiredCredentialPostureAfterReplacement {
+                subject_id,
+                replaced_credential_instance_id,
+                replaced_credential_reset_policy_role,
+                successor,
+            } => {
+                if !subject_retains_required_credential_posture_after_replacement(
+                    self.credential_instances.values(),
+                    &self.credential_recovery_authorities,
+                    subject_id,
+                    replaced_credential_instance_id,
+                    *replaced_credential_reset_policy_role,
+                    successor,
+                ) {
+                    return Err(InMemoryCommitError::PreconditionFailed(
+                        "subject retains required credential posture after replacement",
+                    ));
+                }
+            }
+            Precondition::SubjectRetainsRequiredCredentialPostureAfterAddition {
+                subject_id,
+                added_credential,
+                added_recovery_authorities,
+            } => {
+                if !subject_retains_required_credential_posture_after_addition(
+                    self.credential_instances.values(),
+                    &self.credential_recovery_authorities,
+                    subject_id,
+                    added_credential,
+                    added_recovery_authorities,
+                ) {
+                    return Err(InMemoryCommitError::PreconditionFailed(
+                        "subject retains required credential posture after addition",
                     ));
                 }
             }
@@ -529,6 +599,108 @@ impl InMemoryCommitStore {
                 {
                     return Err(InMemoryCommitError::PreconditionFailed(
                         "pending subject lifecycle action still cancellable for subject",
+                    ));
+                }
+            }
+            Precondition::OutOfBandIdentifierBindingStillActive {
+                source_id,
+                subject_id,
+            } => {
+                let binding = self.out_of_band_identifier_bindings.get(source_id).ok_or(
+                    InMemoryCommitError::PreconditionFailed(
+                        "out-of-band identifier binding still active",
+                    ),
+                )?;
+                if binding.subject_id() != subject_id
+                    || binding.lifecycle_state() != OutOfBandIdentifierBindingLifecycleState::Active
+                {
+                    return Err(InMemoryCommitError::PreconditionFailed(
+                        "out-of-band identifier binding still active",
+                    ));
+                }
+            }
+            Precondition::OutOfBandIdentifierBindingStillPendingActivation {
+                source_id,
+                subject_id,
+            } => {
+                let binding = self.out_of_band_identifier_bindings.get(source_id).ok_or(
+                    InMemoryCommitError::PreconditionFailed(
+                        "out-of-band identifier binding still pending activation",
+                    ),
+                )?;
+                if binding.subject_id() != subject_id
+                    || binding.lifecycle_state()
+                        != OutOfBandIdentifierBindingLifecycleState::PendingActivation
+                {
+                    return Err(InMemoryCommitError::PreconditionFailed(
+                        "out-of-band identifier binding still pending activation",
+                    ));
+                }
+            }
+            Precondition::NoOpenAdminSupportInterventionForTarget {
+                target_credential_instance_id,
+                action,
+                now,
+                ..
+            } => {
+                if self
+                    .admin_support_interventions
+                    .values()
+                    .any(|intervention| {
+                        intervention.target_credential_instance_id == *target_credential_instance_id
+                            && intervention.action == *action
+                            && intervention.closed_at.is_none()
+                            && *now < intervention.expires_at
+                    })
+                {
+                    return Err(InMemoryCommitError::PreconditionFailed(
+                        "no open admin support intervention for target",
+                    ));
+                }
+            }
+            Precondition::AdminSupportInterventionStillOpen {
+                intervention_id,
+                subject_id,
+                target_credential_instance_id,
+                action,
+                now,
+            } => {
+                let intervention = self
+                    .admin_support_interventions
+                    .get(intervention_id)
+                    .ok_or(InMemoryCommitError::PreconditionFailed(
+                        "admin support intervention still open",
+                    ))?;
+                if intervention.subject_id != *subject_id
+                    || intervention.target_credential_instance_id != *target_credential_instance_id
+                    || intervention.action != *action
+                    || !intervention.is_open_at(*now)
+                {
+                    return Err(InMemoryCommitError::PreconditionFailed(
+                        "admin support intervention still open",
+                    ));
+                }
+            }
+            Precondition::AdminSupportInterventionStillExpiredOpen {
+                intervention_id,
+                subject_id,
+                target_credential_instance_id,
+                action,
+                now,
+            } => {
+                let intervention = self
+                    .admin_support_interventions
+                    .get(intervention_id)
+                    .ok_or(InMemoryCommitError::PreconditionFailed(
+                        "admin support intervention still expired open",
+                    ))?;
+                if intervention.subject_id != *subject_id
+                    || intervention.target_credential_instance_id != *target_credential_instance_id
+                    || intervention.action != *action
+                    || !intervention.is_expired_open_at(*now)
+                {
+                    return Err(InMemoryCommitError::PreconditionFailed(
+                        "admin support intervention still expired open",
                     ));
                 }
             }
@@ -742,6 +914,59 @@ impl InMemoryCommitStore {
                         "credential instance",
                     ))?;
             }
+            Mutation::CreateCredentialInstanceMetadata {
+                metadata,
+                created_at: _,
+            } => {
+                if self
+                    .credential_instances
+                    .insert(metadata.credential_instance_id().clone(), metadata)
+                    .is_some()
+                {
+                    return Err(InMemoryCommitError::DuplicateRecord("credential instance"));
+                }
+            }
+            Mutation::CreateCredentialRecoveryAuthority {
+                authority,
+                created_at: _,
+            } => {
+                if self.credential_recovery_authorities.iter().any(|existing| {
+                    existing.target_credential_instance_id()
+                        == authority.target_credential_instance_id()
+                        && existing.action() == authority.action()
+                        && existing.authority_id() == authority.authority_id()
+                        && existing.timing() == authority.timing()
+                }) {
+                    return Err(InMemoryCommitError::DuplicateRecord(
+                        "credential recovery authority",
+                    ));
+                }
+                self.credential_recovery_authorities.push(authority);
+            }
+            Mutation::CreateLifecycleAuthoritySource {
+                source,
+                authority_id,
+                created_at: _,
+            } => {
+                let storage_key = source.storage_key();
+                if self.lifecycle_authority_sources.iter().any(
+                    |(existing_source, existing_authority_id)| {
+                        existing_source.storage_key() == storage_key
+                            && existing_authority_id == &authority_id
+                    },
+                ) {
+                    return Err(InMemoryCommitError::DuplicateRecord(
+                        "lifecycle authority source",
+                    ));
+                }
+                self.lifecycle_authority_sources
+                    .push((source, authority_id));
+            }
+            Mutation::DeleteLifecycleAuthoritySourcesForSource { source } => {
+                let storage_key = source.storage_key();
+                self.lifecycle_authority_sources
+                    .retain(|(existing_source, _)| existing_source.storage_key() != storage_key);
+            }
             Mutation::CreatePendingCredentialLifecycleAction(pending_action) => {
                 if self
                     .pending_credential_lifecycle_actions
@@ -811,6 +1036,56 @@ impl InMemoryCommitStore {
                         "pending subject lifecycle action",
                     ))?;
                 pending_action.closed_at = Some(closed_at);
+            }
+            Mutation::CreateOutOfBandIdentifierBinding { record, .. } => {
+                if self
+                    .out_of_band_identifier_bindings
+                    .insert(record.source().source_id().clone(), record)
+                    .is_some()
+                {
+                    return Err(InMemoryCommitError::DuplicateRecord(
+                        "out-of-band identifier binding",
+                    ));
+                }
+            }
+            Mutation::SetOutOfBandIdentifierBindingLifecycleState {
+                source_id,
+                lifecycle_state,
+                updated_at: _,
+            } => {
+                let binding = self
+                    .out_of_band_identifier_bindings
+                    .remove(&source_id)
+                    .ok_or(InMemoryCommitError::MutationTargetMissing(
+                        "out-of-band identifier binding",
+                    ))?;
+                self.out_of_band_identifier_bindings
+                    .insert(source_id, binding.with_lifecycle_state(lifecycle_state));
+            }
+            Mutation::CreateAdminSupportIntervention(intervention) => {
+                if self
+                    .admin_support_interventions
+                    .insert(intervention.intervention_id.clone(), intervention)
+                    .is_some()
+                {
+                    return Err(InMemoryCommitError::DuplicateRecord(
+                        "admin support intervention",
+                    ));
+                }
+            }
+            Mutation::CloseAdminSupportIntervention {
+                intervention_id,
+                status,
+                closed_at,
+            } => {
+                let intervention = self
+                    .admin_support_interventions
+                    .get_mut(&intervention_id)
+                    .ok_or(InMemoryCommitError::MutationTargetMissing(
+                        "admin support intervention",
+                    ))?;
+                intervention.status = status;
+                intervention.closed_at = Some(closed_at);
             }
         }
         Ok(())

@@ -1,4 +1,4 @@
-use super::*;
+use super::prelude::*;
 
 /// Reducer plan containing atomic commit work plus post-commit response effects.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -152,12 +152,20 @@ fn session_cookie_response_is_commit_backed(
         | Mutation::RevokeTrustedDeviceCredential { .. }
         | Mutation::RaiseSubjectAuthRevocationCutoff { .. }
         | Mutation::RecordCredentialLifecycleActionAuthorized { .. }
+        | Mutation::CreateCredentialInstanceMetadata { .. }
+        | Mutation::CreateCredentialRecoveryAuthority { .. }
+        | Mutation::CreateLifecycleAuthoritySource { .. }
+        | Mutation::DeleteLifecycleAuthoritySourcesForSource { .. }
         | Mutation::CreatePendingCredentialLifecycleAction(_)
         | Mutation::RecordCredentialLifecycleActionExecuted { .. }
         | Mutation::SetCredentialLifecycleState { .. }
         | Mutation::ClosePendingCredentialLifecycleAction { .. }
         | Mutation::CreatePendingSubjectLifecycleAction(_)
-        | Mutation::ClosePendingSubjectLifecycleAction { .. } => false,
+        | Mutation::ClosePendingSubjectLifecycleAction { .. }
+        | Mutation::CreateOutOfBandIdentifierBinding { .. }
+        | Mutation::SetOutOfBandIdentifierBindingLifecycleState { .. }
+        | Mutation::CreateAdminSupportIntervention(_)
+        | Mutation::CloseAdminSupportIntervention { .. } => false,
     })
 }
 
@@ -170,12 +178,28 @@ fn active_proof_continuation_cookie_response_is_commit_backed(
             attempt.attempt_id == cookie.attempt_id
                 && attempt.proof_use == cookie.proof_use
                 && attempt.subject_id == cookie.subject_id
+                && match (&attempt.subject_id, cookie.subject_binding) {
+                    (None, ActiveProofContinuationSubjectBinding::NoSubject) => true,
+                    (Some(_), ActiveProofContinuationSubjectBinding::RuntimeBoundSubject) => true,
+                    _ => false,
+                }
                 && attempt.expires_at == cookie.attempt_fast_fail_until
                 && atomic_work.fresh_credential_secrets.contains(
                     &FreshCredentialSecret::ActiveProofContinuation {
                         attempt_id: cookie.attempt_id.clone(),
                     },
                 )
+        }
+        Mutation::RecordActiveProofSucceeded {
+            attempt_id,
+            subject_id,
+            ..
+        } => {
+            cookie.proof_use == ProofUse::RecoverOrReplaceCredential
+                && attempt_id == &cookie.attempt_id
+                && subject_id.as_ref() == cookie.subject_id.as_ref()
+                && cookie.subject_binding
+                    == ActiveProofContinuationSubjectBinding::VerifiedProofBoundSubject
         }
         Mutation::CreateSession(_)
         | Mutation::RefreshSession { .. }
@@ -184,7 +208,6 @@ fn active_proof_continuation_cookie_response_is_commit_backed(
         | Mutation::RotateTrustedDeviceCredential { .. }
         | Mutation::CreateActiveProofChallenge(_)
         | Mutation::RecordWeakProofFailure { .. }
-        | Mutation::RecordActiveProofSucceeded { .. }
         | Mutation::CloseOpenActiveProofChallengesForAttemptProofFamily { .. }
         | Mutation::RecordOutOfBandChallengeResent { .. }
         | Mutation::DeleteActiveProofAttempt { .. }
@@ -192,12 +215,20 @@ fn active_proof_continuation_cookie_response_is_commit_backed(
         | Mutation::RevokeTrustedDeviceCredential { .. }
         | Mutation::RaiseSubjectAuthRevocationCutoff { .. }
         | Mutation::RecordCredentialLifecycleActionAuthorized { .. }
+        | Mutation::CreateCredentialInstanceMetadata { .. }
+        | Mutation::CreateCredentialRecoveryAuthority { .. }
+        | Mutation::CreateLifecycleAuthoritySource { .. }
+        | Mutation::DeleteLifecycleAuthoritySourcesForSource { .. }
         | Mutation::CreatePendingCredentialLifecycleAction(_)
         | Mutation::RecordCredentialLifecycleActionExecuted { .. }
         | Mutation::SetCredentialLifecycleState { .. }
         | Mutation::ClosePendingCredentialLifecycleAction { .. }
         | Mutation::CreatePendingSubjectLifecycleAction(_)
-        | Mutation::ClosePendingSubjectLifecycleAction { .. } => false,
+        | Mutation::ClosePendingSubjectLifecycleAction { .. }
+        | Mutation::CreateOutOfBandIdentifierBinding { .. }
+        | Mutation::SetOutOfBandIdentifierBindingLifecycleState { .. }
+        | Mutation::CreateAdminSupportIntervention(_)
+        | Mutation::CloseAdminSupportIntervention { .. } => false,
     })
 }
 
@@ -239,12 +270,20 @@ fn trusted_device_cookie_response_is_commit_backed(
         | Mutation::RevokeTrustedDeviceCredential { .. }
         | Mutation::RaiseSubjectAuthRevocationCutoff { .. }
         | Mutation::RecordCredentialLifecycleActionAuthorized { .. }
+        | Mutation::CreateCredentialInstanceMetadata { .. }
+        | Mutation::CreateCredentialRecoveryAuthority { .. }
+        | Mutation::CreateLifecycleAuthoritySource { .. }
+        | Mutation::DeleteLifecycleAuthoritySourcesForSource { .. }
         | Mutation::CreatePendingCredentialLifecycleAction(_)
         | Mutation::RecordCredentialLifecycleActionExecuted { .. }
         | Mutation::SetCredentialLifecycleState { .. }
         | Mutation::ClosePendingCredentialLifecycleAction { .. }
         | Mutation::CreatePendingSubjectLifecycleAction(_)
-        | Mutation::ClosePendingSubjectLifecycleAction { .. } => false,
+        | Mutation::ClosePendingSubjectLifecycleAction { .. }
+        | Mutation::CreateOutOfBandIdentifierBinding { .. }
+        | Mutation::SetOutOfBandIdentifierBindingLifecycleState { .. }
+        | Mutation::CreateAdminSupportIntervention(_)
+        | Mutation::CloseAdminSupportIntervention { .. } => false,
     })
 }
 
@@ -276,12 +315,20 @@ fn active_proof_challenge_cookie_response_is_commit_backed(
         | Mutation::RevokeTrustedDeviceCredential { .. }
         | Mutation::RaiseSubjectAuthRevocationCutoff { .. }
         | Mutation::RecordCredentialLifecycleActionAuthorized { .. }
+        | Mutation::CreateCredentialInstanceMetadata { .. }
+        | Mutation::CreateCredentialRecoveryAuthority { .. }
+        | Mutation::CreateLifecycleAuthoritySource { .. }
+        | Mutation::DeleteLifecycleAuthoritySourcesForSource { .. }
         | Mutation::CreatePendingCredentialLifecycleAction(_)
         | Mutation::RecordCredentialLifecycleActionExecuted { .. }
         | Mutation::SetCredentialLifecycleState { .. }
         | Mutation::ClosePendingCredentialLifecycleAction { .. }
         | Mutation::CreatePendingSubjectLifecycleAction(_)
-        | Mutation::ClosePendingSubjectLifecycleAction { .. } => false,
+        | Mutation::ClosePendingSubjectLifecycleAction { .. }
+        | Mutation::CreateOutOfBandIdentifierBinding { .. }
+        | Mutation::SetOutOfBandIdentifierBindingLifecycleState { .. }
+        | Mutation::CreateAdminSupportIntervention(_)
+        | Mutation::CloseAdminSupportIntervention { .. } => false,
     })
 }
 
@@ -465,12 +512,20 @@ fn expected_fresh_credential_secrets_for_mutations(
             | Mutation::RevokeTrustedDeviceCredential { .. }
             | Mutation::RaiseSubjectAuthRevocationCutoff { .. }
             | Mutation::RecordCredentialLifecycleActionAuthorized { .. }
+            | Mutation::CreateCredentialInstanceMetadata { .. }
+            | Mutation::CreateCredentialRecoveryAuthority { .. }
+            | Mutation::CreateLifecycleAuthoritySource { .. }
+            | Mutation::DeleteLifecycleAuthoritySourcesForSource { .. }
             | Mutation::CreatePendingCredentialLifecycleAction(_)
             | Mutation::RecordCredentialLifecycleActionExecuted { .. }
             | Mutation::SetCredentialLifecycleState { .. }
             | Mutation::ClosePendingCredentialLifecycleAction { .. }
             | Mutation::CreatePendingSubjectLifecycleAction(_)
-            | Mutation::ClosePendingSubjectLifecycleAction { .. } => None,
+            | Mutation::ClosePendingSubjectLifecycleAction { .. }
+            | Mutation::CreateOutOfBandIdentifierBinding { .. }
+            | Mutation::SetOutOfBandIdentifierBindingLifecycleState { .. }
+            | Mutation::CreateAdminSupportIntervention(_)
+            | Mutation::CloseAdminSupportIntervention { .. } => None,
         })
         .collect()
 }

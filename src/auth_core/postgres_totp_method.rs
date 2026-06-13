@@ -1,31 +1,50 @@
 use std::collections::BTreeSet;
 use std::fmt;
 use std::future::Future;
+use std::num::NonZeroU32;
 use std::pin::Pin;
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 use sqlx::Row;
 use subtle::ConstantTimeEq;
 use totp_rs::{Algorithm as TotpRsAlgorithm, TOTP as TotpRs};
 
+use super::postgres_durable_effect_queue::{
+    PostgresAuthDurableEffectQueueDispatchError, PostgresAuthDurableEffectQueueDispatchSummary,
+};
+use super::postgres_method_runtime::{
+    ActiveProofMethodChallengeBuild, CredentialCreationMethodWorkBuildRequest,
+    CredentialLifecycleMethodWorkAuthority, CredentialLifecycleMethodWorkBuildRequest,
+    CredentialMethodWorkBuild, CredentialResetMethodWorkBuildRequest,
+    KnownSubjectActiveProofMethodVerification, PostgresAuthMethodBuildError,
+    PostgresAuthMethodDurableEffectQueueRegistrationError,
+    PostgresAuthMethodMountedRouteCapabilities, PostgresAuthMethodPlugin,
+    VerifiedActiveProofMethodResponse,
+    enqueue_no_method_durable_effects_to_queue_in_current_transaction,
+    register_no_queue_handlers_for_method_durable_effects,
+};
+use super::postgres_method_schema::{
+    MethodTableCheckConstraint, MethodTableColumnContract, MethodTableIndexContract,
+    ensure_method_table_check_constraints_in_current_transaction, quoted_bigint_nonnegative,
+    quoted_bigint_positive, quoted_len_at_least_one_and_at_most,
+    validate_method_table_schema_in_current_transaction,
+};
+use super::postgres_store::PostgresAuthMethodCommitError;
+use super::prelude::*;
 use crate::crypto::Keyset;
 use crate::crypto::SecretBytes;
 use crate::crypto::envelope::{decrypt_bytes_with_associated_data, encrypt_plaintext_bytes_as};
 #[cfg(test)]
 use crate::db::Pool;
+#[cfg(test)]
+use crate::db::pooler_safe_query_scalar;
 use crate::db::{
     BootstrapConfig, DatabaseOperationKind, DbError, PgIdentifier, PgQualifiedTableName,
-    PgSchemaName, Tx, pooler_safe_query, pooler_safe_query_scalar, unparameterized_simple_query,
+    PgSchemaName, Tx, WriteTx, pooler_safe_query, queue, unparameterized_simple_query,
 };
 
-use super::postgres_method_runtime::{
-    ActiveProofMethodChallengeBuild, KnownSubjectActiveProofMethodVerification,
-    PostgresAuthMethodBuildError, PostgresAuthMethodPlugin, VerifiedActiveProofMethodResponse,
-};
-use super::postgres_store::PostgresAuthMethodCommitError;
-use super::*;
-
-const TOTP_METHOD_LABEL: &str = "totp";
+pub(crate) const TOTP_METHOD_LABEL: &str = "totp";
 const TOTP_SECRET_CONTEXT: &[u8] = b"paranoid/auth/v1/totp-secret";
 const DEFAULT_TOTP_TABLE_PREFIX: &str = "auth_totp_";
 const TOTP_MIN_DIGIT_COUNT: usize = 6;
@@ -38,6 +57,12 @@ const TOTP_CHALLENGE_BOUND_BLOOM_FILTER_BYTES: usize = 128;
 const TOTP_CHALLENGE_BOUND_BLOOM_FILTER_HASH_COUNT: u8 = 10;
 const TOTP_CHALLENGE_BOUND_MAX_ACCEPTED_CODES: usize = 512;
 const TOTP_CHALLENGE_BOUND_PRESENTATION: &[u8] = b"totp-challenge-bound-bloom-v1";
+const TOTP_SECRET_MIN_BYTES: usize = 16;
+const TOTP_SECRET_MAX_BYTES: usize = 256;
+const TOTP_VERIFIER_ABSENT_OPERATION: &str = "totp_verifier_absent";
+const TOTP_VERIFIER_CURRENT_OPERATION: &str = "totp_verifier_current";
+const TOTP_CREATE_VERIFIER_OPERATION: &str = "totp_create_verifier";
+const TOTP_REPLACE_VERIFIER_OPERATION: &str = "totp_replace_verifier";
 
 pub(crate) trait PostgresTotpCodeVerifier: Send + Sync {
     fn verify_totp_code(
@@ -154,6 +179,30 @@ impl PostgresTotpCodeVerifier for StandardTotpCodeVerifier {
     }
 }
 
+impl<T> PostgresTotpCodeVerifier for Arc<T>
+where
+    T: PostgresTotpCodeVerifier + ?Sized,
+{
+    fn verify_totp_code(
+        &self,
+        secret: &SecretBytes,
+        submitted_code: &[u8],
+        now: UnixSeconds,
+    ) -> Result<bool, PostgresTotpMethodError> {
+        self.as_ref().verify_totp_code(secret, submitted_code, now)
+    }
+
+    fn accepted_totp_codes_for_challenge_window(
+        &self,
+        secret: &SecretBytes,
+        issued_at: UnixSeconds,
+        expires_at: UnixSeconds,
+    ) -> Result<Vec<KnownSubjectActiveProofSecretResponse>, PostgresTotpMethodError> {
+        self.as_ref()
+            .accepted_totp_codes_for_challenge_window(secret, issued_at, expires_at)
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct StandardTotpCodeVerifierConfig {
     algorithm: StandardTotpAlgorithm,
@@ -267,6 +316,190 @@ where
             secret_keyset,
             verifier,
         })
+    }
+
+    fn build_verifier_creation_commit_work(
+        &self,
+        now: UnixSeconds,
+        new_credential: &CredentialInstanceMetadata,
+        method_payload: &CredentialCreationMethodPayload,
+    ) -> Result<CredentialMethodWorkBuild, PostgresTotpMethodError> {
+        self.validate_credential_target(new_credential)?;
+        let payload = self.verifier_commit_payload(
+            now,
+            None,
+            new_credential.credential_instance_id(),
+            new_credential.subject_id(),
+            method_payload.as_bytes(),
+        )?;
+        let encoded_payload = encode_totp_payload(&payload)?;
+        let method_commit_work = MethodCommitWork::new(
+            self.method.verified_proof_summary(),
+            vec![
+                MethodCommitPrecondition::new(
+                    TOTP_VERIFIER_ABSENT_OPERATION,
+                    encoded_payload.clone(),
+                )
+                .map_err(PostgresTotpMethodError::Core)?,
+            ],
+            vec![
+                MethodCommitMutation::new(TOTP_CREATE_VERIFIER_OPERATION, encoded_payload)
+                    .map_err(PostgresTotpMethodError::Core)?,
+            ],
+            Vec::new(),
+        )
+        .map_err(PostgresTotpMethodError::Core)?;
+        Ok(CredentialMethodWorkBuild::from_method_commit_work(vec![
+            method_commit_work,
+        ]))
+    }
+
+    fn build_verifier_reset_commit_work(
+        &self,
+        now: UnixSeconds,
+        target_credential: &CredentialInstanceMetadata,
+        method_payload: &CredentialResetMethodPayload,
+    ) -> Result<Vec<MethodCommitWork>, PostgresTotpMethodError> {
+        self.validate_credential_target(target_credential)?;
+        self.verifier_replacement_commit_work(
+            now,
+            target_credential.credential_instance_id(),
+            target_credential.credential_instance_id(),
+            target_credential.subject_id(),
+            method_payload.as_bytes(),
+        )
+    }
+
+    fn build_verifier_lifecycle_commit_work(
+        &self,
+        now: UnixSeconds,
+        target_credential: &CredentialInstanceMetadata,
+        action: CredentialLifecycleAction,
+        replacement_successor: Option<&CredentialReplacementSuccessor>,
+        method_payload: &CredentialLifecycleMethodPayload,
+    ) -> Result<CredentialMethodWorkBuild, PostgresTotpMethodError> {
+        self.validate_credential_target(target_credential)?;
+        let new_credential_id = match action {
+            CredentialLifecycleAction::Replace => {
+                let successor = replacement_successor.ok_or(PostgresTotpMethodError::Core(
+                    Error::LoadedStateContradiction(
+                        "totp replacement is missing successor credential metadata",
+                    ),
+                ))?;
+                let successor_metadata = successor.metadata();
+                if successor_metadata.subject_id() != target_credential.subject_id() {
+                    return Err(PostgresTotpMethodError::Core(
+                        Error::LoadedStateContradiction(
+                            "totp replacement successor has a different subject",
+                        ),
+                    ));
+                }
+                if successor_metadata.proof_family() != self.method.family()
+                    || successor_metadata.method_label() != self.method.method_label()
+                {
+                    return Err(PostgresTotpMethodError::Core(
+                        Error::LoadedStateContradiction(
+                            "totp replacement successor uses a different method",
+                        ),
+                    ));
+                }
+                successor_metadata.credential_instance_id()
+            }
+            CredentialLifecycleAction::Rotate => target_credential.credential_instance_id(),
+            _ => {
+                return Err(PostgresTotpMethodError::Core(
+                    Error::LoadedStateContradiction(
+                        "totp lifecycle method work supports only replacement and rotation",
+                    ),
+                ));
+            }
+        };
+        let method_commit_work = self.verifier_replacement_commit_work(
+            now,
+            target_credential.credential_instance_id(),
+            new_credential_id,
+            target_credential.subject_id(),
+            method_payload.as_bytes(),
+        )?;
+        Ok(CredentialMethodWorkBuild::from_method_commit_work(
+            method_commit_work,
+        ))
+    }
+
+    fn verifier_replacement_commit_work(
+        &self,
+        now: UnixSeconds,
+        expected_credential_id: &VerifiedProofSourceId,
+        new_credential_id: &VerifiedProofSourceId,
+        subject_id: &SubjectId,
+        method_payload: &[u8],
+    ) -> Result<Vec<MethodCommitWork>, PostgresTotpMethodError> {
+        let payload = self.verifier_commit_payload(
+            now,
+            Some(expected_credential_id),
+            new_credential_id,
+            subject_id,
+            method_payload,
+        )?;
+        let encoded_payload = encode_totp_payload(&payload)?;
+        let method_commit_work = MethodCommitWork::new(
+            self.method.verified_proof_summary(),
+            vec![
+                MethodCommitPrecondition::new(
+                    TOTP_VERIFIER_CURRENT_OPERATION,
+                    encoded_payload.clone(),
+                )
+                .map_err(PostgresTotpMethodError::Core)?,
+            ],
+            vec![
+                MethodCommitMutation::new(TOTP_REPLACE_VERIFIER_OPERATION, encoded_payload)
+                    .map_err(PostgresTotpMethodError::Core)?,
+            ],
+            Vec::new(),
+        )
+        .map_err(PostgresTotpMethodError::Core)?;
+        Ok(vec![method_commit_work])
+    }
+
+    fn verifier_commit_payload(
+        &self,
+        now: UnixSeconds,
+        expected_credential_id: Option<&VerifiedProofSourceId>,
+        new_credential_id: &VerifiedProofSourceId,
+        subject_id: &SubjectId,
+        method_payload: &[u8],
+    ) -> Result<TotpVerifierCommitPayload, PostgresTotpMethodError> {
+        let material: TotpVerifierMethodPayload = decode_totp_payload(method_payload)?;
+        validate_totp_secret(&material.secret)?;
+        let encrypted_secret = encrypt_plaintext_bytes_as::<TotpSecretEnvelope>(
+            &self.secret_keyset,
+            &material.secret,
+            &totp_secret_context(subject_id, new_credential_id),
+        )
+        .map_err(PostgresTotpMethodError::Crypto)?
+        .into_bytes();
+        Ok(TotpVerifierCommitPayload {
+            expected_totp_credential_id: expected_credential_id
+                .map(|credential_id| credential_id.as_bytes().to_vec()),
+            new_totp_credential_id: new_credential_id.as_bytes().to_vec(),
+            subject_id: subject_id.as_bytes().to_vec(),
+            encrypted_secret,
+            updated_at: now.get(),
+        })
+    }
+
+    fn validate_credential_target(
+        &self,
+        credential: &CredentialInstanceMetadata,
+    ) -> Result<(), PostgresTotpMethodError> {
+        if credential.proof_family() != self.method.family()
+            || credential.method_label() != self.method.method_label()
+        {
+            return Err(PostgresTotpMethodError::Core(
+                Error::CredentialLifecycleExecutionMethodCommitWorkTargetMismatch,
+            ));
+        }
+        Ok(())
     }
 
     async fn verify_known_subject_response_in_current_transaction(
@@ -534,6 +767,13 @@ where
         })
     }
 
+    #[cfg(test)]
+    pub(crate) fn verifier_table_name_for_test(
+        &self,
+    ) -> Result<PgQualifiedTableName, PostgresTotpMethodError> {
+        Ok(self.table_names()?.verifier_table)
+    }
+
     async fn migrate_schema_in_current_transaction(
         &self,
         tx: &mut Tx<'_>,
@@ -548,7 +788,10 @@ where
                 created_at BIGINT NOT NULL,
                 updated_at BIGINT NOT NULL,
                 CHECK (octet_length(totp_credential_id) BETWEEN 1 AND {}),
-                CHECK (octet_length(subject_id) BETWEEN 1 AND {})
+                CHECK (octet_length(subject_id) BETWEEN 1 AND {}),
+                CHECK (verifier_version > 0),
+                CHECK (created_at >= 0),
+                CHECK (updated_at >= 0)
             )
             "#,
             self.table_names_for_commit()?.verifier_table.quoted(),
@@ -564,6 +807,9 @@ where
             .execute(tx.sqlx_transaction().as_mut())
             .await
             .map_err(DbError::query)?;
+        let table = self.table_names_for_commit()?.verifier_table;
+        let checks = totp_verifier_table_checks();
+        ensure_method_table_check_constraints_in_current_transaction(tx, &table, &checks).await?;
         Ok(())
     }
 
@@ -571,7 +817,190 @@ where
         &self,
         tx: &mut Tx<'_>,
     ) -> Result<(), PostgresAuthMethodCommitError> {
-        validate_totp_table_exists(tx, &self.table_names_for_commit()?.verifier_table).await
+        validate_method_table_schema_in_current_transaction(
+            tx,
+            &self.table_names_for_commit()?.verifier_table,
+            &totp_verifier_table_columns(),
+            &totp_verifier_table_checks(),
+            &totp_verifier_table_indexes(),
+        )
+        .await
+    }
+
+    async fn enforce_verifier_absent(
+        &self,
+        tx: &mut Tx<'_>,
+        payload: &TotpVerifierCommitPayload,
+    ) -> Result<(), PostgresAuthMethodCommitError> {
+        let statement = format!(
+            r#"
+            SELECT totp_credential_id
+            FROM {}
+            WHERE totp_credential_id = $1
+                OR subject_id = $2
+            FOR UPDATE
+            "#,
+            self.table_names_for_commit()?.verifier_table.quoted()
+        );
+        tx.record_database_operation(
+            DatabaseOperationKind::FetchAll,
+            "auth_core.totp.precondition.verifier_absent",
+            Some(statement.as_str()),
+        );
+        let rows = pooler_safe_query(sqlx::AssertSqlSafe(statement.as_str()))
+            .bind(&payload.new_totp_credential_id)
+            .bind(&payload.subject_id)
+            .fetch_all(tx.sqlx_transaction().as_mut())
+            .await
+            .map_err(DbError::query)?;
+        if rows.is_empty() {
+            Ok(())
+        } else {
+            Err(PostgresAuthMethodCommitError::PreconditionFailed(
+                "totp verifier already exists",
+            ))
+        }
+    }
+
+    async fn lock_current_verifier(
+        &self,
+        tx: &mut Tx<'_>,
+        payload: &TotpVerifierCommitPayload,
+    ) -> Result<(), PostgresAuthMethodCommitError> {
+        let expected_credential_id =
+            payload
+                .expected_totp_credential_id
+                .as_ref()
+                .ok_or_else(|| {
+                    PostgresAuthMethodCommitError::InvalidOperation(
+                        "totp verifier precondition is missing target credential".to_owned(),
+                    )
+                })?;
+        let statement = format!(
+            r#"
+            SELECT totp_credential_id
+            FROM {}
+            WHERE totp_credential_id = $1
+                AND subject_id = $2
+            FOR UPDATE
+            "#,
+            self.table_names_for_commit()?.verifier_table.quoted()
+        );
+        tx.record_database_operation(
+            DatabaseOperationKind::FetchOptional,
+            "auth_core.totp.precondition.verifier_current",
+            Some(statement.as_str()),
+        );
+        let row = pooler_safe_query(sqlx::AssertSqlSafe(statement.as_str()))
+            .bind(expected_credential_id)
+            .bind(&payload.subject_id)
+            .fetch_optional(tx.sqlx_transaction().as_mut())
+            .await
+            .map_err(DbError::query)?;
+        if row.is_some() {
+            Ok(())
+        } else {
+            Err(PostgresAuthMethodCommitError::PreconditionFailed(
+                "totp verifier is not current",
+            ))
+        }
+    }
+
+    async fn create_verifier(
+        &self,
+        tx: &mut Tx<'_>,
+        payload: &TotpVerifierCommitPayload,
+    ) -> Result<(), PostgresAuthMethodCommitError> {
+        let statement = format!(
+            r#"
+            INSERT INTO {} (
+                totp_credential_id,
+                subject_id,
+                encrypted_secret,
+                verifier_version,
+                created_at,
+                updated_at
+            )
+            VALUES ($1,$2,$3,1,$4,$4)
+            "#,
+            self.table_names_for_commit()?.verifier_table.quoted()
+        );
+        tx.record_database_operation(
+            DatabaseOperationKind::Execute,
+            "auth_core.totp.mutation.create_verifier",
+            Some(statement.as_str()),
+        );
+        let affected = pooler_safe_query(sqlx::AssertSqlSafe(statement.as_str()))
+            .bind(&payload.new_totp_credential_id)
+            .bind(&payload.subject_id)
+            .bind(&payload.encrypted_secret)
+            .bind(i64_from_totp_u64(payload.updated_at)?)
+            .execute(tx.sqlx_transaction().as_mut())
+            .await
+            .map_err(DbError::query)?
+            .rows_affected();
+        if affected != 1 {
+            return Err(PostgresAuthMethodCommitError::PreconditionFailed(
+                "totp verifier was not created",
+            ));
+        }
+        Ok(())
+    }
+
+    async fn replace_verifier(
+        &self,
+        tx: &mut Tx<'_>,
+        payload: &TotpVerifierCommitPayload,
+    ) -> Result<(), PostgresAuthMethodCommitError> {
+        let expected_credential_id =
+            payload
+                .expected_totp_credential_id
+                .as_ref()
+                .ok_or_else(|| {
+                    PostgresAuthMethodCommitError::InvalidOperation(
+                        "totp verifier mutation is missing target credential".to_owned(),
+                    )
+                })?;
+        let statement = format!(
+            r#"
+            UPDATE {}
+            SET totp_credential_id = $3,
+                encrypted_secret = $4,
+                verifier_version = CASE
+                    WHEN totp_credential_id = $3 THEN verifier_version + 1
+                    ELSE 1
+                END,
+                created_at = CASE
+                    WHEN totp_credential_id = $3 THEN created_at
+                    ELSE $5
+                END,
+                updated_at = $5
+            WHERE totp_credential_id = $1
+                AND subject_id = $2
+            "#,
+            self.table_names_for_commit()?.verifier_table.quoted()
+        );
+        tx.record_database_operation(
+            DatabaseOperationKind::Execute,
+            "auth_core.totp.mutation.replace_verifier",
+            Some(statement.as_str()),
+        );
+        let affected = pooler_safe_query(sqlx::AssertSqlSafe(statement.as_str()))
+            .bind(expected_credential_id)
+            .bind(&payload.subject_id)
+            .bind(&payload.new_totp_credential_id)
+            .bind(&payload.encrypted_secret)
+            .bind(i64_from_totp_u64(payload.updated_at)?)
+            .execute(tx.sqlx_transaction().as_mut())
+            .await
+            .map_err(DbError::query)?
+            .rows_affected();
+        if affected != 1 {
+            return Err(PostgresAuthMethodCommitError::PreconditionFailed(
+                "totp verifier is not current",
+            ));
+        }
+        Ok(())
     }
 
     #[cfg(test)]
@@ -664,6 +1093,73 @@ where
             (Ok(_), Err(error)) => Err(error),
         }
     }
+
+    #[cfg(test)]
+    pub(crate) async fn verifier_version_for_subject_for_test(
+        &self,
+        pool: &Pool,
+        subject_id: &SubjectId,
+    ) -> Result<Option<i64>, PostgresTotpMethodError> {
+        let statement = format!(
+            "SELECT verifier_version FROM {} WHERE subject_id = $1",
+            self.table_names()?.verifier_table.quoted()
+        );
+        let mut tx = pool
+            .begin_transaction()
+            .await
+            .map_err(PostgresTotpMethodError::Database)?;
+        let result = pooler_safe_query_scalar::<i64>(sqlx::AssertSqlSafe(statement.as_str()))
+            .bind(subject_id.as_bytes())
+            .fetch_optional(tx.sqlx_transaction().as_mut())
+            .await
+            .map_err(DbError::query)
+            .map_err(PostgresTotpMethodError::Database);
+        let rollback_result = tx
+            .rollback()
+            .await
+            .map_err(PostgresTotpMethodError::Database);
+        match (result, rollback_result) {
+            (Ok(value), Ok(())) => Ok(value),
+            (Err(error), _) => Err(error),
+            (Ok(_), Err(error)) => Err(error),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn verifier_creation_payload_for_test(
+        secret: &[u8],
+    ) -> Result<CredentialCreationMethodPayload, PostgresTotpMethodError> {
+        CredentialCreationMethodPayload::try_from_bytes(encode_totp_payload(
+            &TotpVerifierMethodPayload {
+                secret: secret.to_vec(),
+            },
+        )?)
+        .map_err(PostgresTotpMethodError::Core)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn verifier_reset_payload_for_test(
+        secret: &[u8],
+    ) -> Result<CredentialResetMethodPayload, PostgresTotpMethodError> {
+        CredentialResetMethodPayload::try_from_bytes(encode_totp_payload(
+            &TotpVerifierMethodPayload {
+                secret: secret.to_vec(),
+            },
+        )?)
+        .map_err(PostgresTotpMethodError::Core)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn verifier_lifecycle_payload_for_test(
+        secret: &[u8],
+    ) -> Result<CredentialLifecycleMethodPayload, PostgresTotpMethodError> {
+        CredentialLifecycleMethodPayload::try_from_bytes(encode_totp_payload(
+            &TotpVerifierMethodPayload {
+                secret: secret.to_vec(),
+            },
+        )?)
+        .map_err(PostgresTotpMethodError::Core)
+    }
 }
 
 impl<V> PostgresAuthMethodPlugin for PostgresTotpMethodPlugin<V>
@@ -672,6 +1168,14 @@ where
 {
     fn method(&self) -> &ProofMethodDeclaration {
         &self.method
+    }
+
+    fn mounted_route_capabilities(&self) -> PostgresAuthMethodMountedRouteCapabilities {
+        PostgresAuthMethodMountedRouteCapabilities::empty()
+            .with_credential_creation()
+            .with_credential_reset()
+            .with_credential_replacement()
+            .with_credential_rotation()
     }
 
     fn build_challenge_bound_known_subject_active_proof_method_challenge<'a, 'tx>(
@@ -779,6 +1283,106 @@ where
         })
     }
 
+    fn build_credential_reset_commit_work<'a, 'tx>(
+        &'a self,
+        _tx: &'a mut Tx<'tx>,
+        request: CredentialResetMethodWorkBuildRequest<'a>,
+    ) -> Pin<
+        Box<
+            dyn Future<Output = Result<Vec<MethodCommitWork>, PostgresAuthMethodBuildError>>
+                + Send
+                + 'a,
+        >,
+    > {
+        Box::pin(async move {
+            let _ = request.authority;
+            self.build_verifier_reset_commit_work(
+                request.now,
+                request.target_credential,
+                request.method_payload,
+            )
+            .map_err(|error| {
+                PostgresAuthMethodBuildError::plugin_rejected(
+                    &self.method,
+                    "credential_reset",
+                    error,
+                )
+            })
+        })
+    }
+
+    fn build_credential_creation_commit_work<'a, 'tx>(
+        &'a self,
+        _tx: &'a mut Tx<'tx>,
+        request: CredentialCreationMethodWorkBuildRequest<'a>,
+    ) -> Pin<
+        Box<
+            dyn Future<Output = Result<CredentialMethodWorkBuild, PostgresAuthMethodBuildError>>
+                + Send
+                + 'a,
+        >,
+    > {
+        Box::pin(async move {
+            self.build_verifier_creation_commit_work(
+                request.now,
+                request.new_credential,
+                request.method_payload,
+            )
+            .map_err(|error| {
+                PostgresAuthMethodBuildError::plugin_rejected(
+                    &self.method,
+                    "credential_creation",
+                    error,
+                )
+            })
+        })
+    }
+
+    fn build_credential_lifecycle_commit_work<'a, 'tx>(
+        &'a self,
+        _tx: &'a mut Tx<'tx>,
+        request: CredentialLifecycleMethodWorkBuildRequest<'a>,
+    ) -> Pin<
+        Box<
+            dyn Future<Output = Result<CredentialMethodWorkBuild, PostgresAuthMethodBuildError>>
+                + Send
+                + 'a,
+        >,
+    > {
+        Box::pin(async move {
+            match (request.action, request.authority) {
+                (
+                    CredentialLifecycleAction::Replace,
+                    CredentialLifecycleMethodWorkAuthority::ImmediateReplacement { .. }
+                    | CredentialLifecycleMethodWorkAuthority::MaturePendingAction { .. },
+                )
+                | (
+                    CredentialLifecycleAction::Rotate,
+                    CredentialLifecycleMethodWorkAuthority::ImmediateRotation { .. },
+                ) => self
+                    .build_verifier_lifecycle_commit_work(
+                        request.now,
+                        request.target_credential,
+                        request.action,
+                        request.replacement_successor,
+                        request.method_payload,
+                    )
+                    .map_err(|error| {
+                        PostgresAuthMethodBuildError::plugin_rejected(
+                            &self.method,
+                            "credential_lifecycle",
+                            error,
+                        )
+                    }),
+                _ => Err(PostgresAuthMethodBuildError::plugin_rejected(
+                    &self.method,
+                    "credential_lifecycle",
+                    "totp method supports only replacement and rotation lifecycle work",
+                )),
+            }
+        })
+    }
+
     fn migrate_schema<'a, 'tx>(
         &'a self,
         tx: &'a mut Tx<'tx>,
@@ -795,27 +1399,47 @@ where
 
     fn enforce_precondition<'a, 'tx>(
         &'a self,
-        _tx: &'a mut Tx<'tx>,
+        tx: &'a mut Tx<'tx>,
         _work: &'a MethodCommitWork,
         precondition: &'a MethodCommitPrecondition,
     ) -> Pin<Box<dyn Future<Output = Result<(), PostgresAuthMethodCommitError>> + Send + 'a>> {
         Box::pin(async move {
-            Err(PostgresAuthMethodCommitError::InvalidOperation(
-                precondition.operation().as_str().to_owned(),
-            ))
+            match precondition.operation().as_str() {
+                TOTP_VERIFIER_ABSENT_OPERATION => {
+                    let payload = decode_totp_verifier_commit_payload(precondition.payload())?;
+                    self.enforce_verifier_absent(tx, &payload).await
+                }
+                TOTP_VERIFIER_CURRENT_OPERATION => {
+                    let payload = decode_totp_verifier_commit_payload(precondition.payload())?;
+                    self.lock_current_verifier(tx, &payload).await
+                }
+                other => Err(PostgresAuthMethodCommitError::InvalidOperation(
+                    other.to_owned(),
+                )),
+            }
         })
     }
 
     fn apply_mutation<'a, 'tx>(
         &'a self,
-        _tx: &'a mut Tx<'tx>,
+        tx: &'a mut Tx<'tx>,
         _work: &'a MethodCommitWork,
         mutation: &'a MethodCommitMutation,
     ) -> Pin<Box<dyn Future<Output = Result<(), PostgresAuthMethodCommitError>> + Send + 'a>> {
         Box::pin(async move {
-            Err(PostgresAuthMethodCommitError::InvalidOperation(
-                mutation.operation().as_str().to_owned(),
-            ))
+            match mutation.operation().as_str() {
+                TOTP_CREATE_VERIFIER_OPERATION => {
+                    let payload = decode_totp_verifier_commit_payload(mutation.payload())?;
+                    self.create_verifier(tx, &payload).await
+                }
+                TOTP_REPLACE_VERIFIER_OPERATION => {
+                    let payload = decode_totp_verifier_commit_payload(mutation.payload())?;
+                    self.replace_verifier(tx, &payload).await
+                }
+                other => Err(PostgresAuthMethodCommitError::InvalidOperation(
+                    other.to_owned(),
+                )),
+            }
         })
     }
 
@@ -830,6 +1454,38 @@ where
                 command.operation().as_str().to_owned(),
             ))
         })
+    }
+
+    fn register_durable_effect_queue_handlers(
+        &self,
+        task_registry: &mut queue::TaskRegistry,
+    ) -> Result<(), PostgresAuthMethodDurableEffectQueueRegistrationError> {
+        register_no_queue_handlers_for_method_durable_effects(task_registry)
+    }
+
+    fn enqueue_available_durable_effects_to_queue_in_current_transaction<'a, 'tx>(
+        &'a self,
+        tx: &'a mut WriteTx<'tx>,
+        queue_store: &'a queue::Store,
+        limit: NonZeroU32,
+        enqueued_at: UnixSeconds,
+    ) -> Pin<
+        Box<
+            dyn Future<
+                    Output = Result<
+                        PostgresAuthDurableEffectQueueDispatchSummary,
+                        PostgresAuthDurableEffectQueueDispatchError,
+                    >,
+                > + Send
+                + 'a,
+        >,
+    > {
+        enqueue_no_method_durable_effects_to_queue_in_current_transaction(
+            tx,
+            queue_store,
+            limit,
+            enqueued_at,
+        )
     }
 }
 
@@ -879,13 +1535,6 @@ impl PostgresTotpMethodPluginConfig {
     }
 }
 
-impl Default for PostgresTotpMethodPluginConfig {
-    fn default() -> Self {
-        Self::for_db_bootstrap_config(&BootstrapConfig::default())
-            .expect("default totp method config must derive valid bootstrap table names")
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -896,9 +1545,11 @@ mod tests {
         b"1234567890123456789012345678901234567890123456789012345678901234";
 
     #[test]
-    fn default_config_uses_schema_local_bootstrap_tables() {
-        let bootstrap_config = BootstrapConfig::default();
-        let config = PostgresTotpMethodPluginConfig::default();
+    fn config_for_db_bootstrap_uses_schema_local_bootstrap_tables() {
+        let bootstrap_config =
+            BootstrapConfig::from_schema_name_text("__paranoid").expect("bootstrap config");
+        let config = PostgresTotpMethodPluginConfig::for_db_bootstrap_config(&bootstrap_config)
+            .expect("totp method config");
         let table_names = config.table_names().expect("table names");
 
         assert_eq!(
@@ -1162,6 +1813,20 @@ struct TotpVerifier {
 }
 
 #[derive(Deserialize, Serialize)]
+struct TotpVerifierMethodPayload {
+    secret: Vec<u8>,
+}
+
+#[derive(Deserialize, Serialize)]
+struct TotpVerifierCommitPayload {
+    expected_totp_credential_id: Option<Vec<u8>>,
+    new_totp_credential_id: Vec<u8>,
+    subject_id: Vec<u8>,
+    encrypted_secret: Vec<u8>,
+    updated_at: u64,
+}
+
+#[derive(Deserialize, Serialize)]
 struct TotpChallengeBoundBloomState {
     version: u8,
     metadata: TotpChallengeBoundBloomMetadata,
@@ -1259,6 +1924,52 @@ fn decode_totp_payload<T: for<'de> Deserialize<'de>>(
     postcard::from_bytes(payload).map_err(PostgresTotpMethodError::PayloadDecode)
 }
 
+fn validate_totp_secret(secret: &[u8]) -> Result<(), PostgresTotpMethodError> {
+    if !(TOTP_SECRET_MIN_BYTES..=TOTP_SECRET_MAX_BYTES).contains(&secret.len()) {
+        return Err(PostgresTotpMethodError::Core(Error::InvalidConfig(
+            "totp secret length is outside the supported range",
+        )));
+    }
+    Ok(())
+}
+
+fn decode_totp_verifier_commit_payload(
+    payload: &[u8],
+) -> Result<TotpVerifierCommitPayload, PostgresAuthMethodCommitError> {
+    let payload: TotpVerifierCommitPayload = postcard::from_bytes(payload).map_err(|_| {
+        PostgresAuthMethodCommitError::InvalidOperation(
+            "invalid totp verifier commit payload".to_owned(),
+        )
+    })?;
+    validate_totp_verifier_commit_payload(&payload)?;
+    Ok(payload)
+}
+
+fn validate_totp_verifier_commit_payload(
+    payload: &TotpVerifierCommitPayload,
+) -> Result<(), PostgresAuthMethodCommitError> {
+    if let Some(expected) = payload.expected_totp_credential_id.as_ref() {
+        VerifiedProofSourceId::from_bytes(expected.clone()).map_err(|_| {
+            PostgresAuthMethodCommitError::InvalidOperation(
+                "invalid totp target credential id".to_owned(),
+            )
+        })?;
+    }
+    VerifiedProofSourceId::from_bytes(payload.new_totp_credential_id.clone()).map_err(|_| {
+        PostgresAuthMethodCommitError::InvalidOperation("invalid totp new credential id".to_owned())
+    })?;
+    SubjectId::from_bytes(payload.subject_id.clone()).map_err(|_| {
+        PostgresAuthMethodCommitError::InvalidOperation("invalid totp subject id".to_owned())
+    })?;
+    if payload.encrypted_secret.is_empty() {
+        return Err(PostgresAuthMethodCommitError::InvalidOperation(
+            "invalid totp encrypted secret".to_owned(),
+        ));
+    }
+    i64_from_totp_u64(payload.updated_at)?;
+    Ok(())
+}
+
 fn decode_totp_challenge_bound_bloom_state(
     payload: &[u8],
 ) -> Result<TotpChallengeBoundBloomState, PostgresTotpMethodError> {
@@ -1275,8 +1986,8 @@ fn decode_totp_challenge_bound_bloom_state(
     Ok(state)
 }
 
-fn i64_from_unix_seconds_u64(value: UnixSeconds) -> Result<i64, PostgresAuthMethodCommitError> {
-    i64::try_from(value.get()).map_err(|_| {
+fn i64_from_totp_u64(value: u64) -> Result<i64, PostgresAuthMethodCommitError> {
+    i64::try_from(value).map_err(|_| {
         PostgresAuthMethodCommitError::InvalidOperation(
             "totp timestamp exceeds Postgres BIGINT domain".to_owned(),
         )
@@ -1287,34 +1998,49 @@ fn i64_from_unix_seconds_for_method(value: UnixSeconds) -> Result<i64, PostgresT
     i64::try_from(value.get()).map_err(|_| PostgresTotpMethodError::Core(Error::TimeOverflow))
 }
 
-async fn validate_totp_table_exists(
-    tx: &mut Tx<'_>,
-    table: &PgQualifiedTableName,
-) -> Result<(), PostgresAuthMethodCommitError> {
-    let schema = table.schema().map(PgSchemaName::as_str).unwrap_or("public");
-    let table_name = table.table().as_str();
-    let statement = r#"
-        SELECT count(*)
-        FROM information_schema.tables
-        WHERE table_schema = $1 AND table_name = $2
-    "#;
-    tx.record_database_operation(
-        DatabaseOperationKind::FetchOne,
-        "auth_core.totp.schema.validate_table",
-        Some(statement),
-    );
-    let count = pooler_safe_query_scalar::<i64>(sqlx::AssertSqlSafe(statement))
-        .bind(schema)
-        .bind(table_name)
-        .fetch_one(tx.sqlx_transaction().as_mut())
-        .await
-        .map_err(DbError::query)?;
-    if count == 1 {
-        Ok(())
-    } else {
-        Err(PostgresAuthMethodCommitError::InvalidOperation(format!(
-            "missing totp method table {}",
-            table.quoted()
-        )))
-    }
+fn totp_verifier_table_columns() -> Vec<MethodTableColumnContract> {
+    vec![
+        MethodTableColumnContract::bytea("totp_credential_id", true),
+        MethodTableColumnContract::bytea("subject_id", true),
+        MethodTableColumnContract::bytea("encrypted_secret", true),
+        MethodTableColumnContract::bigint("verifier_version", true),
+        MethodTableColumnContract::bigint("created_at", true),
+        MethodTableColumnContract::bigint("updated_at", true),
+    ]
+}
+
+fn totp_verifier_table_checks() -> Vec<MethodTableCheckConstraint> {
+    vec![
+        MethodTableCheckConstraint::new(
+            "credential_id_len",
+            quoted_len_at_least_one_and_at_most("totp_credential_id", ID_MAX_BYTES),
+        ),
+        MethodTableCheckConstraint::new(
+            "subject_id_len",
+            quoted_len_at_least_one_and_at_most("subject_id", ID_MAX_BYTES),
+        ),
+        MethodTableCheckConstraint::new(
+            "encrypted_secret_nonempty",
+            r#"octet_length("encrypted_secret") > 0"#,
+        ),
+        MethodTableCheckConstraint::new(
+            "verifier_version_positive",
+            quoted_bigint_positive("verifier_version"),
+        ),
+        MethodTableCheckConstraint::new(
+            "created_at_nonnegative",
+            quoted_bigint_nonnegative("created_at"),
+        ),
+        MethodTableCheckConstraint::new(
+            "updated_at_nonnegative",
+            quoted_bigint_nonnegative("updated_at"),
+        ),
+    ]
+}
+
+fn totp_verifier_table_indexes() -> Vec<MethodTableIndexContract> {
+    vec![
+        MethodTableIndexContract::unique("verifier primary-key", ["totp_credential_id"]),
+        MethodTableIndexContract::unique("subject lookup", ["subject_id"]),
+    ]
 }

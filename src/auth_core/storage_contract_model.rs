@@ -1,4 +1,4 @@
-use super::*;
+use super::prelude::*;
 
 const CORE_STORAGE_RECORD_KINDS: &[CoreStorageRecordKind] = &[
     CoreStorageRecordKind::Session,
@@ -11,9 +11,12 @@ const CORE_STORAGE_RECORD_KINDS: &[CoreStorageRecordKind] = &[
     CoreStorageRecordKind::SubjectAuthState,
     CoreStorageRecordKind::CredentialInstance,
     CoreStorageRecordKind::CredentialRecoveryAuthority,
+    CoreStorageRecordKind::SubjectLifecycleAuthority,
     CoreStorageRecordKind::LifecycleAuthoritySource,
+    CoreStorageRecordKind::OutOfBandIdentifierBinding,
     CoreStorageRecordKind::PendingCredentialLifecycleAction,
     CoreStorageRecordKind::PendingSubjectLifecycleAction,
+    CoreStorageRecordKind::AdminSupportIntervention,
     CoreStorageRecordKind::AuditEvent,
     CoreStorageRecordKind::CoreDurableEffectCommand,
 ];
@@ -52,12 +55,18 @@ pub enum CoreStorageRecordKind {
     CredentialInstance,
     /// Credential lifecycle recovery-authority edge.
     CredentialRecoveryAuthority,
+    /// Subject lifecycle recovery-authority edge.
+    SubjectLifecycleAuthority,
     /// Mapping from a lifecycle evidence source to an effective recovery authority.
     LifecycleAuthoritySource,
+    /// Paranoid-owned out-of-band identifier binding.
+    OutOfBandIdentifierBinding,
     /// Delayed credential lifecycle action.
     PendingCredentialLifecycleAction,
     /// Delayed subject lifecycle action.
     PendingSubjectLifecycleAction,
+    /// Stored support/admin intervention.
+    AdminSupportIntervention,
     /// Immutable audit event.
     AuditEvent,
     /// Durable command to deliver a core-owned external effect after commit.
@@ -284,6 +293,57 @@ impl CorePreconditionStorageContract {
                     StorageValidationRequirement::CredentialInstanceStillActive,
                 ],
             },
+            Precondition::SubjectRetainsRequiredCredentialPostureAfterRemoval {
+                subject_id,
+                ..
+            } => Self {
+                kind: CorePreconditionKind::SubjectRetainsRequiredCredentialPostureAfterRemoval,
+                lock_requirements: vec![
+                    StorageLockRequirement::LockActiveCredentialInstancesForSubjectForUpdate {
+                        subject_id: subject_id.clone(),
+                    },
+                    StorageLockRequirement::LockActiveCredentialRecoveryAuthoritiesForSubjectForUpdate {
+                        subject_id: subject_id.clone(),
+                    },
+                ],
+                validation_requirements: vec![
+                    StorageValidationRequirement::SubjectRetainsRequiredCredentialPostureAfterRemoval,
+                ],
+            },
+            Precondition::SubjectRetainsRequiredCredentialPostureAfterReplacement {
+                subject_id,
+                ..
+            } => Self {
+                kind: CorePreconditionKind::SubjectRetainsRequiredCredentialPostureAfterReplacement,
+                lock_requirements: vec![
+                    StorageLockRequirement::LockActiveCredentialInstancesForSubjectForUpdate {
+                        subject_id: subject_id.clone(),
+                    },
+                    StorageLockRequirement::LockActiveCredentialRecoveryAuthoritiesForSubjectForUpdate {
+                        subject_id: subject_id.clone(),
+                    },
+                ],
+                validation_requirements: vec![
+                    StorageValidationRequirement::SubjectRetainsRequiredCredentialPostureAfterReplacement,
+                ],
+            },
+            Precondition::SubjectRetainsRequiredCredentialPostureAfterAddition {
+                subject_id,
+                ..
+            } => Self {
+                kind: CorePreconditionKind::SubjectRetainsRequiredCredentialPostureAfterAddition,
+                lock_requirements: vec![
+                    StorageLockRequirement::LockActiveCredentialInstancesForSubjectForUpdate {
+                        subject_id: subject_id.clone(),
+                    },
+                    StorageLockRequirement::LockActiveCredentialRecoveryAuthoritiesForSubjectForUpdate {
+                        subject_id: subject_id.clone(),
+                    },
+                ],
+                validation_requirements: vec![
+                    StorageValidationRequirement::SubjectRetainsRequiredCredentialPostureAfterAddition,
+                ],
+            },
             Precondition::NoOpenPendingCredentialLifecycleActionForTarget {
                 target_credential_instance_id,
                 action,
@@ -362,6 +422,65 @@ impl CorePreconditionStorageContract {
                 )],
                 validation_requirements: vec![
                     StorageValidationRequirement::PendingSubjectLifecycleActionStillCancellableForSubject,
+                ],
+            },
+            Precondition::OutOfBandIdentifierBindingStillActive { source_id, .. } => Self {
+                kind: CorePreconditionKind::OutOfBandIdentifierBindingStillActive,
+                lock_requirements: vec![StorageLockRequirement::LockExistingRowForUpdate(
+                    CoreStorageTarget::OutOfBandIdentifierBinding(source_id.clone()),
+                )],
+                validation_requirements: vec![
+                    StorageValidationRequirement::OutOfBandIdentifierBindingStillActive,
+                ],
+            },
+            Precondition::OutOfBandIdentifierBindingStillPendingActivation {
+                source_id,
+                ..
+            } => Self {
+                kind: CorePreconditionKind::OutOfBandIdentifierBindingStillPendingActivation,
+                lock_requirements: vec![StorageLockRequirement::LockExistingRowForUpdate(
+                    CoreStorageTarget::OutOfBandIdentifierBinding(source_id.clone()),
+                )],
+                validation_requirements: vec![
+                    StorageValidationRequirement::OutOfBandIdentifierBindingStillPendingActivation,
+                ],
+            },
+            Precondition::NoOpenAdminSupportInterventionForTarget {
+                target_credential_instance_id,
+                action,
+                ..
+            } => Self {
+                kind: CorePreconditionKind::NoOpenAdminSupportInterventionForTarget,
+                lock_requirements: vec![
+                    StorageLockRequirement::EnforceOpenAdminSupportInterventionUniqueness {
+                        target_credential_instance_id: target_credential_instance_id.clone(),
+                        action: *action,
+                    },
+                ],
+                validation_requirements: vec![
+                    StorageValidationRequirement::NoOpenAdminSupportInterventionForTarget,
+                ],
+            },
+            Precondition::AdminSupportInterventionStillOpen {
+                intervention_id, ..
+            } => Self {
+                kind: CorePreconditionKind::AdminSupportInterventionStillOpen,
+                lock_requirements: vec![StorageLockRequirement::LockExistingRowForUpdate(
+                    CoreStorageTarget::AdminSupportIntervention(intervention_id.clone()),
+                )],
+                validation_requirements: vec![
+                    StorageValidationRequirement::AdminSupportInterventionStillOpen,
+                ],
+            },
+            Precondition::AdminSupportInterventionStillExpiredOpen {
+                intervention_id, ..
+            } => Self {
+                kind: CorePreconditionKind::AdminSupportInterventionStillExpiredOpen,
+                lock_requirements: vec![StorageLockRequirement::LockExistingRowForUpdate(
+                    CoreStorageTarget::AdminSupportIntervention(intervention_id.clone()),
+                )],
+                validation_requirements: vec![
+                    StorageValidationRequirement::AdminSupportInterventionStillExpiredOpen,
                 ],
             },
         }
@@ -513,6 +632,56 @@ impl CoreMutationStorageContract {
                     CoreStorageTarget::CredentialInstance(target_credential_instance_id.clone()),
                 ),
             },
+            Mutation::CreateCredentialInstanceMetadata { metadata, .. } => Self {
+                kind: CoreMutationKind::CreateCredentialInstanceMetadata,
+                write_requirement: StorageWriteRequirement::InsertUnique(
+                    CoreStorageTarget::CredentialInstance(
+                        metadata.credential_instance_id().clone(),
+                    ),
+                ),
+            },
+            Mutation::CreateCredentialRecoveryAuthority { authority, .. } => Self {
+                kind: CoreMutationKind::CreateCredentialRecoveryAuthority,
+                write_requirement: StorageWriteRequirement::InsertUnique(
+                    CoreStorageTarget::CredentialRecoveryAuthority {
+                        target_credential_instance_id: authority
+                            .target_credential_instance_id()
+                            .clone(),
+                        action: authority.action(),
+                        authority_id: authority.authority_id().clone(),
+                        timing: authority.timing(),
+                    },
+                ),
+            },
+            Mutation::CreateLifecycleAuthoritySource {
+                source,
+                authority_id,
+                ..
+            } => {
+                let (source_kind, source_id) = source.storage_key();
+                Self {
+                    kind: CoreMutationKind::CreateLifecycleAuthoritySource,
+                    write_requirement: StorageWriteRequirement::InsertUnique(
+                        CoreStorageTarget::LifecycleAuthoritySource {
+                            source_kind,
+                            source_id,
+                            authority_id: authority_id.clone(),
+                        },
+                    ),
+                }
+            }
+            Mutation::DeleteLifecycleAuthoritySourcesForSource { source } => {
+                let (source_kind, source_id) = source.storage_key();
+                Self {
+                    kind: CoreMutationKind::DeleteLifecycleAuthoritySourcesForSource,
+                    write_requirement: StorageWriteRequirement::HardDeleteRowsMatching(
+                        CoreStorageTarget::LifecycleAuthoritySourcesForSource {
+                            source_kind,
+                            source_id,
+                        },
+                    ),
+                }
+            }
             Mutation::CreatePendingCredentialLifecycleAction(record) => Self {
                 kind: CoreMutationKind::CreatePendingCredentialLifecycleAction,
                 write_requirement: StorageWriteRequirement::InsertUnique(
@@ -561,6 +730,34 @@ impl CoreMutationStorageContract {
                 kind: CoreMutationKind::ClosePendingSubjectLifecycleAction,
                 write_requirement: StorageWriteRequirement::UpdateLockedRow(
                     CoreStorageTarget::PendingSubjectLifecycleAction(pending_action_id.clone()),
+                ),
+            },
+            Mutation::CreateOutOfBandIdentifierBinding { record, .. } => Self {
+                kind: CoreMutationKind::CreateOutOfBandIdentifierBinding,
+                write_requirement: StorageWriteRequirement::InsertUnique(
+                    CoreStorageTarget::OutOfBandIdentifierBinding(
+                        record.source().source_id().clone(),
+                    ),
+                ),
+            },
+            Mutation::SetOutOfBandIdentifierBindingLifecycleState { source_id, .. } => Self {
+                kind: CoreMutationKind::SetOutOfBandIdentifierBindingLifecycleState,
+                write_requirement: StorageWriteRequirement::UpdateLockedRow(
+                    CoreStorageTarget::OutOfBandIdentifierBinding(source_id.clone()),
+                ),
+            },
+            Mutation::CreateAdminSupportIntervention(record) => Self {
+                kind: CoreMutationKind::CreateAdminSupportIntervention,
+                write_requirement: StorageWriteRequirement::InsertUnique(
+                    CoreStorageTarget::AdminSupportIntervention(record.intervention_id.clone()),
+                ),
+            },
+            Mutation::CloseAdminSupportIntervention {
+                intervention_id, ..
+            } => Self {
+                kind: CoreMutationKind::CloseAdminSupportIntervention,
+                write_requirement: StorageWriteRequirement::UpdateLockedRow(
+                    CoreStorageTarget::AdminSupportIntervention(intervention_id.clone()),
                 ),
             },
         }
@@ -642,6 +839,12 @@ pub enum CorePreconditionKind {
     NoOpenOutOfBandChallengeForDedupeKey,
     /// Credential instance is still active.
     CredentialInstanceStillActive,
+    /// Subject still has an acceptable credential posture after removing the target.
+    SubjectRetainsRequiredCredentialPostureAfterRemoval,
+    /// Subject still has an acceptable credential posture after replacing the target.
+    SubjectRetainsRequiredCredentialPostureAfterReplacement,
+    /// Adding a credential does not create a collapsed ordinary/second-factor posture.
+    SubjectRetainsRequiredCredentialPostureAfterAddition,
     /// No open pending credential lifecycle action exists for the target/action pair.
     NoOpenPendingCredentialLifecycleActionForTarget,
     /// Pending credential lifecycle action is still open, mature, unexpired, and target-matched.
@@ -654,6 +857,16 @@ pub enum CorePreconditionKind {
     PendingSubjectLifecycleActionStillExecutable,
     /// Pending subject lifecycle action is still open, unexpired, and subject-matched.
     PendingSubjectLifecycleActionStillCancellableForSubject,
+    /// Out-of-band identifier binding is still active for the expected subject.
+    OutOfBandIdentifierBindingStillActive,
+    /// Out-of-band identifier binding is still pending activation for the expected subject.
+    OutOfBandIdentifierBindingStillPendingActivation,
+    /// No open support/admin intervention exists for the target/action pair.
+    NoOpenAdminSupportInterventionForTarget,
+    /// Support/admin intervention is still open, unexpired, and target-matched.
+    AdminSupportInterventionStillOpen,
+    /// Support/admin intervention is still open, expired, and target-matched.
+    AdminSupportInterventionStillExpiredOpen,
 }
 
 /// Core mutation kind.
@@ -691,6 +904,14 @@ pub enum CoreMutationKind {
     RaiseSubjectAuthRevocationCutoff,
     /// Record an immediately authorized credential lifecycle action.
     RecordCredentialLifecycleActionAuthorized,
+    /// Create a credential-instance metadata row.
+    CreateCredentialInstanceMetadata,
+    /// Create a credential recovery-authority row.
+    CreateCredentialRecoveryAuthority,
+    /// Create a lifecycle authority-source row.
+    CreateLifecycleAuthoritySource,
+    /// Delete every lifecycle authority-source row for one source.
+    DeleteLifecycleAuthoritySourcesForSource,
     /// Create a delayed credential lifecycle action.
     CreatePendingCredentialLifecycleAction,
     /// Record an executed credential lifecycle action.
@@ -703,6 +924,14 @@ pub enum CoreMutationKind {
     CreatePendingSubjectLifecycleAction,
     /// Close a delayed subject lifecycle action.
     ClosePendingSubjectLifecycleAction,
+    /// Create an out-of-band identifier binding row.
+    CreateOutOfBandIdentifierBinding,
+    /// Set an out-of-band identifier binding lifecycle state.
+    SetOutOfBandIdentifierBindingLifecycleState,
+    /// Create a support/admin intervention.
+    CreateAdminSupportIntervention,
+    /// Close a support/admin intervention.
+    CloseAdminSupportIntervention,
 }
 
 /// Concrete storage target.
@@ -746,8 +975,32 @@ pub enum CoreStorageTarget {
     SubjectAuthState(SubjectId),
     /// One credential-instance metadata row.
     CredentialInstance(VerifiedProofSourceId),
+    /// One credential recovery-authority row.
+    CredentialRecoveryAuthority {
+        /// Target credential instance.
+        target_credential_instance_id: VerifiedProofSourceId,
+        /// Lifecycle action.
+        action: CredentialLifecycleAction,
+        /// Effective recovery authority.
+        authority_id: RecoveryAuthorityId,
+        /// Whether the authority acts immediately or by scheduling a delayed action.
+        timing: RecoveryAuthorityTiming,
+    },
     /// Recovery-authority rows for one target credential.
     CredentialRecoveryAuthoritiesForCredential(VerifiedProofSourceId),
+    /// One subject lifecycle recovery-authority row.
+    SubjectLifecycleAuthority {
+        /// Subject this authority can mutate.
+        subject_id: SubjectId,
+        /// Subject lifecycle action.
+        action: SubjectLifecycleAction,
+        /// Effective recovery authority.
+        authority_id: RecoveryAuthorityId,
+        /// Whether the authority acts immediately or by scheduling a delayed action.
+        timing: RecoveryAuthorityTiming,
+    },
+    /// Subject lifecycle authority rows for one subject.
+    SubjectLifecycleAuthoritiesForSubject(SubjectId),
     /// One source-to-recovery-authority mapping row.
     LifecycleAuthoritySource {
         /// Source kind wire id.
@@ -757,10 +1010,21 @@ pub enum CoreStorageTarget {
         /// Effective recovery authority id.
         authority_id: RecoveryAuthorityId,
     },
+    /// All source-to-recovery-authority mappings for one source.
+    LifecycleAuthoritySourcesForSource {
+        /// Source kind wire id.
+        source_kind: LifecycleAuthoritySourceKind,
+        /// Source id.
+        source_id: VerifiedProofSourceId,
+    },
+    /// One Paranoid-owned out-of-band identifier binding row.
+    OutOfBandIdentifierBinding(VerifiedProofSourceId),
     /// One delayed credential lifecycle action.
     PendingCredentialLifecycleAction(PendingCredentialLifecycleActionId),
     /// One delayed subject lifecycle action.
     PendingSubjectLifecycleAction(PendingSubjectLifecycleActionId),
+    /// One support/admin intervention.
+    AdminSupportIntervention(AdminSupportInterventionId),
     /// Open pending credential lifecycle actions for one target/action pair.
     OpenPendingCredentialLifecycleActionForTarget {
         /// Target credential instance.
@@ -774,6 +1038,13 @@ pub enum CoreStorageTarget {
         subject_id: SubjectId,
         /// Subject lifecycle action.
         action: SubjectLifecycleAction,
+    },
+    /// Open support/admin interventions for one target/action pair.
+    OpenAdminSupportInterventionForTarget {
+        /// Target credential instance.
+        target_credential_instance_id: VerifiedProofSourceId,
+        /// Lifecycle action.
+        action: CredentialLifecycleAction,
     },
     /// Open out-of-band challenge dedupe key.
     OpenOutOfBandChallengeDedupeKey(OutOfBandChallengeDedupeKey),
@@ -804,11 +1075,20 @@ impl CoreStorageTarget {
             }
             Self::SubjectAuthState(_) => CoreStorageRecordKind::SubjectAuthState,
             Self::CredentialInstance(_) => CoreStorageRecordKind::CredentialInstance,
-            Self::CredentialRecoveryAuthoritiesForCredential(_) => {
+            Self::CredentialRecoveryAuthority { .. }
+            | Self::CredentialRecoveryAuthoritiesForCredential(_) => {
                 CoreStorageRecordKind::CredentialRecoveryAuthority
             }
-            Self::LifecycleAuthoritySource { .. } => {
+            Self::SubjectLifecycleAuthority { .. }
+            | Self::SubjectLifecycleAuthoritiesForSubject(_) => {
+                CoreStorageRecordKind::SubjectLifecycleAuthority
+            }
+            Self::LifecycleAuthoritySource { .. }
+            | Self::LifecycleAuthoritySourcesForSource { .. } => {
                 CoreStorageRecordKind::LifecycleAuthoritySource
+            }
+            Self::OutOfBandIdentifierBinding(_) => {
+                CoreStorageRecordKind::OutOfBandIdentifierBinding
             }
             Self::PendingCredentialLifecycleAction(_)
             | Self::OpenPendingCredentialLifecycleActionForTarget { .. } => {
@@ -817,6 +1097,10 @@ impl CoreStorageTarget {
             Self::PendingSubjectLifecycleAction(_)
             | Self::OpenPendingSubjectLifecycleActionForSubject { .. } => {
                 CoreStorageRecordKind::PendingSubjectLifecycleAction
+            }
+            Self::AdminSupportIntervention(_)
+            | Self::OpenAdminSupportInterventionForTarget { .. } => {
+                CoreStorageRecordKind::AdminSupportIntervention
             }
             Self::AuditEvents => CoreStorageRecordKind::AuditEvent,
             Self::CoreDurableEffectCommands => CoreStorageRecordKind::CoreDurableEffectCommand,
@@ -849,6 +1133,16 @@ pub enum StorageLockRequirement {
         /// Subject id.
         subject_id: SubjectId,
     },
+    /// Lock active credential-instance rows for a subject in deterministic order.
+    LockActiveCredentialInstancesForSubjectForUpdate {
+        /// Subject id.
+        subject_id: SubjectId,
+    },
+    /// Lock recovery-authority rows for active credential instances owned by a subject.
+    LockActiveCredentialRecoveryAuthoritiesForSubjectForUpdate {
+        /// Subject id.
+        subject_id: SubjectId,
+    },
     /// Enforce open challenge uniqueness for a dedupe key.
     EnforceOpenOutOfBandChallengeDedupeUniqueness {
         /// Dedupe key.
@@ -867,6 +1161,13 @@ pub enum StorageLockRequirement {
         subject_id: SubjectId,
         /// Subject lifecycle action.
         action: SubjectLifecycleAction,
+    },
+    /// Enforce one open support/admin intervention for one target/action pair.
+    EnforceOpenAdminSupportInterventionUniqueness {
+        /// Target credential instance.
+        target_credential_instance_id: VerifiedProofSourceId,
+        /// Lifecycle action.
+        action: CredentialLifecycleAction,
     },
 }
 
@@ -893,6 +1194,12 @@ pub enum StorageValidationRequirement {
     SubjectAuthStateDoesNotInvalidateRecord,
     /// Credential instance is active and owned by the expected subject.
     CredentialInstanceStillActive,
+    /// Subject still has an acceptable credential posture after removing the target.
+    SubjectRetainsRequiredCredentialPostureAfterRemoval,
+    /// Subject still has an acceptable credential posture after replacing the target.
+    SubjectRetainsRequiredCredentialPostureAfterReplacement,
+    /// Adding a credential does not create a collapsed ordinary/second-factor posture.
+    SubjectRetainsRequiredCredentialPostureAfterAddition,
     /// No open pending credential lifecycle action exists for the target/action pair.
     NoOpenPendingCredentialLifecycleActionForTarget,
     /// Pending credential lifecycle action is still open, mature, unexpired, and target-matched.
@@ -905,6 +1212,16 @@ pub enum StorageValidationRequirement {
     PendingSubjectLifecycleActionStillExecutable,
     /// Pending subject lifecycle action is still open, unexpired, and subject-matched.
     PendingSubjectLifecycleActionStillCancellableForSubject,
+    /// Out-of-band identifier binding is active and owned by the expected subject.
+    OutOfBandIdentifierBindingStillActive,
+    /// Out-of-band identifier binding is pending activation and owned by the expected subject.
+    OutOfBandIdentifierBindingStillPendingActivation,
+    /// No open support/admin intervention exists for the target/action pair.
+    NoOpenAdminSupportInterventionForTarget,
+    /// Support/admin intervention is still open, unexpired, and target-matched.
+    AdminSupportInterventionStillOpen,
+    /// Support/admin intervention is still open, expired, and target-matched.
+    AdminSupportInterventionStillExpiredOpen,
 }
 
 /// Required storage write behavior.
@@ -923,6 +1240,8 @@ pub enum StorageWriteRequirement {
         /// Child record families that must be deleted by cascade or equivalent same-transaction work.
         cascades_to_record_kinds: Vec<CoreStorageRecordKind>,
     },
+    /// Hard-delete every matching row.
+    HardDeleteRowsMatching(CoreStorageTarget),
     /// Materialize and update the subject auth-state row without moving the cutoff backward.
     MonotonicUpsertSubjectAuthRevocationCutoff {
         /// Subject id.

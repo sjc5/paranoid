@@ -1,4 +1,4 @@
-use super::*;
+use super::prelude::*;
 
 /// Command prepared for adapter execution.
 #[derive(Clone, Debug, Eq, PartialEq)]

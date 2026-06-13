@@ -2,26 +2,41 @@ use std::cmp::min;
 use std::fmt;
 use std::sync::Arc;
 
-use http::HeaderMap;
+use http::{HeaderMap, Request};
 
 use crate::db::{DbError, Pool, Tx};
 
 use super::postgres_method_runtime::{
     ActiveProofMethodAuthoritativeVerificationContext, ActiveProofMethodPreStateVerification,
+    CredentialCreationMethodWorkBuildRequest, CredentialLifecycleMethodWorkAuthority,
     CredentialLifecycleMethodWorkBuildRequest, CredentialResetMethodWorkAuthority,
     CredentialResetMethodWorkBuildRequest, KnownSubjectActiveProofMethodVerification,
-    PostgresAuthMethodBuildError, PostgresAuthMethodRegistry, VerifiedActiveProofMethodResponse,
+    PostgresAuthMethodBuildError, PostgresAuthMethodRegistry,
+    PostgresOutOfBandChallengeStartBuildRequest, RecoveryCredentialActiveProofMethodVerification,
+    VerifiedActiveProofMethodResponse,
 };
 use super::postgres_store::{
-    PostgresAuthStore, PostgresAuthStoreError, finish_auth_store_transaction,
+    PostgresAuthStore, PostgresAuthStoreConfig, PostgresAuthStoreError,
+    finish_auth_store_transaction,
 };
-use super::*;
+use super::prelude::*;
+
+mod active_proof_challenge_runtime;
+mod active_proof_response_runtime;
+mod admin_support_runtime;
+mod credential_read_and_addition_runtime;
+mod credential_regeneration_rotation_runtime;
+mod credential_replacement_removal_runtime;
+mod credential_reset_runtime;
+mod pending_credential_lifecycle_runtime;
+mod request_session_device_runtime;
+mod subject_lifecycle_runtime;
 
 pub(crate) struct PostgresAuthWebRuntime {
-    runtime: AuthWebRuntime,
-    pool: Pool,
-    store: PostgresAuthStore,
-    weak_proof_gate_verifier: Arc<dyn WeakProofGateVerifier + Send + Sync>,
+    pub(super) runtime: AuthWebRuntime,
+    pub(super) pool: Pool,
+    pub(super) store: PostgresAuthStore,
+    pub(super) weak_proof_gate_verifier: Arc<dyn WeakProofGateVerifier + Send + Sync>,
 }
 
 impl PostgresAuthWebRuntime {
@@ -39,2805 +54,47 @@ impl PostgresAuthWebRuntime {
         }
     }
 
-    pub(crate) async fn execute_request_resolution_from_headers(
-        &self,
-        headers: &HeaderMap,
-        request: ResolveRequestInput,
-    ) -> Result<AuthWebRuntimeExecution, AuthPostgresWebRuntimeExecutionError> {
-        let decoded = self
-            .runtime
-            .web_transport()
-            .decode_presented_cookies_from_headers(headers)
-            .map_err(AuthPostgresWebRuntimeExecutionError::web)?;
-        let command = Command::ResolveRequest(ResolveRequest {
-            now: request.now,
-            request_kind: request.request_kind,
-            fresh_session_id: Some(generate_auth_id()?),
-        });
-        self.execute_decoded(decoded, command).await
+    pub(crate) fn store_config(&self) -> &PostgresAuthStoreConfig {
+        self.store.config()
     }
 
-    pub(crate) async fn execute_current_session_active_proof_attempt_start_from_headers(
-        &self,
-        headers: &HeaderMap,
-        request: StartCurrentSessionActiveProofAttemptInput,
-    ) -> Result<AuthWebRuntimeExecution, AuthPostgresWebRuntimeExecutionError> {
-        let decoded = self
-            .runtime
-            .web_transport()
-            .decode_presented_cookies_from_headers(headers)
-            .map_err(AuthPostgresWebRuntimeExecutionError::web)?;
-        let command = Command::StartActiveProofAttemptForCurrentSession(
-            StartActiveProofAttemptForCurrentSession {
-                now: request.now,
-                attempt_id: generate_auth_id()?,
-                proof_use: request.proof_use,
-            },
-        );
-        self.execute_decoded(decoded, command).await
+    pub(crate) fn core_config(&self) -> &Config {
+        self.runtime.config()
     }
 
-    pub(crate) async fn execute_current_trusted_device_active_proof_attempt_start_from_headers(
+    fn out_of_band_challenge_replaceable_created_at_or_before(
         &self,
-        headers: &HeaderMap,
-        request: StartCurrentTrustedDeviceActiveProofAttemptInput,
-    ) -> Result<AuthWebRuntimeExecution, AuthPostgresWebRuntimeExecutionError> {
-        let decoded = self
-            .runtime
-            .web_transport()
-            .decode_presented_cookies_from_headers(headers)
-            .map_err(AuthPostgresWebRuntimeExecutionError::web)?;
-        let command = Command::StartActiveProofAttemptForCurrentTrustedDevice(
-            StartActiveProofAttemptForCurrentTrustedDevice {
-                now: request.now,
-                attempt_id: generate_auth_id()?,
-                proof_use: request.proof_use,
-            },
-        );
-        self.execute_decoded(decoded, command).await
-    }
-
-    pub(crate) async fn execute_full_authentication_completion_from_headers(
-        &self,
-        headers: &HeaderMap,
-        request: CompleteFullAuthenticationInput,
-    ) -> Result<AuthWebRuntimeExecution, AuthPostgresWebRuntimeExecutionError> {
-        let decoded = self
-            .runtime
-            .web_transport()
-            .decode_presented_cookies_from_headers(headers)
-            .map_err(AuthPostgresWebRuntimeExecutionError::web)?;
-        let attempt_id =
-            super::active_proof_support::require_active_proof_continuation_for_use_before_state_load(
-                decoded.presented_cookies(),
-                request.now,
-                ProofUse::ContributeToFullAuthentication,
-            )
-            .map_err(AuthPostgresWebRuntimeExecutionError::core)?
-            .attempt_id
-            .clone();
-        let trust_device = match request.trust_device {
-            Some(trust_device) => Some(TrustDeviceAfterFullAuthentication {
-                device_credential_id: generate_auth_id()?,
-                display_label: trust_device.display_label,
-            }),
-            None => None,
-        };
-        let command = Command::CompleteFullAuthentication(CompleteFullAuthentication {
-            now: request.now,
-            attempt_id,
-            fresh_session_id: generate_auth_id()?,
-            trust_device,
-        });
-        self.execute_decoded(decoded, command).await
-    }
-
-    pub(crate) async fn execute_step_up_completion_from_headers(
-        &self,
-        headers: &HeaderMap,
-        request: CompleteStepUpInput,
-    ) -> Result<AuthWebRuntimeExecution, AuthPostgresWebRuntimeExecutionError> {
-        let decoded = self
-            .runtime
-            .web_transport()
-            .decode_presented_cookies_from_headers(headers)
-            .map_err(AuthPostgresWebRuntimeExecutionError::web)?;
-        let attempt_id =
-            super::active_proof_support::require_active_proof_continuation_for_use_before_state_load(
-                decoded.presented_cookies(),
-                request.now,
-                ProofUse::SatisfyStepUp,
-            )
-            .map_err(AuthPostgresWebRuntimeExecutionError::core)?
-            .attempt_id
-            .clone();
-        self.execute_decoded(
-            decoded,
-            Command::CompleteStepUp(CompleteStepUp {
-                now: request.now,
-                attempt_id,
-            }),
-        )
-        .await
-    }
-
-    pub(crate) async fn execute_trusted_device_revival_completion_from_headers(
-        &self,
-        headers: &HeaderMap,
-        request: CompleteTrustedDeviceRevivalWithActiveProofInput,
-    ) -> Result<AuthWebRuntimeExecution, AuthPostgresWebRuntimeExecutionError> {
-        let decoded = self
-            .runtime
-            .web_transport()
-            .decode_presented_cookies_from_headers(headers)
-            .map_err(AuthPostgresWebRuntimeExecutionError::web)?;
-        let attempt_id =
-            super::active_proof_support::require_active_proof_continuation_for_use_before_state_load(
-                decoded.presented_cookies(),
-                request.now,
-                ProofUse::ReviveTrustedDeviceWithActiveProof,
-            )
-            .map_err(AuthPostgresWebRuntimeExecutionError::core)?
-            .attempt_id
-            .clone();
-        let command = Command::CompleteTrustedDeviceRevivalWithActiveProof(
-            CompleteTrustedDeviceRevivalWithActiveProof {
-                now: request.now,
-                attempt_id,
-                fresh_session_id: generate_auth_id()?,
-            },
-        );
-        self.execute_decoded(decoded, command).await
-    }
-
-    pub(crate) async fn execute_from_headers(
-        &self,
-        headers: &HeaderMap,
-        command: Command,
-    ) -> Result<AuthWebRuntimeExecution, AuthPostgresWebRuntimeExecutionError> {
-        if let Some(error) = command.direct_web_runtime_rejection() {
-            return Err(AuthPostgresWebRuntimeExecutionError::core(error));
-        }
-        let decoded = self
-            .runtime
-            .web_transport()
-            .decode_presented_cookies_from_headers(headers)
-            .map_err(AuthPostgresWebRuntimeExecutionError::web)?;
-        self.execute_decoded(decoded, command).await
-    }
-
-    pub(crate) async fn execute_out_of_band_challenge_issue_from_headers(
-        &self,
-        headers: &HeaderMap,
-        request: IssueOutOfBandChallengeInput,
-    ) -> Result<AuthWebRuntimeExecution, AuthPostgresWebRuntimeExecutionError> {
-        let decoded = self
-            .runtime
-            .web_transport()
-            .decode_presented_cookies_from_headers(headers)
-            .map_err(AuthPostgresWebRuntimeExecutionError::web)?;
-        let continuation =
-            super::active_proof_support::require_active_proof_continuation_before_state_load(
-                decoded.presented_cookies(),
-                request.now,
-            )
-            .map_err(AuthPostgresWebRuntimeExecutionError::core)?;
-        let request = request.into_request(continuation.attempt_id.clone(), generate_auth_id()?);
-        let tx = self.begin_runtime_transaction().await?;
-        self.execute_out_of_band_challenge_issue_from_decoded_in_current_transaction(
-            tx, decoded, request,
-        )
-        .await
-    }
-
-    pub(crate) async fn execute_unbound_active_proof_attempt_start_and_out_of_band_challenge_issue_from_headers(
-        &self,
-        headers: &HeaderMap,
-        request: StartAndIssueOutOfBandChallengeInput,
-        preflight_response: ChallengeIssuePreflightResponse,
-    ) -> Result<AuthWebRuntimeExecution, AuthPostgresWebRuntimeExecutionError> {
-        let proof_use = request.proof_use;
-        super::active_proof_support::verify_challenge_issue_preflight_before_state_load(
-            self.runtime.config(),
-            request.now,
-            proof_use,
-            &request.method.verified_proof_summary(),
-            &preflight_response,
-            self.weak_proof_gate_verifier.as_ref(),
-        )
-        .map_err(AuthPostgresWebRuntimeExecutionError::core)?;
-        let decoded = self
-            .runtime
-            .web_transport()
-            .decode_presented_cookies_from_headers(headers)
-            .map_err(AuthPostgresWebRuntimeExecutionError::web)?;
-        let attempt_id = generate_auth_id()?;
-        let request = request.into_request(attempt_id.clone(), generate_auth_id()?);
-        let mut tx = self.begin_runtime_transaction().await?;
-        let start_set_cookie_headers = match self
-            .commit_start_active_proof_attempt_in_current_transaction(
-                &mut tx,
-                decoded.presented_cookies().clone(),
-                StartActiveProofAttempt {
-                    now: request.now,
-                    attempt_id,
-                    proof_use,
-                    subject_id: None,
-                },
-            )
-            .await
-        {
-            Ok(headers) => headers,
-            Err(error) => {
-                return Err(rollback_after_runtime_error(
-                    "auth_core.runtime.start_and_issue",
-                    tx,
-                    error,
-                )
-                .await);
-            }
-        };
-        let mut execution = self
-            .execute_out_of_band_challenge_issue_from_decoded_in_current_transaction(
-                tx, decoded, request,
-            )
-            .await?;
-        execution.prepend_set_cookie_headers(start_set_cookie_headers);
-        Ok(execution)
-    }
-
-    async fn execute_out_of_band_challenge_issue_from_decoded_in_current_transaction(
-        &self,
-        tx: Tx<'_>,
-        decoded: DecodedAuthWebCookies,
-        request: IssueOutOfBandChallengeRequest,
-    ) -> Result<AuthWebRuntimeExecution, AuthPostgresWebRuntimeExecutionError> {
-        let now = request.now;
-        let (presented_cookies, presented_cookie_secrets) = decoded.into_parts();
-        let loaded_state_contract =
-            CommandLoadedStateContract::for_out_of_band_challenge_issue_request(
-                self.runtime.config(),
-                &request,
-                &presented_cookies,
-            )
-            .map_err(AuthPostgresWebRuntimeExecutionError::core)?;
-        let prepared_storage_boundary_contract =
-            PreparedStorageBoundaryContract::for_loaded_state_contract(&loaded_state_contract);
-        let mut tx = tx;
-        let loaded = match self
-            .store
-            .load_state_in_current_transaction(
-                &mut tx,
-                AuthLoadStateRequest::new(
-                    now,
-                    &presented_cookies,
-                    &presented_cookie_secrets,
-                    &loaded_state_contract,
-                    &prepared_storage_boundary_contract,
-                ),
-            )
-            .await
-        {
-            Ok(loaded) => loaded,
-            Err(error) => {
-                return Err(rollback_after_store_error("auth_core.runtime.load", tx, error).await);
-            }
-        };
-        if let Err(error) = loaded_state_contract.validate_loaded_state(&loaded) {
-            return Err(
-                rollback_after_core_error("auth_core.runtime.validate_load", tx, error).await,
-            );
-        }
-        let Some(attempt) = loaded.active_proof_attempt_record.as_ref() else {
-            return Err(rollback_after_core_error(
-                "auth_core.runtime.validate_load",
-                tx,
-                Error::LoadedStateDoesNotSatisfyLoadContract(
-                    "required active-proof attempt record is missing",
-                ),
-            )
-            .await);
-        };
-        let proof = request.method.verified_proof_summary();
-        let expires_at = match now
-            .checked_add_duration(self.runtime.config().out_of_band_challenge_lifetime)
-            .map(|candidate| min(candidate, attempt.expires_at))
-        {
-            Ok(expires_at) => expires_at,
-            Err(error) => {
-                return Err(rollback_after_core_error(
-                    "auth_core.runtime.build_challenge_cookie",
-                    tx,
-                    error,
-                )
-                .await);
-            }
-        };
-        let (response_secret, method_commit_work) =
-            match self.method_registry().and_then(|registry| {
-                registry
-                    .build_out_of_band_issue(&request)
-                    .map_err(AuthPostgresWebRuntimeExecutionError::method_build)
-            }) {
-                Ok(issue_build) => issue_build.into_parts(),
-                Err(error) => {
-                    return Err(rollback_after_runtime_error(
-                        "auth_core.runtime.build_method_work",
-                        tx,
-                        error,
-                    )
-                    .await);
-                }
-            };
-        let challenge_context = match ActiveProofChallengeCookieContext::new(
-            request.attempt_id.clone(),
-            request.challenge_id.clone(),
-            proof,
-            now,
-            expires_at,
-            match ActiveProofChallengeFastFailNonce::generate() {
-                Ok(nonce) => nonce,
-                Err(error) => {
-                    return Err(rollback_after_core_error(
-                        "auth_core.runtime.build_challenge_cookie",
-                        tx,
-                        error,
-                    )
-                    .await);
-                }
-            },
-        ) {
-            Ok(context) => context,
-            Err(error) => {
-                return Err(rollback_after_core_error(
-                    "auth_core.runtime.build_challenge_cookie",
-                    tx,
-                    error,
-                )
-                .await);
-            }
-        };
-        let challenge_cookie = match ActiveProofChallengeCookieDraft::new_with_response_secret(
+        now: UnixSeconds,
+    ) -> Option<UnixSeconds> {
+        now.checked_sub_duration(
             self.runtime
-                .web_transport()
-                .active_proof_challenge_fast_fail_keyset(),
-            challenge_context,
-            &response_secret,
-        ) {
-            Ok(cookie) => cookie,
-            Err(error) => {
-                return Err(rollback_after_core_error(
-                    "auth_core.runtime.build_challenge_cookie",
-                    tx,
-                    error,
-                )
-                .await);
-            }
-        };
-        let command = Command::IssueOutOfBandChallenge(
-            request
-                .into_command_with_stateless_fast_fail_cookie(challenge_cookie, method_commit_work),
-        );
-        let prepared = match PreparedCommandExecution::prepare(
-            self.runtime.config(),
-            command,
-            presented_cookies,
-        ) {
-            Ok(prepared) => prepared,
-            Err(error) => {
-                return Err(
-                    rollback_after_core_error("auth_core.runtime.prepare", tx, error).await,
-                );
-            }
-        };
-        if prepared.loaded_state_contract() != &loaded_state_contract {
-            return Err(rollback_after_core_error(
-                "auth_core.runtime.prepare",
-                tx,
-                Error::RuntimeLoadedStateContractChangedAfterCookieConstruction,
-            )
-            .await);
-        }
-        self.execute_prepared_with_loaded_state_boundary(
-            tx,
-            prepared,
-            prepared_storage_boundary_contract,
-            loaded,
-            presented_cookie_secrets,
+                .config()
+                .out_of_band_challenge_replacement_cooldown,
         )
-        .await
     }
 
-    pub(crate) async fn execute_active_proof_method_challenge_issue_from_headers(
+    pub(crate) fn method_registry_arc(&self) -> Option<Arc<PostgresAuthMethodRegistry>> {
+        self.store.method_registry_arc()
+    }
+
+    pub(crate) fn verify_csrf_request<B>(
         &self,
-        headers: &HeaderMap,
-        request: IssueActiveProofMethodChallengeInput,
-    ) -> Result<AuthWebRuntimeExecution, AuthPostgresWebRuntimeExecutionError> {
-        let decoded = self
-            .runtime
+        request: &Request<B>,
+    ) -> Result<(), AuthPostgresWebRuntimeExecutionError> {
+        self.runtime
             .web_transport()
-            .decode_presented_cookies_from_headers(headers)
-            .map_err(AuthPostgresWebRuntimeExecutionError::web)?;
-        let continuation =
-            super::active_proof_support::require_active_proof_continuation_before_state_load(
-                decoded.presented_cookies(),
-                request.now,
-            )
-            .map_err(AuthPostgresWebRuntimeExecutionError::core)?;
-        let request = request.into_request(continuation.attempt_id.clone(), generate_auth_id()?);
-        let tx = self.begin_runtime_transaction().await?;
-        self.execute_active_proof_method_challenge_issue_from_decoded_in_current_transaction(
-            tx,
-            decoded,
-            request,
-            ActiveProofMethodChallengeIssueKind::NormalActiveMethod,
-        )
-        .await
+            .verify_csrf_request(request)
+            .map_err(AuthPostgresWebRuntimeExecutionError::web)
     }
 
-    pub(crate) async fn execute_challenge_bound_known_subject_active_proof_method_challenge_issue_from_headers(
+    pub(crate) fn issue_csrf_token_cookie_if_needed_for_request<B>(
         &self,
-        headers: &HeaderMap,
-        request: IssueChallengeBoundKnownSubjectActiveProofMethodChallengeInput,
-    ) -> Result<AuthWebRuntimeExecution, AuthPostgresWebRuntimeExecutionError> {
-        super::active_proof_support::validate_challenge_bound_known_subject_active_proof_method(
-            &request.method,
-        )
-        .map_err(AuthPostgresWebRuntimeExecutionError::core)?;
-        let decoded = self
-            .runtime
+        request: &Request<B>,
+    ) -> Result<Option<AuthSetCookieHeader>, AuthPostgresWebRuntimeExecutionError> {
+        self.runtime
             .web_transport()
-            .decode_presented_cookies_from_headers(headers)
-            .map_err(AuthPostgresWebRuntimeExecutionError::web)?;
-        let continuation =
-            super::active_proof_support::require_active_proof_continuation_before_state_load(
-                decoded.presented_cookies(),
-                request.now,
-            )
-            .map_err(AuthPostgresWebRuntimeExecutionError::core)?;
-        let request = IssueActiveProofMethodChallengeRequest {
-            now: request.now,
-            attempt_id: continuation.attempt_id.clone(),
-            challenge_id: generate_auth_id()?,
-            method: request.method,
-            method_challenge_request_payload: request.method_challenge_request_payload,
-        };
-        let tx = self.begin_runtime_transaction().await?;
-        self.execute_active_proof_method_challenge_issue_from_decoded_in_current_transaction(
-            tx,
-            decoded,
-            request,
-            ActiveProofMethodChallengeIssueKind::ChallengeBoundConfiguredSecretFastFail,
-        )
-        .await
-    }
-
-    pub(crate) async fn execute_unbound_active_proof_attempt_start_and_active_proof_method_challenge_issue_from_headers(
-        &self,
-        headers: &HeaderMap,
-        request: StartAndIssueActiveProofMethodChallengeInput,
-        preflight_response: ChallengeIssuePreflightResponse,
-    ) -> Result<AuthWebRuntimeExecution, AuthPostgresWebRuntimeExecutionError> {
-        let proof_use = request.proof_use;
-        super::active_proof_support::verify_challenge_issue_preflight_before_state_load(
-            self.runtime.config(),
-            request.now,
-            proof_use,
-            &request.method.verified_proof_summary(),
-            &preflight_response,
-            self.weak_proof_gate_verifier.as_ref(),
-        )
-        .map_err(AuthPostgresWebRuntimeExecutionError::core)?;
-        let decoded = self
-            .runtime
-            .web_transport()
-            .decode_presented_cookies_from_headers(headers)
-            .map_err(AuthPostgresWebRuntimeExecutionError::web)?;
-        let attempt_id = generate_auth_id()?;
-        let request = request.into_request(attempt_id.clone(), generate_auth_id()?);
-        let mut tx = self.begin_runtime_transaction().await?;
-        let start_set_cookie_headers = match self
-            .commit_start_active_proof_attempt_in_current_transaction(
-                &mut tx,
-                decoded.presented_cookies().clone(),
-                StartActiveProofAttempt {
-                    now: request.now,
-                    attempt_id,
-                    proof_use,
-                    subject_id: None,
-                },
-            )
-            .await
-        {
-            Ok(headers) => headers,
-            Err(error) => {
-                return Err(rollback_after_runtime_error(
-                    "auth_core.runtime.start_and_issue",
-                    tx,
-                    error,
-                )
-                .await);
-            }
-        };
-        let mut execution = self
-            .execute_active_proof_method_challenge_issue_from_decoded_in_current_transaction(
-                tx,
-                decoded,
-                request,
-                ActiveProofMethodChallengeIssueKind::NormalActiveMethod,
-            )
-            .await?;
-        execution.prepend_set_cookie_headers(start_set_cookie_headers);
-        Ok(execution)
-    }
-
-    async fn execute_active_proof_method_challenge_issue_from_decoded_in_current_transaction(
-        &self,
-        tx: Tx<'_>,
-        decoded: DecodedAuthWebCookies,
-        request: IssueActiveProofMethodChallengeRequest,
-        challenge_issue_kind: ActiveProofMethodChallengeIssueKind,
-    ) -> Result<AuthWebRuntimeExecution, AuthPostgresWebRuntimeExecutionError> {
-        match challenge_issue_kind {
-            ActiveProofMethodChallengeIssueKind::NormalActiveMethod => {
-                let challenge_cookie_kind =
-                    MethodAdapterContract::for_method(request.method.clone())
-                        .challenge_cookie()
-                        .kind();
-                if request.method.family() == ProofFamily::OutOfBandCode
-                    || request.method.semantics().interaction != ProofInteraction::Active
-                    || challenge_cookie_kind == MethodChallengeCookieKind::NotUsed
-                {
-                    return Err(AuthPostgresWebRuntimeExecutionError::core(
-                        Error::ProofMethodCannotIssueActiveProofMethodChallenge {
-                            family: request.method.family(),
-                        },
-                    ));
-                }
-            }
-            ActiveProofMethodChallengeIssueKind::ChallengeBoundConfiguredSecretFastFail => {
-                super::active_proof_support::validate_challenge_bound_known_subject_active_proof_method(
-                    &request.method,
-                )
-                .map_err(AuthPostgresWebRuntimeExecutionError::core)?;
-            }
-        }
-        let now = request.now;
-        let (presented_cookies, presented_cookie_secrets) = decoded.into_parts();
-        let loaded_state_contract =
-            CommandLoadedStateContract::for_active_proof_method_challenge_issue_request(
-                self.runtime.config(),
-                &request,
-                &presented_cookies,
-            )
-            .map_err(AuthPostgresWebRuntimeExecutionError::core)?;
-        let prepared_storage_boundary_contract =
-            PreparedStorageBoundaryContract::for_loaded_state_contract(&loaded_state_contract);
-        let mut tx = tx;
-        let loaded = match self
-            .store
-            .load_state_in_current_transaction(
-                &mut tx,
-                AuthLoadStateRequest::new(
-                    now,
-                    &presented_cookies,
-                    &presented_cookie_secrets,
-                    &loaded_state_contract,
-                    &prepared_storage_boundary_contract,
-                ),
-            )
-            .await
-        {
-            Ok(loaded) => loaded,
-            Err(error) => {
-                return Err(rollback_after_store_error("auth_core.runtime.load", tx, error).await);
-            }
-        };
-        if let Err(error) = loaded_state_contract.validate_loaded_state(&loaded) {
-            return Err(
-                rollback_after_core_error("auth_core.runtime.validate_load", tx, error).await,
-            );
-        }
-        let Some(attempt) = loaded.active_proof_attempt_record.as_ref() else {
-            return Err(rollback_after_core_error(
-                "auth_core.runtime.validate_load",
-                tx,
-                Error::LoadedStateDoesNotSatisfyLoadContract(
-                    "required active-proof attempt record is missing",
-                ),
-            )
-            .await);
-        };
-        let challenge_bound_subject_id = if challenge_issue_kind
-            == ActiveProofMethodChallengeIssueKind::ChallengeBoundConfiguredSecretFastFail
-        {
-            let Some(subject_id) = attempt.subject_id.as_ref() else {
-                return Err(rollback_after_core_error(
-                    "auth_core.runtime.validate_load",
-                    tx,
-                    Error::LoadedStateContradiction(
-                        "challenge-bound configured-secret issue requires a subject-bound attempt",
-                    ),
-                )
-                .await);
-            };
-            Some(subject_id)
-        } else {
-            None
-        };
-        let proof = request.method.verified_proof_summary();
-        let expires_at = match now
-            .checked_add_duration(self.runtime.config().out_of_band_challenge_lifetime)
-            .map(|candidate| min(candidate, attempt.expires_at))
-        {
-            Ok(expires_at) => expires_at,
-            Err(error) => {
-                return Err(rollback_after_core_error(
-                    "auth_core.runtime.build_challenge_cookie",
-                    tx,
-                    error,
-                )
-                .await);
-            }
-        };
-        let nonce = match ActiveProofChallengeFastFailNonce::generate() {
-            Ok(nonce) => nonce,
-            Err(error) => {
-                return Err(rollback_after_core_error(
-                    "auth_core.runtime.build_challenge_cookie",
-                    tx,
-                    error,
-                )
-                .await);
-            }
-        };
-        let challenge_seed = ActiveProofMethodChallengeSeed {
-            attempt_id: request.attempt_id.clone(),
-            challenge_id: request.challenge_id.clone(),
-            proof,
-            issued_at: now,
-            expires_at,
-            nonce,
-        };
-        let challenge_build = match self.method_registry() {
-            Ok(registry) => {
-                let build_result = match challenge_bound_subject_id {
-                    Some(subject_id) => {
-                        registry
-                            .build_challenge_bound_known_subject_active_proof_method_challenge(
-                                &mut tx,
-                                &request,
-                                subject_id,
-                                &challenge_seed,
-                            )
-                            .await
-                    }
-                    None => {
-                        registry
-                            .build_active_proof_method_challenge(&mut tx, &request, &challenge_seed)
-                            .await
-                    }
-                };
-                match build_result.map_err(AuthPostgresWebRuntimeExecutionError::method_build) {
-                    Ok(challenge_build) => challenge_build,
-                    Err(error) => {
-                        return Err(rollback_after_runtime_error(
-                            "auth_core.runtime.build_method_challenge",
-                            tx,
-                            error,
-                        )
-                        .await);
-                    }
-                }
-            }
-            Err(error) => {
-                return Err(rollback_after_runtime_error(
-                    "auth_core.runtime.build_method_challenge",
-                    tx,
-                    error,
-                )
-                .await);
-            }
-        };
-        let (method_challenge, method_challenge_state, method_commit_work) =
-            challenge_build.into_parts();
-        let challenge_context = match ActiveProofChallengeCookieContext::new(
-            challenge_seed.attempt_id.clone(),
-            challenge_seed.challenge_id.clone(),
-            challenge_seed.proof.clone(),
-            challenge_seed.issued_at,
-            challenge_seed.expires_at,
-            challenge_seed.nonce.clone(),
-        ) {
-            Ok(context) => context,
-            Err(error) => {
-                return Err(rollback_after_core_error(
-                    "auth_core.runtime.build_challenge_cookie",
-                    tx,
-                    error,
-                )
-                .await);
-            }
-        };
-        let challenge_cookie = match challenge_issue_kind {
-            ActiveProofMethodChallengeIssueKind::NormalActiveMethod => {
-                ActiveProofChallengeCookieDraft::new_with_method_challenge_state(
-                    challenge_context,
-                    method_challenge_state,
-                )
-            }
-            ActiveProofMethodChallengeIssueKind::ChallengeBoundConfiguredSecretFastFail => {
-                ActiveProofChallengeCookieDraft::new_with_method_challenge_state_requiring_stateless_fast_fail(
-                    challenge_context,
-                    method_challenge_state,
-                )
-            }
-        };
-        let challenge_cookie = match challenge_cookie {
-            Ok(cookie) => cookie,
-            Err(error) => {
-                return Err(rollback_after_core_error(
-                    "auth_core.runtime.build_challenge_cookie",
-                    tx,
-                    error,
-                )
-                .await);
-            }
-        };
-        let command = Command::IssueActiveProofMethodChallenge(IssueActiveProofMethodChallenge {
-            now: request.now,
-            attempt_id: request.attempt_id,
-            challenge_id: request.challenge_id,
-            method: request.method,
-            challenge_issue_kind,
-            challenge_cookie,
-            method_challenge,
-            method_commit_work,
-        });
-        let prepared = match PreparedCommandExecution::prepare(
-            self.runtime.config(),
-            command,
-            presented_cookies,
-        ) {
-            Ok(prepared) => prepared,
-            Err(error) => {
-                return Err(
-                    rollback_after_core_error("auth_core.runtime.prepare", tx, error).await,
-                );
-            }
-        };
-        if prepared.loaded_state_contract() != &loaded_state_contract {
-            return Err(rollback_after_core_error(
-                "auth_core.runtime.prepare",
-                tx,
-                Error::RuntimeLoadedStateContractChangedAfterCookieConstruction,
-            )
-            .await);
-        }
-        self.execute_prepared_with_loaded_state_boundary(
-            tx,
-            prepared,
-            prepared_storage_boundary_contract,
-            loaded,
-            presented_cookie_secrets,
-        )
-        .await
-    }
-
-    pub(crate) async fn execute_out_of_band_challenge_resend_from_headers(
-        &self,
-        headers: &HeaderMap,
-        request: ResendOutOfBandChallengeRequest,
-    ) -> Result<AuthWebRuntimeExecution, AuthPostgresWebRuntimeExecutionError> {
-        let now = request.now;
-        let decoded = self
-            .runtime
-            .web_transport()
-            .decode_presented_cookies_from_headers(headers)
-            .map_err(AuthPostgresWebRuntimeExecutionError::web)?;
-        let challenge_cookie = decoded
-            .presented_cookies()
-            .active_proof_challenge_cookie
-            .clone()
-            .ok_or(Error::MissingActiveProofChallengeCookie)
-            .map_err(AuthPostgresWebRuntimeExecutionError::core)?;
-        challenge_cookie
-            .validate_for_out_of_band_resend_before_state_load(now)
-            .map_err(AuthPostgresWebRuntimeExecutionError::core)?;
-        let (presented_cookies, presented_cookie_secrets) = decoded.into_parts();
-        let loaded_state_contract =
-            CommandLoadedStateContract::for_out_of_band_challenge_resend_request(
-                self.runtime.config(),
-                &request,
-                &challenge_cookie,
-            )
-            .map_err(AuthPostgresWebRuntimeExecutionError::core)?;
-        let prepared_storage_boundary_contract =
-            PreparedStorageBoundaryContract::for_loaded_state_contract(&loaded_state_contract);
-        let mut tx = self.begin_runtime_transaction().await?;
-        let loaded = match self
-            .store
-            .load_state_in_current_transaction(
-                &mut tx,
-                AuthLoadStateRequest::new(
-                    now,
-                    &presented_cookies,
-                    &presented_cookie_secrets,
-                    &loaded_state_contract,
-                    &prepared_storage_boundary_contract,
-                ),
-            )
-            .await
-        {
-            Ok(loaded) => loaded,
-            Err(error) => {
-                return Err(rollback_after_store_error("auth_core.runtime.load", tx, error).await);
-            }
-        };
-        if let Err(error) = loaded_state_contract.validate_loaded_state(&loaded) {
-            return Err(
-                rollback_after_core_error("auth_core.runtime.validate_load", tx, error).await,
-            );
-        }
-        let Some(challenge) = loaded.active_proof_challenge_record.as_ref() else {
-            return Err(rollback_after_core_error(
-                "auth_core.runtime.validate_load",
-                tx,
-                Error::LoadedStateDoesNotSatisfyLoadContract(
-                    "required active-proof challenge record is missing",
-                ),
-            )
-            .await);
-        };
-        let method_commit_work = match self.method_registry().and_then(|registry| {
-            registry
-                .build_out_of_band_resend_commit_work(&request, challenge)
-                .map_err(AuthPostgresWebRuntimeExecutionError::method_build)
-        }) {
-            Ok(method_commit_work) => method_commit_work,
-            Err(error) => {
-                return Err(rollback_after_runtime_error(
-                    "auth_core.runtime.build_method_work",
-                    tx,
-                    error,
-                )
-                .await);
-            }
-        };
-        let command = Command::ResendOutOfBandChallenge(
-            request.into_command_with_challenge_cookie(&challenge_cookie, method_commit_work),
-        );
-        let prepared = match PreparedCommandExecution::prepare(
-            self.runtime.config(),
-            command,
-            presented_cookies,
-        ) {
-            Ok(prepared) => prepared,
-            Err(error) => {
-                return Err(
-                    rollback_after_core_error("auth_core.runtime.prepare", tx, error).await,
-                );
-            }
-        };
-        if prepared.loaded_state_contract() != &loaded_state_contract {
-            return Err(rollback_after_core_error(
-                "auth_core.runtime.prepare",
-                tx,
-                Error::RuntimeLoadedStateContractChangedAfterCookieConstruction,
-            )
-            .await);
-        }
-        self.execute_prepared_with_loaded_state_boundary(
-            tx,
-            prepared,
-            prepared_storage_boundary_contract,
-            loaded,
-            presented_cookie_secrets,
-        )
-        .await
-    }
-
-    pub(crate) async fn execute_out_of_band_challenge_response_from_headers(
-        &self,
-        headers: &HeaderMap,
-        response: CompleteOutOfBandChallengeResponse,
-    ) -> Result<AuthWebRuntimeExecution, AuthPostgresWebRuntimeExecutionError> {
-        let now = response.now;
-        let decoded = self
-            .runtime
-            .web_transport()
-            .decode_presented_cookies_from_headers(headers)
-            .map_err(AuthPostgresWebRuntimeExecutionError::web)?;
-        let challenge_cookie = decoded
-            .presented_cookies()
-            .active_proof_challenge_cookie
-            .clone()
-            .ok_or(Error::MissingActiveProofChallengeCookie)
-            .map_err(AuthPostgresWebRuntimeExecutionError::core)?;
-        challenge_cookie
-            .validate_for_out_of_band_completion_before_state_load(now)
-            .map_err(AuthPostgresWebRuntimeExecutionError::core)?;
-        let weak_proof_gate =
-            super::active_proof_support::verify_weak_proof_gate_before_state_load(
-                now,
-                &challenge_cookie.proof,
-                response.weak_proof_gate_response.as_ref(),
-                None,
-                self.weak_proof_gate_verifier.as_ref(),
-            )
-            .map_err(AuthPostgresWebRuntimeExecutionError::core)?;
-        let mut command = CompleteActiveProofChallenge {
-            now,
-            attempt_id: challenge_cookie.attempt_id.clone(),
-            challenge_id: Some(challenge_cookie.challenge_id.clone()),
-            verified_proof: VerifiedActiveProof::from_summary(challenge_cookie.proof.clone(), None)
-                .map_err(AuthPostgresWebRuntimeExecutionError::core)?,
-            stateless_fast_fail: StatelessFastFailStatus::NotRequired,
-            weak_proof_gate,
-            method_commit_work: Vec::new(),
-        };
-        command.stateless_fast_fail = challenge_cookie
-            .verify_response_secret_before_state_load(
-                self.runtime
-                    .web_transport()
-                    .active_proof_challenge_fast_fail_keyset(),
-                now,
-                &command,
-                &response.secret_response,
-            )
-            .map_err(AuthPostgresWebRuntimeExecutionError::core)?;
-        let (presented_cookies, presented_cookie_secrets) = decoded.into_parts();
-        let mut tx = self.begin_runtime_transaction().await?;
-        let resolved_proof = match self.method_registry() {
-            Ok(registry) => {
-                match registry
-                    .resolve_out_of_band_proof(
-                        &mut tx,
-                        &challenge_cookie.proof,
-                        &challenge_cookie.challenge_id,
-                        &response,
-                    )
-                    .await
-                    .map_err(AuthPostgresWebRuntimeExecutionError::method_build)
-                {
-                    Ok(resolution) => resolution,
-                    Err(error) => {
-                        return Err(rollback_after_runtime_error(
-                            "auth_core.runtime.resolve_out_of_band_proof",
-                            tx,
-                            error,
-                        )
-                        .await);
-                    }
-                }
-            }
-            Err(error) => {
-                return Err(rollback_after_runtime_error(
-                    "auth_core.runtime.resolve_out_of_band_proof",
-                    tx,
-                    error,
-                )
-                .await);
-            }
-        };
-        command.verified_proof =
-            match resolved_proof.into_verified_proof(challenge_cookie.proof.clone()) {
-                Ok(verified_proof) => verified_proof,
-                Err(error) => {
-                    return Err(rollback_after_core_error(
-                        "auth_core.runtime.resolve_out_of_band_proof",
-                        tx,
-                        error,
-                    )
-                    .await);
-                }
-            };
-        command.method_commit_work = match self.method_registry().and_then(|registry| {
-            registry
-                .build_out_of_band_completion_commit_work(
-                    &challenge_cookie.proof,
-                    &challenge_cookie.challenge_id,
-                    &response,
-                )
-                .map_err(AuthPostgresWebRuntimeExecutionError::method_build)
-        }) {
-            Ok(method_commit_work) => method_commit_work,
-            Err(error) => {
-                return Err(rollback_after_runtime_error(
-                    "auth_core.runtime.build_method_work",
-                    tx,
-                    error,
-                )
-                .await);
-            }
-        };
-        let prepared = match PreparedCommandExecution::prepare(
-            self.runtime.config(),
-            Command::CompleteActiveProofChallenge(command),
-            presented_cookies,
-        ) {
-            Ok(prepared) => prepared,
-            Err(error) => {
-                return Err(
-                    rollback_after_core_error("auth_core.runtime.prepare", tx, error).await,
-                );
-            }
-        };
-        let prepared_storage_boundary_contract =
-            PreparedStorageBoundaryContract::for_prepared_command(&prepared);
-        if prepared_storage_boundary_contract.boundary_before_reduce()
-            != StorageBoundaryBeforeReduce::OpenBeforeStateLoad
-        {
-            return Err(rollback_after_core_error(
-                "auth_core.runtime.plan_storage_boundary",
-                tx,
-                Error::LoadedStateContradiction(
-                    "out-of-band completion unexpectedly avoided loaded-state boundary",
-                ),
-            )
-            .await);
-        }
-        let loaded = match self
-            .store
-            .load_state_in_current_transaction(
-                &mut tx,
-                AuthLoadStateRequest::new(
-                    now,
-                    prepared.presented_cookies(),
-                    &presented_cookie_secrets,
-                    prepared.loaded_state_contract(),
-                    &prepared_storage_boundary_contract,
-                ),
-            )
-            .await
-        {
-            Ok(loaded) => loaded,
-            Err(error) => {
-                return Err(rollback_after_store_error("auth_core.runtime.load", tx, error).await);
-            }
-        };
-        if let Err(error) = prepared
-            .loaded_state_contract()
-            .validate_loaded_state(&loaded)
-        {
-            return Err(
-                rollback_after_core_error("auth_core.runtime.validate_load", tx, error).await,
-            );
-        }
-        self.execute_prepared_with_loaded_state_boundary(
-            tx,
-            prepared,
-            prepared_storage_boundary_contract,
-            loaded,
-            presented_cookie_secrets,
-        )
-        .await
-    }
-
-    pub(crate) async fn execute_active_proof_method_response_from_headers(
-        &self,
-        headers: &HeaderMap,
-        response: CompleteActiveProofMethodResponse,
-    ) -> Result<AuthWebRuntimeExecution, AuthPostgresWebRuntimeExecutionError> {
-        let decoded = self
-            .runtime
-            .web_transport()
-            .decode_presented_cookies_from_headers(headers)
-            .map_err(AuthPostgresWebRuntimeExecutionError::web)?;
-        let challenge_cookie = decoded
-            .presented_cookies()
-            .active_proof_challenge_cookie
-            .clone()
-            .ok_or(Error::MissingActiveProofChallengeCookie)
-            .map_err(AuthPostgresWebRuntimeExecutionError::core)?;
-        challenge_cookie
-            .validate_for_active_method_completion_before_state_load(response.now)
-            .map_err(AuthPostgresWebRuntimeExecutionError::core)?;
-        let challenge_material = ActiveProofMethodChallengeMaterial::from_cookie(&challenge_cookie)
-            .map_err(AuthPostgresWebRuntimeExecutionError::core)?;
-        let weak_proof_gate_binding = WeakProofGateBinding::for_active_method_response(
-            &challenge_material,
-            &response.response_payload,
-        )
-        .map_err(AuthPostgresWebRuntimeExecutionError::core)?;
-        let weak_proof_gate =
-            super::active_proof_support::verify_weak_proof_gate_before_state_load(
-                response.now,
-                &challenge_cookie.proof,
-                response.weak_proof_gate_response.as_ref(),
-                Some(&weak_proof_gate_binding),
-                self.weak_proof_gate_verifier.as_ref(),
-            )
-            .map_err(AuthPostgresWebRuntimeExecutionError::core)?;
-        let verification = self.method_registry().and_then(|registry| {
-            registry
-                .verify_active_proof_method_response_before_state_load(
-                    &challenge_material,
-                    &response,
-                )
-                .map_err(AuthPostgresWebRuntimeExecutionError::method_build)
-        })?;
-        match verification {
-            ActiveProofMethodPreStateVerification::Accepted(verified) => {
-                let command = Command::CompleteActiveProofChallenge(
-                    command_from_active_proof_method_response(
-                        response,
-                        &challenge_cookie,
-                        weak_proof_gate,
-                        verified,
-                    ),
-                );
-                self.execute_decoded(decoded, command).await
-            }
-            ActiveProofMethodPreStateVerification::AcceptedNeedsAuthoritativeConfirmation(
-                verified,
-            ) => {
-                self.execute_authoritative_active_proof_method_response_from_decoded(
-                    decoded,
-                    response,
-                    challenge_cookie,
-                    challenge_material,
-                    weak_proof_gate,
-                    verified,
-                )
-                .await
-            }
-        }
-    }
-
-    async fn execute_authoritative_active_proof_method_response_from_decoded(
-        &self,
-        decoded: DecodedAuthWebCookies,
-        response: CompleteActiveProofMethodResponse,
-        challenge_cookie: ActiveProofChallengeCookieDraft,
-        challenge_material: ActiveProofMethodChallengeMaterial,
-        weak_proof_gate: WeakProofGateStatus,
-        pre_state_verified: VerifiedActiveProofMethodResponse,
-    ) -> Result<AuthWebRuntimeExecution, AuthPostgresWebRuntimeExecutionError> {
-        let now = response.now;
-        let (presented_cookies, presented_cookie_secrets) = decoded.into_parts();
-        let loaded_state_contract =
-            CommandLoadedStateContract::for_active_proof_method_authoritative_verification(
-                self.runtime.config(),
-                &challenge_cookie,
-            )
-            .map_err(AuthPostgresWebRuntimeExecutionError::core)?;
-        let prepared_storage_boundary_contract =
-            PreparedStorageBoundaryContract::for_loaded_state_contract(&loaded_state_contract);
-        let mut tx = self.begin_runtime_transaction().await?;
-        let mut loaded = match self
-            .store
-            .load_state_in_current_transaction(
-                &mut tx,
-                AuthLoadStateRequest::new(
-                    now,
-                    &presented_cookies,
-                    &presented_cookie_secrets,
-                    &loaded_state_contract,
-                    &prepared_storage_boundary_contract,
-                ),
-            )
-            .await
-        {
-            Ok(loaded) => loaded,
-            Err(error) => {
-                return Err(rollback_after_store_error("auth_core.runtime.load", tx, error).await);
-            }
-        };
-        if let Err(error) = loaded_state_contract.validate_loaded_state(&loaded) {
-            return Err(
-                rollback_after_core_error("auth_core.runtime.validate_load", tx, error).await,
-            );
-        }
-        let authoritative_confirmation = {
-            let attempt_record = loaded.active_proof_attempt_record.as_ref().ok_or_else(|| {
-                AuthPostgresWebRuntimeExecutionError::core(
-                    Error::LoadedStateDoesNotSatisfyLoadContract(
-                        "required active-proof attempt record is missing",
-                    ),
-                )
-            })?;
-            let challenge_record =
-                loaded
-                    .active_proof_challenge_record
-                    .as_ref()
-                    .ok_or_else(|| {
-                        AuthPostgresWebRuntimeExecutionError::core(
-                            Error::LoadedStateDoesNotSatisfyLoadContract(
-                                "required active-proof challenge record is missing",
-                            ),
-                        )
-                    })?;
-            let context = ActiveProofMethodAuthoritativeVerificationContext::new(
-                &challenge_material,
-                attempt_record,
-                challenge_record,
-            );
-            match self.method_registry() {
-                Ok(registry) => {
-                    match registry
-                        .verify_active_proof_method_response_with_authoritative_state(
-                            &mut tx,
-                            context,
-                            &pre_state_verified,
-                            &response,
-                        )
-                        .await
-                        .map_err(AuthPostgresWebRuntimeExecutionError::method_build)
-                    {
-                        Ok(verified) => verified,
-                        Err(error) => {
-                            return Err(rollback_after_runtime_error(
-                                "auth_core.runtime.verify_active_method_authoritative",
-                                tx,
-                                error,
-                            )
-                            .await);
-                        }
-                    }
-                }
-                Err(error) => {
-                    return Err(rollback_after_runtime_error(
-                        "auth_core.runtime.verify_active_method_authoritative",
-                        tx,
-                        error,
-                    )
-                    .await);
-                }
-            }
-        };
-        let (verified_proof, mut method_commit_work) = pre_state_verified.into_parts();
-        method_commit_work.extend(authoritative_confirmation.into_method_commit_work());
-        let verified = VerifiedActiveProofMethodResponse::new(verified_proof, method_commit_work)
-            .map_err(AuthPostgresWebRuntimeExecutionError::core)?;
-        if let Some(subject_id) = verified.verified_proof().subject_id()
-            && let Err(error) = self
-                .load_verified_active_proof_subject_revocation_in_current_transaction(
-                    &mut tx,
-                    now,
-                    &presented_cookies,
-                    &presented_cookie_secrets,
-                    &mut loaded,
-                    subject_id,
-                )
-                .await
-        {
-            return Err(rollback_after_runtime_error(
-                "auth_core.runtime.load_verified_subject_revocation",
-                tx,
-                error,
-            )
-            .await);
-        }
-        let command =
-            Command::CompleteActiveProofChallenge(command_from_active_proof_method_response(
-                response,
-                &challenge_cookie,
-                weak_proof_gate,
-                verified,
-            ));
-        let prepared =
-            PreparedCommandExecution::prepare(self.runtime.config(), command, presented_cookies)
-                .map_err(AuthPostgresWebRuntimeExecutionError::core)?;
-        let prepared_storage_boundary_contract =
-            PreparedStorageBoundaryContract::for_prepared_command(&prepared);
-        if prepared_storage_boundary_contract.boundary_before_reduce()
-            != StorageBoundaryBeforeReduce::OpenBeforeStateLoad
-        {
-            return Err(rollback_after_core_error(
-                "auth_core.runtime.plan_storage_boundary",
-                tx,
-                Error::LoadedStateContradiction(
-                    "active-method authoritative completion unexpectedly avoided loaded-state boundary",
-                ),
-            )
-            .await);
-        }
-        if let Err(error) = prepared
-            .loaded_state_contract()
-            .validate_loaded_state(&loaded)
-        {
-            return Err(
-                rollback_after_core_error("auth_core.runtime.validate_load", tx, error).await,
-            );
-        }
-        self.execute_prepared_with_loaded_state_boundary(
-            tx,
-            prepared,
-            prepared_storage_boundary_contract,
-            loaded,
-            presented_cookie_secrets,
-        )
-        .await
-    }
-
-    pub(crate) async fn execute_challenge_bound_known_subject_active_proof_method_response_from_headers(
-        &self,
-        headers: &HeaderMap,
-        response: CompleteChallengeBoundKnownSubjectActiveProofMethodResponse,
-    ) -> Result<AuthWebRuntimeExecution, AuthPostgresWebRuntimeExecutionError> {
-        let decoded = self
-            .runtime
-            .web_transport()
-            .decode_presented_cookies_from_headers(headers)
-            .map_err(AuthPostgresWebRuntimeExecutionError::web)?;
-        let challenge_cookie = decoded
-            .presented_cookies()
-            .active_proof_challenge_cookie
-            .clone()
-            .ok_or(Error::MissingActiveProofChallengeCookie)
-            .map_err(AuthPostgresWebRuntimeExecutionError::core)?;
-        challenge_cookie
-            .validate_for_active_method_completion_before_state_load(response.now)
-            .map_err(AuthPostgresWebRuntimeExecutionError::core)?;
-        if !challenge_cookie.requires_stateless_fast_fail() {
-            return Err(AuthPostgresWebRuntimeExecutionError::core(
-                Error::StatelessFastFailVerificationRequired,
-            ));
-        }
-        let challenge_material = ActiveProofMethodChallengeMaterial::from_cookie(&challenge_cookie)
-            .map_err(AuthPostgresWebRuntimeExecutionError::core)?;
-        let method = proof_summary_to_method_declaration(&challenge_cookie.proof)
-            .map_err(AuthPostgresWebRuntimeExecutionError::core)?;
-        super::active_proof_support::validate_challenge_bound_known_subject_active_proof_method(
-            &method,
-        )
-        .map_err(AuthPostgresWebRuntimeExecutionError::core)?;
-        let weak_proof_gate_binding =
-            WeakProofGateBinding::for_challenge_bound_known_subject_secret_response(
-                &challenge_material,
-                &response.secret_response,
-            )
-            .map_err(AuthPostgresWebRuntimeExecutionError::core)?;
-        let weak_proof_gate =
-            super::active_proof_support::verify_weak_proof_gate_before_state_load(
-                response.now,
-                &challenge_cookie.proof,
-                response.weak_proof_gate_response.as_ref(),
-                Some(&weak_proof_gate_binding),
-                self.weak_proof_gate_verifier.as_ref(),
-            )
-            .map_err(AuthPostgresWebRuntimeExecutionError::core)?;
-        self.method_registry()?
-            .verify_challenge_bound_known_subject_active_proof_method_response_before_state_load(
-                &challenge_material,
-                &response,
-            )
-            .map_err(AuthPostgresWebRuntimeExecutionError::method_build)?;
-
-        let now = response.now;
-        let (presented_cookies, presented_cookie_secrets) = decoded.into_parts();
-        let loaded_state_contract =
-            CommandLoadedStateContract::for_active_proof_method_authoritative_verification(
-                self.runtime.config(),
-                &challenge_cookie,
-            )
-            .map_err(AuthPostgresWebRuntimeExecutionError::core)?;
-        let prepared_storage_boundary_contract =
-            PreparedStorageBoundaryContract::for_loaded_state_contract(&loaded_state_contract);
-        let mut tx = self.begin_runtime_transaction().await?;
-        let loaded = match self
-            .store
-            .load_state_in_current_transaction(
-                &mut tx,
-                AuthLoadStateRequest::new(
-                    now,
-                    &presented_cookies,
-                    &presented_cookie_secrets,
-                    &loaded_state_contract,
-                    &prepared_storage_boundary_contract,
-                ),
-            )
-            .await
-        {
-            Ok(loaded) => loaded,
-            Err(error) => {
-                return Err(rollback_after_store_error("auth_core.runtime.load", tx, error).await);
-            }
-        };
-        if let Err(error) = loaded_state_contract.validate_loaded_state(&loaded) {
-            return Err(
-                rollback_after_core_error("auth_core.runtime.validate_load", tx, error).await,
-            );
-        }
-        let Some(attempt) = loaded.active_proof_attempt_record.as_ref() else {
-            return Err(rollback_after_core_error(
-                "auth_core.runtime.validate_load",
-                tx,
-                Error::LoadedStateDoesNotSatisfyLoadContract(
-                    "required active-proof attempt record is missing",
-                ),
-            )
-            .await);
-        };
-        let Some(subject_id) = attempt.subject_id.as_ref() else {
-            return Err(rollback_after_core_error(
-                "auth_core.runtime.validate_load",
-                tx,
-                Error::LoadedStateContradiction(
-                    "challenge-bound known-subject completion requires a subject-bound attempt",
-                ),
-            )
-            .await);
-        };
-        let verification = match self.method_registry() {
-            Ok(registry) => {
-                match registry
-                    .verify_challenge_bound_known_subject_active_proof_method_response(
-                        &mut tx,
-                        subject_id,
-                        &challenge_material,
-                        &response,
-                    )
-                    .await
-                    .map_err(AuthPostgresWebRuntimeExecutionError::method_build)
-                {
-                    Ok(verified) => verified,
-                    Err(error) => {
-                        return Err(rollback_after_runtime_error(
-                            "auth_core.runtime.verify_challenge_bound_known_subject_method",
-                            tx,
-                            error,
-                        )
-                        .await);
-                    }
-                }
-            }
-            Err(error) => {
-                return Err(rollback_after_runtime_error(
-                    "auth_core.runtime.verify_challenge_bound_known_subject_method",
-                    tx,
-                    error,
-                )
-                .await);
-            }
-        };
-        let command = match command_from_challenge_bound_known_subject_active_proof_method_response(
-            response,
-            &challenge_cookie,
-            method,
-            weak_proof_gate,
-            verification,
-        ) {
-            Ok(command) => command,
-            Err(error) => {
-                return Err(
-                    rollback_after_core_error("auth_core.runtime.prepare", tx, error).await,
-                );
-            }
-        };
-        let prepared = match PreparedCommandExecution::prepare(
-            self.runtime.config(),
-            command,
-            presented_cookies,
-        ) {
-            Ok(prepared) => prepared,
-            Err(error) => {
-                return Err(
-                    rollback_after_core_error("auth_core.runtime.prepare", tx, error).await,
-                );
-            }
-        };
-        if prepared.loaded_state_contract() != &loaded_state_contract {
-            return Err(rollback_after_core_error(
-                "auth_core.runtime.prepare",
-                tx,
-                Error::RuntimeLoadedStateContractChangedAfterCookieConstruction,
-            )
-            .await);
-        }
-        self.execute_prepared_with_loaded_state_boundary(
-            tx,
-            prepared,
-            prepared_storage_boundary_contract,
-            loaded,
-            presented_cookie_secrets,
-        )
-        .await
-    }
-
-    pub(crate) async fn execute_known_subject_active_proof_method_response_from_headers(
-        &self,
-        headers: &HeaderMap,
-        response: CompleteKnownSubjectActiveProofMethodResponse,
-    ) -> Result<AuthWebRuntimeExecution, AuthPostgresWebRuntimeExecutionError> {
-        super::active_proof_support::validate_known_subject_active_proof_method(&response.method)
-            .map_err(AuthPostgresWebRuntimeExecutionError::core)?;
-        let now = response.now;
-        let decoded = self
-            .runtime
-            .web_transport()
-            .decode_presented_cookies_from_headers(headers)
-            .map_err(AuthPostgresWebRuntimeExecutionError::web)?;
-        let continuation =
-            super::active_proof_support::require_active_proof_continuation_before_state_load(
-                decoded.presented_cookies(),
-                now,
-            )
-            .map_err(AuthPostgresWebRuntimeExecutionError::core)?;
-        let attempt_id = continuation.attempt_id.clone();
-        let weak_proof_gate_binding = WeakProofGateBinding::for_known_subject_secret_response(
-            continuation,
-            &response.method.verified_proof_summary(),
-            &response.secret_response,
-        )
-        .map_err(AuthPostgresWebRuntimeExecutionError::core)?;
-        let weak_proof_gate =
-            super::active_proof_support::verify_weak_proof_gate_before_state_load(
-                now,
-                &response.method.verified_proof_summary(),
-                response.weak_proof_gate_response.as_ref(),
-                Some(&weak_proof_gate_binding),
-                self.weak_proof_gate_verifier.as_ref(),
-            )
-            .map_err(AuthPostgresWebRuntimeExecutionError::core)?;
-        self.method_registry()?
-            .verify_known_subject_active_proof_method_response_before_state_load(
-                continuation,
-                &response,
-            )
-            .map_err(AuthPostgresWebRuntimeExecutionError::method_build)?;
-        let (presented_cookies, presented_cookie_secrets) = decoded.into_parts();
-        let loaded_state_contract =
-            CommandLoadedStateContract::for_known_subject_active_proof_method_response(
-                self.runtime.config(),
-                &response,
-                &attempt_id,
-                &presented_cookies,
-            )
-            .map_err(AuthPostgresWebRuntimeExecutionError::core)?;
-        let prepared_storage_boundary_contract =
-            PreparedStorageBoundaryContract::for_loaded_state_contract(&loaded_state_contract);
-        let mut tx = self.begin_runtime_transaction().await?;
-        let loaded = match self
-            .store
-            .load_state_in_current_transaction(
-                &mut tx,
-                AuthLoadStateRequest::new(
-                    now,
-                    &presented_cookies,
-                    &presented_cookie_secrets,
-                    &loaded_state_contract,
-                    &prepared_storage_boundary_contract,
-                ),
-            )
-            .await
-        {
-            Ok(loaded) => loaded,
-            Err(error) => {
-                return Err(rollback_after_store_error("auth_core.runtime.load", tx, error).await);
-            }
-        };
-        if let Err(error) = loaded_state_contract.validate_loaded_state(&loaded) {
-            return Err(
-                rollback_after_core_error("auth_core.runtime.validate_load", tx, error).await,
-            );
-        }
-        let Some(attempt) = loaded.active_proof_attempt_record.as_ref() else {
-            return Err(rollback_after_core_error(
-                "auth_core.runtime.validate_load",
-                tx,
-                Error::LoadedStateDoesNotSatisfyLoadContract(
-                    "required active-proof attempt record is missing",
-                ),
-            )
-            .await);
-        };
-        let Some(subject_id) = attempt.subject_id.as_ref() else {
-            return Err(rollback_after_core_error(
-                "auth_core.runtime.validate_load",
-                tx,
-                Error::LoadedStateContradiction(
-                    "known-subject active proof requires a subject-bound attempt",
-                ),
-            )
-            .await);
-        };
-        let verification = match self.method_registry() {
-            Ok(registry) => {
-                match registry
-                    .verify_known_subject_active_proof_method_response(
-                        &mut tx, subject_id, &response,
-                    )
-                    .await
-                    .map_err(AuthPostgresWebRuntimeExecutionError::method_build)
-                {
-                    Ok(verified) => verified,
-                    Err(error) => {
-                        return Err(rollback_after_runtime_error(
-                            "auth_core.runtime.verify_known_subject_method",
-                            tx,
-                            error,
-                        )
-                        .await);
-                    }
-                }
-            }
-            Err(error) => {
-                return Err(rollback_after_runtime_error(
-                    "auth_core.runtime.verify_known_subject_method",
-                    tx,
-                    error,
-                )
-                .await);
-            }
-        };
-        let command = match command_from_known_subject_active_proof_method_response(
-            response,
-            attempt_id,
-            weak_proof_gate,
-            verification,
-        ) {
-            Ok(command) => command,
-            Err(error) => {
-                return Err(
-                    rollback_after_core_error("auth_core.runtime.prepare", tx, error).await,
-                );
-            }
-        };
-        let prepared = match PreparedCommandExecution::prepare(
-            self.runtime.config(),
-            command,
-            presented_cookies,
-        ) {
-            Ok(prepared) => prepared,
-            Err(error) => {
-                return Err(
-                    rollback_after_core_error("auth_core.runtime.prepare", tx, error).await,
-                );
-            }
-        };
-        if prepared.loaded_state_contract() != &loaded_state_contract {
-            return Err(rollback_after_core_error(
-                "auth_core.runtime.prepare",
-                tx,
-                Error::RuntimeLoadedStateContractChangedAfterCookieConstruction,
-            )
-            .await);
-        }
-        self.execute_prepared_with_loaded_state_boundary(
-            tx,
-            prepared,
-            prepared_storage_boundary_contract,
-            loaded,
-            presented_cookie_secrets,
-        )
-        .await
-    }
-
-    pub(crate) async fn execute_authenticated_credential_reset_planning_from_headers(
-        &self,
-        headers: &HeaderMap,
-        request: PlanAuthenticatedCredentialResetInput,
-    ) -> Result<AuthWebRuntimeExecution, AuthPostgresWebRuntimeExecutionError> {
-        let now = request.now;
-        let decoded = self
-            .runtime
-            .web_transport()
-            .decode_presented_cookies_from_headers(headers)
-            .map_err(AuthPostgresWebRuntimeExecutionError::web)?;
-        let (presented_cookies, presented_cookie_secrets) = decoded.into_parts();
-        let loaded_state_contract =
-            CommandLoadedStateContract::for_authenticated_session_lifecycle_request(
-                self.runtime.config(),
-                now,
-                &presented_cookies,
-            )
-            .map_err(AuthPostgresWebRuntimeExecutionError::core)?;
-        let prepared_storage_boundary_contract =
-            PreparedStorageBoundaryContract::for_loaded_state_contract(&loaded_state_contract);
-        let mut tx = self.begin_runtime_transaction().await?;
-        let loaded = match self
-            .store
-            .load_state_in_current_transaction(
-                &mut tx,
-                AuthLoadStateRequest::new(
-                    now,
-                    &presented_cookies,
-                    &presented_cookie_secrets,
-                    &loaded_state_contract,
-                    &prepared_storage_boundary_contract,
-                ),
-            )
-            .await
-        {
-            Ok(loaded) => loaded,
-            Err(error) => {
-                return Err(rollback_after_store_error("auth_core.runtime.load", tx, error).await);
-            }
-        };
-        if let Err(error) = loaded_state_contract.validate_loaded_state(&loaded) {
-            return Err(
-                rollback_after_core_error("auth_core.runtime.validate_load", tx, error).await,
-            );
-        }
-        let Some(session) = live_authenticated_session_record_for_lifecycle_request(now, &loaded)
-            .map_err(AuthPostgresWebRuntimeExecutionError::core)?
-        else {
-            if let Err(error) = tx.rollback().await {
-                return Err(AuthPostgresWebRuntimeExecutionError::store(
-                    PostgresAuthStoreError::Database(error),
-                ));
-            }
-            return Ok(AuthWebRuntimeExecution::new(
-                Outcome::NeedsFullAuthentication,
-                AuthSetCookieHeaders::default(),
-            ));
-        };
-        let evidence_sources = [LifecycleAuthoritySource::AuthenticatedSession(
-            session.session_id.clone(),
-        )];
-        let lifecycle_context = match self
-            .store
-            .load_credential_lifecycle_action_context_in_current_transaction(
-                &mut tx,
-                &request.target_credential_instance_id,
-                &evidence_sources,
-            )
-            .await
-        {
-            Ok(Some(context)) => context,
-            Ok(None) => {
-                return Err(rollback_after_core_error(
-                    "auth_core.runtime.load_credential_lifecycle_context",
-                    tx,
-                    Error::CredentialLifecycleActionNotAuthorized,
-                )
-                .await);
-            }
-            Err(error) => {
-                return Err(rollback_after_store_error(
-                    "auth_core.runtime.load_credential_lifecycle_context",
-                    tx,
-                    error,
-                )
-                .await);
-            }
-        };
-        let pending_action =
-            match pending_credential_reset_schedule_from_timing(request.pending_action_timing) {
-                Ok(pending_action) => pending_action,
-                Err(error) => {
-                    return Err(rollback_after_runtime_error(
-                        "auth_core.runtime.prepare",
-                        tx,
-                        error,
-                    )
-                    .await);
-                }
-            };
-        let command = Command::PlanCredentialReset(PlanCredentialReset {
-            now,
-            lifecycle_context,
-            active_proof_attempt_to_close: None,
-            independent_evidence_required: request.independent_evidence_required,
-            pending_action,
-            immediate_subject_auth_revocation: request.immediate_subject_auth_revocation,
-        });
-        let prepared = match PreparedCommandExecution::prepare(
-            self.runtime.config(),
-            command,
-            presented_cookies,
-        ) {
-            Ok(prepared) => prepared,
-            Err(error) => {
-                return Err(
-                    rollback_after_core_error("auth_core.runtime.prepare", tx, error).await,
-                );
-            }
-        };
-        self.commit_runtime_owned_prepared_command_inside_open_transaction(
-            "auth_core.runtime.authenticated_credential_reset_planning",
-            now,
-            tx,
-            prepared,
-            presented_cookie_secrets,
-        )
-        .await
-    }
-
-    pub(crate) async fn execute_unauthenticated_credential_reset_planning_from_headers(
-        &self,
-        headers: &HeaderMap,
-        request: PlanUnauthenticatedCredentialResetInput,
-    ) -> Result<AuthWebRuntimeExecution, AuthPostgresWebRuntimeExecutionError> {
-        let now = request.now;
-        let decoded = self
-            .runtime
-            .web_transport()
-            .decode_presented_cookies_from_headers(headers)
-            .map_err(AuthPostgresWebRuntimeExecutionError::web)?;
-        let attempt_id =
-            super::active_proof_support::require_active_proof_continuation_for_use_before_state_load(
-                decoded.presented_cookies(),
-                now,
-                ProofUse::RecoverOrReplaceCredential,
-            )
-            .map_err(AuthPostgresWebRuntimeExecutionError::core)?
-            .attempt_id
-            .clone();
-        let (presented_cookies, presented_cookie_secrets) = decoded.into_parts();
-        let loaded_state_contract =
-            CommandLoadedStateContract::for_recover_or_replace_credential_lifecycle_request(
-                self.runtime.config(),
-                &attempt_id,
-                &presented_cookies,
-            )
-            .map_err(AuthPostgresWebRuntimeExecutionError::core)?;
-        let prepared_storage_boundary_contract =
-            PreparedStorageBoundaryContract::for_loaded_state_contract(&loaded_state_contract);
-        let mut tx = self.begin_runtime_transaction().await?;
-        let loaded = match self
-            .store
-            .load_state_in_current_transaction(
-                &mut tx,
-                AuthLoadStateRequest::new(
-                    now,
-                    &presented_cookies,
-                    &presented_cookie_secrets,
-                    &loaded_state_contract,
-                    &prepared_storage_boundary_contract,
-                ),
-            )
-            .await
-        {
-            Ok(loaded) => loaded,
-            Err(error) => {
-                return Err(rollback_after_store_error("auth_core.runtime.load", tx, error).await);
-            }
-        };
-        if let Err(error) = loaded_state_contract.validate_loaded_state(&loaded) {
-            return Err(
-                rollback_after_core_error("auth_core.runtime.validate_load", tx, error).await,
-            );
-        }
-        let attempt = match super::active_proof::validate_active_proof_attempt_satisfies_use(
-            &self.runtime.config().proof_policy,
-            &loaded,
-            &attempt_id,
-            now,
-            ProofUse::RecoverOrReplaceCredential,
-        ) {
-            Ok(attempt) => attempt,
-            Err(error) => {
-                return Err(rollback_after_core_error(
-                    "auth_core.runtime.validate_recovery_attempt",
-                    tx,
-                    error,
-                )
-                .await);
-            }
-        };
-        let evidence_sources =
-            match lifecycle_authority_sources_from_satisfied_proofs(&attempt.satisfied_proofs) {
-                Ok(sources) => sources,
-                Err(error) => {
-                    return Err(rollback_after_core_error(
-                        "auth_core.runtime.derive_lifecycle_evidence",
-                        tx,
-                        error,
-                    )
-                    .await);
-                }
-            };
-        let active_proof_attempt_to_close = attempt.clone();
-        let lifecycle_context = match self
-            .store
-            .load_credential_lifecycle_action_context_in_current_transaction(
-                &mut tx,
-                &request.target_credential_instance_id,
-                &evidence_sources,
-            )
-            .await
-        {
-            Ok(Some(context)) => context,
-            Ok(None) => {
-                return Err(rollback_after_core_error(
-                    "auth_core.runtime.load_credential_lifecycle_context",
-                    tx,
-                    Error::CredentialLifecycleActionNotAuthorized,
-                )
-                .await);
-            }
-            Err(error) => {
-                return Err(rollback_after_store_error(
-                    "auth_core.runtime.load_credential_lifecycle_context",
-                    tx,
-                    error,
-                )
-                .await);
-            }
-        };
-        if let Err(error) = super::active_proof::ensure_active_proof_attempt_matches_subject(
-            &active_proof_attempt_to_close,
-            lifecycle_context.target_credential().subject_id(),
-        ) {
-            return Err(rollback_after_core_error(
-                "auth_core.runtime.validate_recovery_attempt_subject",
-                tx,
-                error,
-            )
-            .await);
-        }
-        let pending_action =
-            match pending_credential_reset_schedule_from_timing(request.pending_action_timing) {
-                Ok(pending_action) => pending_action,
-                Err(error) => {
-                    return Err(rollback_after_runtime_error(
-                        "auth_core.runtime.prepare",
-                        tx,
-                        error,
-                    )
-                    .await);
-                }
-            };
-        let command = Command::PlanCredentialReset(PlanCredentialReset {
-            now,
-            lifecycle_context,
-            active_proof_attempt_to_close: Some(active_proof_attempt_to_close),
-            independent_evidence_required: request.independent_evidence_required,
-            pending_action,
-            immediate_subject_auth_revocation: request.immediate_subject_auth_revocation,
-        });
-        let prepared = match PreparedCommandExecution::prepare(
-            self.runtime.config(),
-            command,
-            presented_cookies,
-        ) {
-            Ok(prepared) => prepared,
-            Err(error) => {
-                return Err(
-                    rollback_after_core_error("auth_core.runtime.prepare", tx, error).await,
-                );
-            }
-        };
-        self.commit_runtime_owned_prepared_command_inside_open_transaction(
-            "auth_core.runtime.unauthenticated_credential_reset_planning",
-            now,
-            tx,
-            prepared,
-            presented_cookie_secrets,
-        )
-        .await
-    }
-
-    pub(crate) async fn execute_authenticated_credential_reset_from_headers(
-        &self,
-        headers: &HeaderMap,
-        request: ExecuteAuthenticatedCredentialResetInput,
-    ) -> Result<AuthWebRuntimeExecution, AuthPostgresWebRuntimeExecutionError> {
-        let now = request.now;
-        let decoded = self
-            .runtime
-            .web_transport()
-            .decode_presented_cookies_from_headers(headers)
-            .map_err(AuthPostgresWebRuntimeExecutionError::web)?;
-        let (presented_cookies, presented_cookie_secrets) = decoded.into_parts();
-        let loaded_state_contract =
-            CommandLoadedStateContract::for_authenticated_session_lifecycle_request(
-                self.runtime.config(),
-                now,
-                &presented_cookies,
-            )
-            .map_err(AuthPostgresWebRuntimeExecutionError::core)?;
-        let prepared_storage_boundary_contract =
-            PreparedStorageBoundaryContract::for_loaded_state_contract(&loaded_state_contract);
-        let mut tx = self.begin_runtime_transaction().await?;
-        let loaded = match self
-            .store
-            .load_state_in_current_transaction(
-                &mut tx,
-                AuthLoadStateRequest::new(
-                    now,
-                    &presented_cookies,
-                    &presented_cookie_secrets,
-                    &loaded_state_contract,
-                    &prepared_storage_boundary_contract,
-                ),
-            )
-            .await
-        {
-            Ok(loaded) => loaded,
-            Err(error) => {
-                return Err(rollback_after_store_error("auth_core.runtime.load", tx, error).await);
-            }
-        };
-        if let Err(error) = loaded_state_contract.validate_loaded_state(&loaded) {
-            return Err(
-                rollback_after_core_error("auth_core.runtime.validate_load", tx, error).await,
-            );
-        }
-        let Some(session) = live_authenticated_session_record_for_lifecycle_request(now, &loaded)
-            .map_err(AuthPostgresWebRuntimeExecutionError::core)?
-        else {
-            if let Err(error) = tx.rollback().await {
-                return Err(AuthPostgresWebRuntimeExecutionError::store(
-                    PostgresAuthStoreError::Database(error),
-                ));
-            }
-            return Ok(AuthWebRuntimeExecution::new(
-                Outcome::NeedsFullAuthentication,
-                AuthSetCookieHeaders::default(),
-            ));
-        };
-        let evidence_sources = [LifecycleAuthoritySource::AuthenticatedSession(
-            session.session_id.clone(),
-        )];
-        let lifecycle_context = match self
-            .store
-            .load_credential_lifecycle_action_context_in_current_transaction(
-                &mut tx,
-                &request.target_credential_instance_id,
-                &evidence_sources,
-            )
-            .await
-        {
-            Ok(Some(context)) => context,
-            Ok(None) => {
-                return Err(rollback_after_core_error(
-                    "auth_core.runtime.load_credential_lifecycle_context",
-                    tx,
-                    Error::CredentialLifecycleActionNotAuthorized,
-                )
-                .await);
-            }
-            Err(error) => {
-                return Err(rollback_after_store_error(
-                    "auth_core.runtime.load_credential_lifecycle_context",
-                    tx,
-                    error,
-                )
-                .await);
-            }
-        };
-        let method_commit_work = match self.method_registry() {
-            Ok(registry) => {
-                match registry
-                    .build_credential_reset_commit_work(
-                        &mut tx,
-                        CredentialResetMethodWorkBuildRequest {
-                            now,
-                            target_credential: lifecycle_context.target_credential(),
-                            method_payload: &request.method_payload,
-                            authority: CredentialResetMethodWorkAuthority::Immediate {
-                                lifecycle_context: &lifecycle_context,
-                            },
-                        },
-                    )
-                    .await
-                    .map_err(AuthPostgresWebRuntimeExecutionError::method_build)
-                {
-                    Ok(work) => work,
-                    Err(error) => {
-                        return Err(rollback_after_runtime_error(
-                            "auth_core.runtime.build_credential_reset_work",
-                            tx,
-                            error,
-                        )
-                        .await);
-                    }
-                }
-            }
-            Err(error) => {
-                return Err(rollback_after_runtime_error(
-                    "auth_core.runtime.build_credential_reset_work",
-                    tx,
-                    error,
-                )
-                .await);
-            }
-        };
-        let command = Command::ExecuteCredentialReset(ExecuteCredentialReset {
-            now,
-            execution_authority: CredentialResetExecutionAuthority::Immediate {
-                lifecycle_context,
-                independent_evidence_required: request.independent_evidence_required,
-            },
-            method_commit_work,
-            subject_auth_revocation: request.subject_auth_revocation,
-        });
-        let prepared = match PreparedCommandExecution::prepare(
-            self.runtime.config(),
-            command,
-            presented_cookies,
-        ) {
-            Ok(prepared) => prepared,
-            Err(error) => {
-                return Err(
-                    rollback_after_core_error("auth_core.runtime.prepare", tx, error).await,
-                );
-            }
-        };
-        self.commit_runtime_owned_prepared_command_inside_open_transaction(
-            "auth_core.runtime.authenticated_credential_reset",
-            now,
-            tx,
-            prepared,
-            presented_cookie_secrets,
-        )
-        .await
-    }
-
-    pub(crate) async fn execute_mature_pending_credential_reset_from_headers(
-        &self,
-        headers: &HeaderMap,
-        request: ExecuteMaturePendingCredentialResetInput,
-    ) -> Result<AuthWebRuntimeExecution, AuthPostgresWebRuntimeExecutionError> {
-        let now = request.now;
-        let decoded = self
-            .runtime
-            .web_transport()
-            .decode_presented_cookies_from_headers(headers)
-            .map_err(AuthPostgresWebRuntimeExecutionError::web)?;
-        let (presented_cookies, presented_cookie_secrets) = decoded.into_parts();
-        let mut tx = self.begin_runtime_transaction().await?;
-        let (target_credential, pending_action) = match self
-            .store
-            .load_pending_credential_reset_execution_authority_in_current_transaction(
-                &mut tx,
-                &request.pending_action_id,
-            )
-            .await
-        {
-            Ok(Some(authority)) => authority,
-            Ok(None) => {
-                return Err(rollback_after_core_error(
-                    "auth_core.runtime.load_pending_credential_reset",
-                    tx,
-                    Error::PendingCredentialLifecycleActionNotExecutable,
-                )
-                .await);
-            }
-            Err(error) => {
-                return Err(rollback_after_store_error(
-                    "auth_core.runtime.load_pending_credential_reset",
-                    tx,
-                    error,
-                )
-                .await);
-            }
-        };
-        let method_commit_work = match self.method_registry() {
-            Ok(registry) => {
-                match registry
-                    .build_credential_reset_commit_work(
-                        &mut tx,
-                        CredentialResetMethodWorkBuildRequest {
-                            now,
-                            target_credential: &target_credential,
-                            method_payload: &request.method_payload,
-                            authority: CredentialResetMethodWorkAuthority::MaturePendingAction {
-                                pending_action: &pending_action,
-                            },
-                        },
-                    )
-                    .await
-                    .map_err(AuthPostgresWebRuntimeExecutionError::method_build)
-                {
-                    Ok(work) => work,
-                    Err(error) => {
-                        return Err(rollback_after_runtime_error(
-                            "auth_core.runtime.build_credential_reset_work",
-                            tx,
-                            error,
-                        )
-                        .await);
-                    }
-                }
-            }
-            Err(error) => {
-                return Err(rollback_after_runtime_error(
-                    "auth_core.runtime.build_credential_reset_work",
-                    tx,
-                    error,
-                )
-                .await);
-            }
-        };
-        let command = Command::ExecuteCredentialReset(ExecuteCredentialReset {
-            now,
-            execution_authority: CredentialResetExecutionAuthority::MaturePendingAction {
-                target_credential,
-                pending_action,
-            },
-            method_commit_work,
-            subject_auth_revocation: request.subject_auth_revocation,
-        });
-        let prepared = match PreparedCommandExecution::prepare(
-            self.runtime.config(),
-            command,
-            presented_cookies,
-        ) {
-            Ok(prepared) => prepared,
-            Err(error) => {
-                return Err(
-                    rollback_after_core_error("auth_core.runtime.prepare", tx, error).await,
-                );
-            }
-        };
-        self.commit_runtime_owned_prepared_command_inside_open_transaction(
-            "auth_core.runtime.mature_pending_credential_reset",
-            now,
-            tx,
-            prepared,
-            presented_cookie_secrets,
-        )
-        .await
-    }
-
-    pub(crate) async fn execute_authenticated_pending_credential_reset_cancellation_from_headers(
-        &self,
-        headers: &HeaderMap,
-        request: CancelAuthenticatedPendingCredentialResetInput,
-    ) -> Result<AuthWebRuntimeExecution, AuthPostgresWebRuntimeExecutionError> {
-        let now = request.now;
-        let decoded = self
-            .runtime
-            .web_transport()
-            .decode_presented_cookies_from_headers(headers)
-            .map_err(AuthPostgresWebRuntimeExecutionError::web)?;
-        let (presented_cookies, presented_cookie_secrets) = decoded.into_parts();
-        let loaded_state_contract =
-            CommandLoadedStateContract::for_authenticated_session_lifecycle_request(
-                self.runtime.config(),
-                now,
-                &presented_cookies,
-            )
-            .map_err(AuthPostgresWebRuntimeExecutionError::core)?;
-        let prepared_storage_boundary_contract =
-            PreparedStorageBoundaryContract::for_loaded_state_contract(&loaded_state_contract);
-        let mut tx = self.begin_runtime_transaction().await?;
-        let loaded = match self
-            .store
-            .load_state_in_current_transaction(
-                &mut tx,
-                AuthLoadStateRequest::new(
-                    now,
-                    &presented_cookies,
-                    &presented_cookie_secrets,
-                    &loaded_state_contract,
-                    &prepared_storage_boundary_contract,
-                ),
-            )
-            .await
-        {
-            Ok(loaded) => loaded,
-            Err(error) => {
-                return Err(rollback_after_store_error("auth_core.runtime.load", tx, error).await);
-            }
-        };
-        if let Err(error) = loaded_state_contract.validate_loaded_state(&loaded) {
-            return Err(
-                rollback_after_core_error("auth_core.runtime.validate_load", tx, error).await,
-            );
-        }
-        let Some(session) = live_authenticated_session_record_for_lifecycle_request(now, &loaded)
-            .map_err(AuthPostgresWebRuntimeExecutionError::core)?
-        else {
-            if let Err(error) = tx.rollback().await {
-                return Err(AuthPostgresWebRuntimeExecutionError::store(
-                    PostgresAuthStoreError::Database(error),
-                ));
-            }
-            return Ok(AuthWebRuntimeExecution::new(
-                Outcome::NeedsFullAuthentication,
-                AuthSetCookieHeaders::default(),
-            ));
-        };
-        let (target_credential, pending_action) = match self
-            .store
-            .load_pending_credential_reset_for_cancellation_in_current_transaction(
-                &mut tx,
-                &request.pending_action_id,
-            )
-            .await
-        {
-            Ok(Some(authority)) => authority,
-            Ok(None) => {
-                return Err(rollback_after_core_error(
-                    "auth_core.runtime.load_pending_credential_reset_cancellation",
-                    tx,
-                    Error::PendingCredentialLifecycleActionNotCancellable,
-                )
-                .await);
-            }
-            Err(error) => {
-                return Err(rollback_after_store_error(
-                    "auth_core.runtime.load_pending_credential_reset_cancellation",
-                    tx,
-                    error,
-                )
-                .await);
-            }
-        };
-        if pending_action.subject_id != session.subject_id {
-            return Err(rollback_after_core_error(
-                "auth_core.runtime.validate_pending_credential_reset_cancellation_subject",
-                tx,
-                Error::CredentialLifecycleActionNotAuthorized,
-            )
-            .await);
-        }
-        let command = Command::CancelPendingCredentialReset(CancelPendingCredentialReset {
-            now,
-            target_credential,
-            pending_action,
-        });
-        let prepared = match PreparedCommandExecution::prepare(
-            self.runtime.config(),
-            command,
-            presented_cookies,
-        ) {
-            Ok(prepared) => prepared,
-            Err(error) => {
-                return Err(
-                    rollback_after_core_error("auth_core.runtime.prepare", tx, error).await,
-                );
-            }
-        };
-        self.commit_runtime_owned_prepared_command_inside_open_transaction(
-            "auth_core.runtime.authenticated_pending_credential_reset_cancellation",
-            now,
-            tx,
-            prepared,
-            presented_cookie_secrets,
-        )
-        .await
-    }
-
-    pub(crate) async fn execute_mature_pending_credential_lifecycle_action_from_headers(
-        &self,
-        headers: &HeaderMap,
-        request: ExecuteMaturePendingCredentialLifecycleActionInput,
-    ) -> Result<AuthWebRuntimeExecution, AuthPostgresWebRuntimeExecutionError> {
-        let now = request.now;
-        let decoded = self
-            .runtime
-            .web_transport()
-            .decode_presented_cookies_from_headers(headers)
-            .map_err(AuthPostgresWebRuntimeExecutionError::web)?;
-        let (presented_cookies, presented_cookie_secrets) = decoded.into_parts();
-        let mut tx = self.begin_runtime_transaction().await?;
-        let (target_credential, pending_action) = match self
-            .store
-            .load_pending_credential_lifecycle_action_with_target_in_current_transaction(
-                &mut tx,
-                &request.pending_action_id,
-            )
-            .await
-        {
-            Ok(Some(authority)) => authority,
-            Ok(None) => {
-                return Err(rollback_after_core_error(
-                    "auth_core.runtime.load_pending_credential_lifecycle_action",
-                    tx,
-                    Error::PendingCredentialLifecycleActionNotExecutable,
-                )
-                .await);
-            }
-            Err(error) => {
-                return Err(rollback_after_store_error(
-                    "auth_core.runtime.load_pending_credential_lifecycle_action",
-                    tx,
-                    error,
-                )
-                .await);
-            }
-        };
-        let method_commit_work = match pending_action.action {
-            CredentialLifecycleAction::Replace | CredentialLifecycleAction::Regenerate => {
-                let Some(method_payload) = request.method_payload.as_ref() else {
-                    return Err(rollback_after_core_error(
-                        "auth_core.runtime.build_credential_lifecycle_work",
-                        tx,
-                        Error::CredentialLifecycleExecutionMissingMethodCommitWork,
-                    )
-                    .await);
-                };
-                match self.method_registry() {
-                    Ok(registry) => {
-                        match registry
-                            .build_credential_lifecycle_commit_work(
-                                &mut tx,
-                                CredentialLifecycleMethodWorkBuildRequest {
-                                    now,
-                                    target_credential: &target_credential,
-                                    pending_action: &pending_action,
-                                    method_payload,
-                                },
-                            )
-                            .await
-                            .map_err(AuthPostgresWebRuntimeExecutionError::method_build)
-                        {
-                            Ok(work) => work,
-                            Err(error) => {
-                                return Err(rollback_after_runtime_error(
-                                    "auth_core.runtime.build_credential_lifecycle_work",
-                                    tx,
-                                    error,
-                                )
-                                .await);
-                            }
-                        }
-                    }
-                    Err(error) => {
-                        return Err(rollback_after_runtime_error(
-                            "auth_core.runtime.build_credential_lifecycle_work",
-                            tx,
-                            error,
-                        )
-                        .await);
-                    }
-                }
-            }
-            CredentialLifecycleAction::Remove => {
-                if request.method_payload.is_some() {
-                    return Err(rollback_after_core_error(
-                        "auth_core.runtime.build_credential_lifecycle_work",
-                        tx,
-                        Error::CredentialLifecycleExecutionUnexpectedMethodCommitWork,
-                    )
-                    .await);
-                }
-                Vec::new()
-            }
-            CredentialLifecycleAction::Reset => {
-                return Err(rollback_after_core_error(
-                    "auth_core.runtime.build_credential_lifecycle_work",
-                    tx,
-                    Error::NonResetPendingCredentialLifecycleActionCannotBeReset,
-                )
-                .await);
-            }
-            CredentialLifecycleAction::Create
-            | CredentialLifecycleAction::Disable
-            | CredentialLifecycleAction::RecoverSubjectAccess => {
-                return Err(rollback_after_core_error(
-                    "auth_core.runtime.build_credential_lifecycle_work",
-                    tx,
-                    Error::CredentialLifecycleActionNotAuthorized,
-                )
-                .await);
-            }
-        };
-        let command = Command::ExecuteNonResetPendingCredentialLifecycleAction(
-            ExecuteNonResetPendingCredentialLifecycleAction {
-                now,
-                target_credential,
-                pending_action,
-                method_commit_work,
-                subject_auth_revocation: request.subject_auth_revocation,
-            },
-        );
-        let prepared = match PreparedCommandExecution::prepare(
-            self.runtime.config(),
-            command,
-            presented_cookies,
-        ) {
-            Ok(prepared) => prepared,
-            Err(error) => {
-                return Err(
-                    rollback_after_core_error("auth_core.runtime.prepare", tx, error).await,
-                );
-            }
-        };
-        self.commit_runtime_owned_prepared_command_inside_open_transaction(
-            "auth_core.runtime.mature_pending_credential_lifecycle_action",
-            now,
-            tx,
-            prepared,
-            presented_cookie_secrets,
-        )
-        .await
-    }
-
-    pub(crate) async fn execute_authenticated_pending_credential_lifecycle_action_cancellation_from_headers(
-        &self,
-        headers: &HeaderMap,
-        request: CancelAuthenticatedPendingCredentialLifecycleActionInput,
-    ) -> Result<AuthWebRuntimeExecution, AuthPostgresWebRuntimeExecutionError> {
-        let now = request.now;
-        let decoded = self
-            .runtime
-            .web_transport()
-            .decode_presented_cookies_from_headers(headers)
-            .map_err(AuthPostgresWebRuntimeExecutionError::web)?;
-        let (presented_cookies, presented_cookie_secrets) = decoded.into_parts();
-        let loaded_state_contract =
-            CommandLoadedStateContract::for_authenticated_session_lifecycle_request(
-                self.runtime.config(),
-                now,
-                &presented_cookies,
-            )
-            .map_err(AuthPostgresWebRuntimeExecutionError::core)?;
-        let prepared_storage_boundary_contract =
-            PreparedStorageBoundaryContract::for_loaded_state_contract(&loaded_state_contract);
-        let mut tx = self.begin_runtime_transaction().await?;
-        let loaded = match self
-            .store
-            .load_state_in_current_transaction(
-                &mut tx,
-                AuthLoadStateRequest::new(
-                    now,
-                    &presented_cookies,
-                    &presented_cookie_secrets,
-                    &loaded_state_contract,
-                    &prepared_storage_boundary_contract,
-                ),
-            )
-            .await
-        {
-            Ok(loaded) => loaded,
-            Err(error) => {
-                return Err(rollback_after_store_error("auth_core.runtime.load", tx, error).await);
-            }
-        };
-        if let Err(error) = loaded_state_contract.validate_loaded_state(&loaded) {
-            return Err(
-                rollback_after_core_error("auth_core.runtime.validate_load", tx, error).await,
-            );
-        }
-        let Some(session) = live_authenticated_session_record_for_lifecycle_request(now, &loaded)
-            .map_err(AuthPostgresWebRuntimeExecutionError::core)?
-        else {
-            if let Err(error) = tx.rollback().await {
-                return Err(AuthPostgresWebRuntimeExecutionError::store(
-                    PostgresAuthStoreError::Database(error),
-                ));
-            }
-            return Ok(AuthWebRuntimeExecution::new(
-                Outcome::NeedsFullAuthentication,
-                AuthSetCookieHeaders::default(),
-            ));
-        };
-        let (target_credential, pending_action) = match self
-            .store
-            .load_pending_credential_lifecycle_action_with_target_in_current_transaction(
-                &mut tx,
-                &request.pending_action_id,
-            )
-            .await
-        {
-            Ok(Some(authority)) => authority,
-            Ok(None) => {
-                return Err(rollback_after_core_error(
-                    "auth_core.runtime.load_pending_credential_lifecycle_action_cancellation",
-                    tx,
-                    Error::PendingCredentialLifecycleActionNotCancellable,
-                )
-                .await);
-            }
-            Err(error) => {
-                return Err(rollback_after_store_error(
-                    "auth_core.runtime.load_pending_credential_lifecycle_action_cancellation",
-                    tx,
-                    error,
-                )
-                .await);
-            }
-        };
-        if pending_action.subject_id != session.subject_id {
-            return Err(rollback_after_core_error(
-                "auth_core.runtime.validate_pending_credential_lifecycle_action_cancellation_subject",
-                tx,
-                Error::CredentialLifecycleActionNotAuthorized,
-            )
-            .await);
-        }
-        let command = Command::CancelNonResetPendingCredentialLifecycleAction(
-            CancelNonResetPendingCredentialLifecycleAction {
-                now,
-                target_credential,
-                pending_action,
-            },
-        );
-        let prepared = match PreparedCommandExecution::prepare(
-            self.runtime.config(),
-            command,
-            presented_cookies,
-        ) {
-            Ok(prepared) => prepared,
-            Err(error) => {
-                return Err(
-                    rollback_after_core_error("auth_core.runtime.prepare", tx, error).await,
-                );
-            }
-        };
-        self.commit_runtime_owned_prepared_command_inside_open_transaction(
-            "auth_core.runtime.authenticated_pending_credential_lifecycle_action_cancellation",
-            now,
-            tx,
-            prepared,
-            presented_cookie_secrets,
-        )
-        .await
-    }
-
-    pub(crate) async fn execute_mature_pending_subject_auth_state_deletion_from_headers(
-        &self,
-        headers: &HeaderMap,
-        request: ExecuteMaturePendingSubjectAuthStateDeletionInput,
-    ) -> Result<AuthWebRuntimeExecution, AuthPostgresWebRuntimeExecutionError> {
-        let now = request.now;
-        let decoded = self
-            .runtime
-            .web_transport()
-            .decode_presented_cookies_from_headers(headers)
-            .map_err(AuthPostgresWebRuntimeExecutionError::web)?;
-        let (presented_cookies, presented_cookie_secrets) = decoded.into_parts();
-        let mut tx = self.begin_runtime_transaction().await?;
-        let pending_action = match self
-            .store
-            .load_pending_subject_auth_state_deletion_for_execution_in_current_transaction(
-                &mut tx,
-                &request.pending_action_id,
-            )
-            .await
-        {
-            Ok(Some(pending_action)) => pending_action,
-            Ok(None) => {
-                return Err(rollback_after_core_error(
-                    "auth_core.runtime.load_pending_subject_auth_state_deletion",
-                    tx,
-                    Error::PendingSubjectLifecycleActionNotExecutable,
-                )
-                .await);
-            }
-            Err(error) => {
-                return Err(rollback_after_store_error(
-                    "auth_core.runtime.load_pending_subject_auth_state_deletion",
-                    tx,
-                    error,
-                )
-                .await);
-            }
-        };
-        let command = Command::ExecutePendingSubjectAuthStateDeletion(
-            ExecutePendingSubjectAuthStateDeletion {
-                now,
-                pending_action,
-            },
-        );
-        let prepared = match PreparedCommandExecution::prepare(
-            self.runtime.config(),
-            command,
-            presented_cookies,
-        ) {
-            Ok(prepared) => prepared,
-            Err(error) => {
-                return Err(
-                    rollback_after_core_error("auth_core.runtime.prepare", tx, error).await,
-                );
-            }
-        };
-        self.commit_runtime_owned_prepared_command_inside_open_transaction(
-            "auth_core.runtime.mature_pending_subject_auth_state_deletion",
-            now,
-            tx,
-            prepared,
-            presented_cookie_secrets,
-        )
-        .await
-    }
-
-    pub(crate) async fn execute_authenticated_pending_subject_auth_state_deletion_cancellation_from_headers(
-        &self,
-        headers: &HeaderMap,
-        request: CancelAuthenticatedPendingSubjectAuthStateDeletionInput,
-    ) -> Result<AuthWebRuntimeExecution, AuthPostgresWebRuntimeExecutionError> {
-        let now = request.now;
-        let decoded = self
-            .runtime
-            .web_transport()
-            .decode_presented_cookies_from_headers(headers)
-            .map_err(AuthPostgresWebRuntimeExecutionError::web)?;
-        let (presented_cookies, presented_cookie_secrets) = decoded.into_parts();
-        let loaded_state_contract =
-            CommandLoadedStateContract::for_authenticated_session_lifecycle_request(
-                self.runtime.config(),
-                now,
-                &presented_cookies,
-            )
-            .map_err(AuthPostgresWebRuntimeExecutionError::core)?;
-        let prepared_storage_boundary_contract =
-            PreparedStorageBoundaryContract::for_loaded_state_contract(&loaded_state_contract);
-        let mut tx = self.begin_runtime_transaction().await?;
-        let loaded = match self
-            .store
-            .load_state_in_current_transaction(
-                &mut tx,
-                AuthLoadStateRequest::new(
-                    now,
-                    &presented_cookies,
-                    &presented_cookie_secrets,
-                    &loaded_state_contract,
-                    &prepared_storage_boundary_contract,
-                ),
-            )
-            .await
-        {
-            Ok(loaded) => loaded,
-            Err(error) => {
-                return Err(rollback_after_store_error("auth_core.runtime.load", tx, error).await);
-            }
-        };
-        if let Err(error) = loaded_state_contract.validate_loaded_state(&loaded) {
-            return Err(
-                rollback_after_core_error("auth_core.runtime.validate_load", tx, error).await,
-            );
-        }
-        let Some(session) = live_authenticated_session_record_for_lifecycle_request(now, &loaded)
-            .map_err(AuthPostgresWebRuntimeExecutionError::core)?
-        else {
-            if let Err(error) = tx.rollback().await {
-                return Err(AuthPostgresWebRuntimeExecutionError::store(
-                    PostgresAuthStoreError::Database(error),
-                ));
-            }
-            return Ok(AuthWebRuntimeExecution::new(
-                Outcome::NeedsFullAuthentication,
-                AuthSetCookieHeaders::default(),
-            ));
-        };
-        let pending_action = match self
-            .store
-            .load_pending_subject_auth_state_deletion_for_cancellation_in_current_transaction(
-                &mut tx,
-                &request.pending_action_id,
-            )
-            .await
-        {
-            Ok(Some(pending_action)) => pending_action,
-            Ok(None) => {
-                return Err(rollback_after_core_error(
-                    "auth_core.runtime.load_pending_subject_auth_state_deletion_cancellation",
-                    tx,
-                    Error::PendingSubjectLifecycleActionNotCancellable,
-                )
-                .await);
-            }
-            Err(error) => {
-                return Err(rollback_after_store_error(
-                    "auth_core.runtime.load_pending_subject_auth_state_deletion_cancellation",
-                    tx,
-                    error,
-                )
-                .await);
-            }
-        };
-        if pending_action.subject_id != session.subject_id {
-            return Err(rollback_after_core_error(
-                "auth_core.runtime.validate_pending_subject_auth_state_deletion_cancellation_subject",
-                tx,
-                Error::CredentialLifecycleActionNotAuthorized,
-            )
-            .await);
-        }
-        let command =
-            Command::CancelPendingSubjectAuthStateDeletion(CancelPendingSubjectAuthStateDeletion {
-                now,
-                pending_action,
-            });
-        let prepared = match PreparedCommandExecution::prepare(
-            self.runtime.config(),
-            command,
-            presented_cookies,
-        ) {
-            Ok(prepared) => prepared,
-            Err(error) => {
-                return Err(
-                    rollback_after_core_error("auth_core.runtime.prepare", tx, error).await,
-                );
-            }
-        };
-        self.commit_runtime_owned_prepared_command_inside_open_transaction(
-            "auth_core.runtime.authenticated_pending_subject_auth_state_deletion_cancellation",
-            now,
-            tx,
-            prepared,
-            presented_cookie_secrets,
-        )
-        .await
+            .issue_csrf_token_cookie_if_needed_for_request(request)
+            .map_err(AuthPostgresWebRuntimeExecutionError::web)
     }
 
     async fn commit_runtime_owned_prepared_command_inside_open_transaction(
@@ -3255,6 +512,30 @@ impl PostgresAuthWebRuntime {
             .map_err(AuthPostgresWebRuntimeExecutionError::store)
     }
 
+    async fn load_credential_lifecycle_context_for_unauthenticated_reset_method_in_current_transaction(
+        &self,
+        tx: &mut Tx<'_>,
+        target_method: &ProofMethodDeclaration,
+        recovery_attempt: &ActiveProofAttemptRecord,
+        evidence_sources: &[LifecycleAuthoritySource],
+    ) -> Result<Option<CredentialLifecycleActionContext>, PostgresAuthStoreError> {
+        let Some(recovered_subject_id) = recovery_attempt.subject_id.as_ref() else {
+            return Err(PostgresAuthStoreError::Core(
+                Error::LoadedStateContradiction(
+                    "recovery active-proof attempt is not subject-bound",
+                ),
+            ));
+        };
+        self.store
+            .load_credential_lifecycle_action_context_for_subject_and_method_in_current_transaction(
+                tx,
+                recovered_subject_id,
+                target_method,
+                evidence_sources,
+            )
+            .await
+    }
+
     fn finish_without_atomic_commit(
         &self,
         now: UnixSeconds,
@@ -3352,6 +633,49 @@ fn command_from_known_subject_active_proof_method_response(
                 challenge_id: None,
                 method: response.method,
                 weak_proof_gate,
+            }),
+        ),
+    }
+}
+
+fn command_from_recovery_credential_active_proof_method_response(
+    response: CompleteRecoveryCredentialActiveProofMethodResponse,
+    attempt_id: ActiveProofAttemptId,
+    candidate_subject_id: SubjectId,
+    verification: RecoveryCredentialActiveProofMethodVerification,
+) -> Result<Command, Error> {
+    match verification {
+        RecoveryCredentialActiveProofMethodVerification::Accepted(verified) => {
+            let (verified_proof, method_commit_work) = verified.into_parts();
+            if verified_proof.proof() != &response.method.verified_proof_summary() {
+                return Err(Error::LoadedStateContradiction(
+                    "recovery credential method verified a different proof",
+                ));
+            }
+            if verified_proof.subject_id() != Some(&candidate_subject_id) {
+                return Err(Error::LoadedStateContradiction(
+                    "recovery credential method verified a different subject",
+                ));
+            }
+            Ok(Command::CompleteActiveProofChallenge(
+                CompleteActiveProofChallenge {
+                    now: response.now,
+                    attempt_id,
+                    challenge_id: None,
+                    verified_proof,
+                    stateless_fast_fail: StatelessFastFailStatus::NotRequired,
+                    weak_proof_gate: WeakProofGateStatus::NotRequired,
+                    method_commit_work,
+                },
+            ))
+        }
+        RecoveryCredentialActiveProofMethodVerification::Rejected => Ok(
+            Command::RecordActiveProofFailure(RecordActiveProofFailure {
+                now: response.now,
+                attempt_id,
+                challenge_id: None,
+                method: response.method,
+                weak_proof_gate: WeakProofGateStatus::NotRequired,
             }),
         ),
     }
@@ -3467,19 +791,172 @@ fn loaded_state_from_presented_cookies(presented_cookies: &PresentedAuthCookies)
     }
 }
 
-fn pending_credential_reset_schedule_from_timing(
-    timing: Option<CredentialResetPendingActionTiming>,
+fn pending_credential_reset_schedule_from_policy(
+    now: UnixSeconds,
+    timing: Option<DelayedLifecycleActionTimingPolicy>,
+) -> Result<Option<PendingCredentialLifecycleActionSchedule>, AuthPostgresWebRuntimeExecutionError>
+{
+    pending_credential_lifecycle_action_schedule_from_policy(now, timing)
+}
+
+fn pending_credential_lifecycle_action_schedule_from_policy(
+    now: UnixSeconds,
+    timing: Option<DelayedLifecycleActionTimingPolicy>,
 ) -> Result<Option<PendingCredentialLifecycleActionSchedule>, AuthPostgresWebRuntimeExecutionError>
 {
     timing
         .map(|timing| {
-            Ok(PendingCredentialLifecycleActionSchedule {
-                pending_action_id: generate_auth_id()?,
-                earliest_execute_at: timing.earliest_execute_at,
-                expires_at: timing.expires_at,
-            })
+            let pending_action_id = generate_auth_id()?;
+            timing
+                .pending_credential_lifecycle_action_schedule(now, pending_action_id)
+                .map_err(AuthPostgresWebRuntimeExecutionError::core)
         })
         .transpose()
+}
+
+fn pending_subject_lifecycle_action_schedule_from_policy(
+    now: UnixSeconds,
+    timing: Option<DelayedLifecycleActionTimingPolicy>,
+) -> Result<Option<PendingSubjectLifecycleActionSchedule>, AuthPostgresWebRuntimeExecutionError> {
+    timing
+        .map(|timing| {
+            let pending_action_id = generate_auth_id()?;
+            timing
+                .pending_subject_lifecycle_action_schedule(now, pending_action_id)
+                .map_err(AuthPostgresWebRuntimeExecutionError::core)
+        })
+        .transpose()
+}
+
+fn credential_reset_policy_for_target<'a>(
+    policies: &'a CredentialResetLifecyclePolicies,
+    lifecycle_context: &CredentialLifecycleActionContext,
+) -> &'a CredentialResetLifecyclePolicy {
+    credential_reset_policy_for_loaded_target(policies, lifecycle_context.target_credential())
+}
+
+fn credential_reset_policy_for_loaded_target<'a>(
+    policies: &'a CredentialResetLifecyclePolicies,
+    target_credential: &CredentialInstanceMetadata,
+) -> &'a CredentialResetLifecyclePolicy {
+    policies.policy_for_role(target_credential.reset_policy_role())
+}
+
+async fn build_replacement_successor_in_current_transaction(
+    store: &PostgresAuthStore,
+    tx: &mut Tx<'_>,
+    target_credential: &CredentialInstanceMetadata,
+    target_recovery_authorities: impl IntoIterator<Item = CredentialRecoveryAuthority>,
+) -> Result<CredentialReplacementSuccessor, AuthPostgresWebRuntimeExecutionError> {
+    let target_authority_ids = load_verified_proof_source_authority_ids_in_current_transaction(
+        store,
+        tx,
+        target_credential.verified_proof_source(),
+        "replacement target credential must have lifecycle authority-source metadata",
+    )
+    .await
+    .map_err(AuthPostgresWebRuntimeExecutionError::store)?;
+    CredentialReplacementSuccessor::inheriting_target_policy(
+        generate_auth_id()?,
+        target_credential,
+        target_recovery_authorities,
+        target_authority_ids,
+    )
+    .map_err(AuthPostgresWebRuntimeExecutionError::core)
+}
+
+async fn load_verified_proof_source_authority_ids_in_current_transaction(
+    store: &PostgresAuthStore,
+    tx: &mut Tx<'_>,
+    source: VerifiedProofSource,
+    missing_metadata_error: &'static str,
+) -> Result<Vec<RecoveryAuthorityId>, PostgresAuthStoreError> {
+    let authority_source = LifecycleAuthoritySource::VerifiedProofSource(source);
+    let mut loaded_evidence = store
+        .load_lifecycle_authority_evidence_for_sources_in_current_transaction(
+            tx,
+            &[authority_source],
+        )
+        .await?;
+    loaded_evidence
+        .pop()
+        .ok_or(PostgresAuthStoreError::Core(Error::InvalidConfig(
+            missing_metadata_error,
+        )))
+        .map(|evidence| evidence.authority_ids().to_vec())
+}
+
+fn lifecycle_step_up_freshness_outcome(
+    now: UnixSeconds,
+    session: &SessionRecord,
+    requirement: StepUpFreshnessRequirement,
+) -> Option<Outcome> {
+    if requirement.is_required()
+        && !super::session_lifecycle_helpers::step_up_is_fresh(session.step_up_expires_at, now)
+    {
+        return Some(Outcome::NeedsStepUp {
+            session_id: session.session_id.clone(),
+            subject_id: session.subject_id.clone(),
+        });
+    }
+    None
+}
+
+fn impossible_authenticated_lifecycle_session_outcome(
+    runtime: &AuthWebRuntime,
+    now: UnixSeconds,
+    presented_cookies: &PresentedAuthCookies,
+) -> Result<Option<AuthWebRuntimeExecution>, AuthPostgresWebRuntimeExecutionError> {
+    let Some(session_cookie) = presented_cookies.session_cookie.as_ref() else {
+        return Ok(Some(AuthWebRuntimeExecution::new(
+            Outcome::NeedsFullAuthentication,
+            AuthSetCookieHeaders::default(),
+        )));
+    };
+    if now < session_cookie.session_fast_fail_until {
+        return Ok(None);
+    }
+    let set_cookie_headers = runtime
+        .web_transport()
+        .render_set_cookie_headers(
+            now,
+            MaterializedResponseEffects::from_vec(vec![
+                MaterializedResponseEffect::DeleteSessionCookie,
+                MaterializedResponseEffect::CycleCsrfToken { session_id: None },
+            ]),
+        )
+        .map_err(AuthPostgresWebRuntimeExecutionError::web)?;
+    Ok(Some(AuthWebRuntimeExecution::new(
+        Outcome::NeedsFullAuthentication,
+        set_cookie_headers,
+    )))
+}
+
+async fn rollback_and_return_outcome(
+    tx: Tx<'_>,
+    outcome: Outcome,
+) -> Result<AuthWebRuntimeExecution, AuthPostgresWebRuntimeExecutionError> {
+    if let Err(error) = tx.rollback().await {
+        return Err(AuthPostgresWebRuntimeExecutionError::store(
+            PostgresAuthStoreError::Database(error),
+        ));
+    }
+    Ok(AuthWebRuntimeExecution::new(
+        outcome,
+        AuthSetCookieHeaders::default(),
+    ))
+}
+
+async fn rollback_and_return_credential_inventory_outcome(
+    tx: Tx<'_>,
+    outcome: MountedCredentialInventoryServiceOutcome,
+) -> Result<MountedCredentialInventoryServiceOutcome, AuthPostgresWebRuntimeExecutionError> {
+    if let Err(error) = tx.rollback().await {
+        return Err(AuthPostgresWebRuntimeExecutionError::store(
+            PostgresAuthStoreError::Database(error),
+        ));
+    }
+    Ok(outcome)
 }
 
 fn lifecycle_authority_sources_from_satisfied_proofs(

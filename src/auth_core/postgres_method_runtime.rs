@@ -1,16 +1,24 @@
 use std::collections::BTreeMap;
 use std::fmt;
 use std::future::Future;
+use std::num::NonZeroU32;
 use std::pin::Pin;
 use std::sync::Arc;
 
-use crate::db::Tx;
+use crate::db::{Tx, WritePool, WriteTx, queue};
 
+use super::postgres_durable_effect_queue::{
+    PostgresAuthDurableEffectQueueDispatchError, PostgresAuthDurableEffectQueueDispatchSummary,
+};
 use super::postgres_store::{PostgresAuthMethodCommitError, PostgresAuthMethodCommitExecutor};
-use super::*;
+use super::prelude::*;
 
 pub(crate) trait PostgresAuthMethodPlugin: Send + Sync {
     fn method(&self) -> &ProofMethodDeclaration;
+
+    fn mounted_route_capabilities(&self) -> PostgresAuthMethodMountedRouteCapabilities {
+        PostgresAuthMethodMountedRouteCapabilities::empty()
+    }
 
     fn build_out_of_band_issue(
         &self,
@@ -20,6 +28,17 @@ pub(crate) trait PostgresAuthMethodPlugin: Send + Sync {
         Err(PostgresAuthMethodBuildError::unsupported(
             self.method(),
             "out_of_band_issue",
+        ))
+    }
+
+    fn derive_out_of_band_challenge_start(
+        &self,
+        request: &PostgresOutOfBandChallengeStartBuildRequest<'_>,
+    ) -> Result<PostgresOutOfBandChallengeStartBuild, PostgresAuthMethodBuildError> {
+        let _ = request;
+        Err(PostgresAuthMethodBuildError::unsupported(
+            self.method(),
+            "out_of_band_challenge_start_derivation",
         ))
     }
 
@@ -115,7 +134,33 @@ pub(crate) trait PostgresAuthMethodPlugin: Send + Sync {
         let _ = tx;
         let _ = challenge_id;
         let _ = response;
-        Box::pin(async { Ok(PostgresOutOfBandProofResolution::new(None, None)) })
+        Box::pin(async move {
+            Err(PostgresAuthMethodBuildError::unsupported(
+                self.method(),
+                "out_of_band_proof_resolution",
+            ))
+        })
+    }
+
+    fn resolve_out_of_band_identifier_change_candidate_source<'a, 'tx>(
+        &'a self,
+        tx: &'a mut Tx<'tx>,
+        challenge_id: &'a ActiveProofChallengeId,
+    ) -> Pin<
+        Box<
+            dyn Future<Output = Result<VerifiedProofSource, PostgresAuthMethodBuildError>>
+                + Send
+                + 'a,
+        >,
+    > {
+        let _ = tx;
+        let _ = challenge_id;
+        Box::pin(async move {
+            Err(PostgresAuthMethodBuildError::unsupported(
+                self.method(),
+                "out_of_band_identifier_change_candidate_source",
+            ))
+        })
     }
 
     fn verify_active_proof_method_response_before_state_load(
@@ -197,6 +242,46 @@ pub(crate) trait PostgresAuthMethodPlugin: Send + Sync {
         })
     }
 
+    fn resolve_recovery_credential_subject_before_state_load(
+        &self,
+        continuation: &ActiveProofContinuationCookieDraft,
+        response: &CompleteRecoveryCredentialActiveProofMethodResponse,
+    ) -> Result<SubjectId, PostgresAuthMethodBuildError> {
+        let _ = continuation;
+        let _ = response;
+        Err(PostgresAuthMethodBuildError::unsupported(
+            self.method(),
+            "recovery_credential_active_proof_completion_pre_state",
+        ))
+    }
+
+    fn verify_recovery_credential_active_proof_method_response<'a, 'tx>(
+        &'a self,
+        tx: &'a mut Tx<'tx>,
+        candidate_subject_id: &'a SubjectId,
+        response: &'a CompleteRecoveryCredentialActiveProofMethodResponse,
+    ) -> Pin<
+        Box<
+            dyn Future<
+                    Output = Result<
+                        RecoveryCredentialActiveProofMethodVerification,
+                        PostgresAuthMethodBuildError,
+                    >,
+                > + Send
+                + 'a,
+        >,
+    > {
+        let _ = tx;
+        let _ = candidate_subject_id;
+        let _ = response;
+        Box::pin(async move {
+            Err(PostgresAuthMethodBuildError::unsupported(
+                self.method(),
+                "recovery_credential_active_proof_completion",
+            ))
+        })
+    }
+
     fn verify_challenge_bound_known_subject_active_proof_method_response_before_state_load(
         &self,
         challenge: &ActiveProofMethodChallengeMaterial,
@@ -266,13 +351,34 @@ pub(crate) trait PostgresAuthMethodPlugin: Send + Sync {
         })
     }
 
+    fn build_credential_creation_commit_work<'a, 'tx>(
+        &'a self,
+        tx: &'a mut Tx<'tx>,
+        request: CredentialCreationMethodWorkBuildRequest<'a>,
+    ) -> Pin<
+        Box<
+            dyn Future<Output = Result<CredentialMethodWorkBuild, PostgresAuthMethodBuildError>>
+                + Send
+                + 'a,
+        >,
+    > {
+        let _ = tx;
+        let _ = request;
+        Box::pin(async move {
+            Err(PostgresAuthMethodBuildError::unsupported(
+                self.method(),
+                "authenticated_credential_addition",
+            ))
+        })
+    }
+
     fn build_credential_lifecycle_commit_work<'a, 'tx>(
         &'a self,
         tx: &'a mut Tx<'tx>,
         request: CredentialLifecycleMethodWorkBuildRequest<'a>,
     ) -> Pin<
         Box<
-            dyn Future<Output = Result<Vec<MethodCommitWork>, PostgresAuthMethodBuildError>>
+            dyn Future<Output = Result<CredentialMethodWorkBuild, PostgresAuthMethodBuildError>>
                 + Send
                 + 'a,
         >,
@@ -281,13 +387,7 @@ pub(crate) trait PostgresAuthMethodPlugin: Send + Sync {
         Box::pin(async move {
             Err(PostgresAuthMethodBuildError::unsupported(
                 self.method(),
-                match request.pending_action.action {
-                    CredentialLifecycleAction::Replace => "mature_pending_credential_replacement",
-                    CredentialLifecycleAction::Regenerate => {
-                        "mature_pending_credential_regeneration"
-                    }
-                    _ => "mature_pending_credential_lifecycle_action",
-                },
+                unsupported_credential_lifecycle_operation_label(&request),
             ))
         })
     }
@@ -295,18 +395,12 @@ pub(crate) trait PostgresAuthMethodPlugin: Send + Sync {
     fn migrate_schema<'a, 'tx>(
         &'a self,
         tx: &'a mut Tx<'tx>,
-    ) -> Pin<Box<dyn Future<Output = Result<(), PostgresAuthMethodCommitError>> + Send + 'a>> {
-        let _ = tx;
-        Box::pin(async { Ok(()) })
-    }
+    ) -> Pin<Box<dyn Future<Output = Result<(), PostgresAuthMethodCommitError>> + Send + 'a>>;
 
     fn validate_schema<'a, 'tx>(
         &'a self,
         tx: &'a mut Tx<'tx>,
-    ) -> Pin<Box<dyn Future<Output = Result<(), PostgresAuthMethodCommitError>> + Send + 'a>> {
-        let _ = tx;
-        Box::pin(async { Ok(()) })
-    }
+    ) -> Pin<Box<dyn Future<Output = Result<(), PostgresAuthMethodCommitError>> + Send + 'a>>;
 
     fn enforce_precondition<'a, 'tx>(
         &'a self,
@@ -328,6 +422,59 @@ pub(crate) trait PostgresAuthMethodPlugin: Send + Sync {
         work: &'a MethodCommitWork,
         command: &'a MethodCommitDurableEffectCommand,
     ) -> Pin<Box<dyn Future<Output = Result<(), PostgresAuthMethodCommitError>> + Send + 'a>>;
+
+    fn register_durable_effect_queue_handlers(
+        &self,
+        task_registry: &mut queue::TaskRegistry,
+    ) -> Result<(), PostgresAuthMethodDurableEffectQueueRegistrationError>;
+
+    fn enqueue_available_durable_effects_to_queue_in_current_transaction<'a, 'tx>(
+        &'a self,
+        tx: &'a mut WriteTx<'tx>,
+        queue_store: &'a queue::Store,
+        limit: NonZeroU32,
+        enqueued_at: UnixSeconds,
+    ) -> Pin<
+        Box<
+            dyn Future<
+                    Output = Result<
+                        PostgresAuthDurableEffectQueueDispatchSummary,
+                        PostgresAuthDurableEffectQueueDispatchError,
+                    >,
+                > + Send
+                + 'a,
+        >,
+    >;
+}
+
+pub(crate) fn register_no_queue_handlers_for_method_durable_effects(
+    task_registry: &mut queue::TaskRegistry,
+) -> Result<(), PostgresAuthMethodDurableEffectQueueRegistrationError> {
+    let _ = task_registry;
+    Ok(())
+}
+
+pub(crate) fn enqueue_no_method_durable_effects_to_queue_in_current_transaction<'a, 'tx>(
+    tx: &'a mut WriteTx<'tx>,
+    queue_store: &'a queue::Store,
+    limit: NonZeroU32,
+    enqueued_at: UnixSeconds,
+) -> Pin<
+    Box<
+        dyn Future<
+                Output = Result<
+                    PostgresAuthDurableEffectQueueDispatchSummary,
+                    PostgresAuthDurableEffectQueueDispatchError,
+                >,
+            > + Send
+            + 'a,
+    >,
+> {
+    let _ = tx;
+    let _ = queue_store;
+    let _ = limit;
+    let _ = enqueued_at;
+    Box::pin(async { Ok(PostgresAuthDurableEffectQueueDispatchSummary::default()) })
 }
 
 pub(crate) struct PostgresAuthMethodRegistry {
@@ -387,12 +534,123 @@ impl PostgresAuthMethodRegistry {
         Ok(())
     }
 
+    pub(crate) fn register_durable_effect_queue_handlers(
+        &self,
+        task_registry: &mut queue::TaskRegistry,
+    ) -> Result<(), PostgresAuthMethodDurableEffectQueueRegistrationError> {
+        for plugin in self.plugins.values() {
+            plugin.register_durable_effect_queue_handlers(task_registry)?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn contains_method(&self, method: &ProofMethodDeclaration) -> bool {
+        self.plugins
+            .contains_key(&PostgresAuthMethodRegistryKey::from_method(method))
+    }
+
+    pub(crate) fn mounted_route_capabilities_for_method(
+        &self,
+        method: &ProofMethodDeclaration,
+    ) -> Option<PostgresAuthMethodMountedRouteCapabilities> {
+        self.plugins
+            .get(&PostgresAuthMethodRegistryKey::from_method(method))
+            .map(|plugin| plugin.mounted_route_capabilities())
+    }
+
+    pub(crate) fn any_method_supports_mounted_route_capability(
+        &self,
+        predicate: impl Fn(PostgresAuthMethodMountedRouteCapabilities) -> bool,
+    ) -> bool {
+        self.plugins
+            .values()
+            .any(|plugin| predicate(plugin.mounted_route_capabilities()))
+    }
+
+    pub(crate) async fn enqueue_available_method_durable_effects_to_queue(
+        &self,
+        pool: &WritePool,
+        queue_store: &queue::Store,
+        limit_per_method: NonZeroU32,
+        enqueued_at: UnixSeconds,
+    ) -> Result<
+        PostgresAuthDurableEffectQueueDispatchSummary,
+        PostgresAuthDurableEffectQueueDispatchError,
+    > {
+        const METHOD_DURABLE_EFFECT_DISPATCH_OPERATION: &str =
+            "auth_core.method_durable_effect_queue.dispatch";
+
+        let mut tx = pool.begin_transaction().await?;
+        let result = self
+            .enqueue_available_method_durable_effects_to_queue_in_current_transaction(
+                &mut tx,
+                queue_store,
+                limit_per_method,
+                enqueued_at,
+            )
+            .await;
+
+        match result {
+            Ok(summary) => {
+                tx.commit().await?;
+                Ok(summary)
+            }
+            Err(error) => {
+                let rollback_result = tx.rollback().await;
+                if let Err(rollback_error) = rollback_result {
+                    return Err(
+                        PostgresAuthDurableEffectQueueDispatchError::DatabaseOperationRollbackFailed {
+                            operation: METHOD_DURABLE_EFFECT_DISPATCH_OPERATION,
+                            operation_error: Box::new(error),
+                            rollback_error: Box::new(rollback_error),
+                        },
+                    );
+                }
+                Err(error)
+            }
+        }
+    }
+
+    pub(crate) async fn enqueue_available_method_durable_effects_to_queue_in_current_transaction(
+        &self,
+        tx: &mut WriteTx<'_>,
+        queue_store: &queue::Store,
+        limit_per_method: NonZeroU32,
+        enqueued_at: UnixSeconds,
+    ) -> Result<
+        PostgresAuthDurableEffectQueueDispatchSummary,
+        PostgresAuthDurableEffectQueueDispatchError,
+    > {
+        let mut aggregate = PostgresAuthDurableEffectQueueDispatchSummary::default();
+        for plugin in self.plugins.values() {
+            let summary = plugin
+                .enqueue_available_durable_effects_to_queue_in_current_transaction(
+                    tx,
+                    queue_store,
+                    limit_per_method,
+                    enqueued_at,
+                )
+                .await?;
+            aggregate.add(summary);
+        }
+        Ok(aggregate)
+    }
+
     pub(crate) fn build_out_of_band_issue(
         &self,
         request: &IssueOutOfBandChallengeRequest,
     ) -> Result<PostgresOutOfBandChallengeIssueBuild, PostgresAuthMethodBuildError> {
         self.plugin_for_method(&request.method)?
             .build_out_of_band_issue(request)
+    }
+
+    pub(crate) fn derive_out_of_band_challenge_start(
+        &self,
+        method: &ProofMethodDeclaration,
+        request: &PostgresOutOfBandChallengeStartBuildRequest<'_>,
+    ) -> Result<PostgresOutOfBandChallengeStartBuild, PostgresAuthMethodBuildError> {
+        self.plugin_for_method(method)?
+            .derive_out_of_band_challenge_start(request)
     }
 
     pub(crate) async fn build_active_proof_method_challenge<'tx>(
@@ -451,6 +709,17 @@ impl PostgresAuthMethodRegistry {
             .await
     }
 
+    pub(crate) async fn resolve_out_of_band_identifier_change_candidate_source<'tx>(
+        &self,
+        tx: &mut Tx<'tx>,
+        proof: &ProofSummary,
+        challenge_id: &ActiveProofChallengeId,
+    ) -> Result<VerifiedProofSource, PostgresAuthMethodBuildError> {
+        self.plugin_for_proof(proof)?
+            .resolve_out_of_band_identifier_change_candidate_source(tx, challenge_id)
+            .await
+    }
+
     pub(crate) fn verify_active_proof_method_response_before_state_load(
         &self,
         challenge: &ActiveProofMethodChallengeMaterial,
@@ -485,6 +754,30 @@ impl PostgresAuthMethodRegistry {
     ) -> Result<KnownSubjectActiveProofMethodVerification, PostgresAuthMethodBuildError> {
         self.plugin_for_method(&response.method)?
             .verify_known_subject_active_proof_method_response(tx, subject_id, response)
+            .await
+    }
+
+    pub(crate) fn resolve_recovery_credential_subject_before_state_load(
+        &self,
+        continuation: &ActiveProofContinuationCookieDraft,
+        response: &CompleteRecoveryCredentialActiveProofMethodResponse,
+    ) -> Result<SubjectId, PostgresAuthMethodBuildError> {
+        self.plugin_for_method(&response.method)?
+            .resolve_recovery_credential_subject_before_state_load(continuation, response)
+    }
+
+    pub(crate) async fn verify_recovery_credential_active_proof_method_response<'tx>(
+        &self,
+        tx: &mut Tx<'tx>,
+        candidate_subject_id: &SubjectId,
+        response: &CompleteRecoveryCredentialActiveProofMethodResponse,
+    ) -> Result<RecoveryCredentialActiveProofMethodVerification, PostgresAuthMethodBuildError> {
+        self.plugin_for_method(&response.method)?
+            .verify_recovery_credential_active_proof_method_response(
+                tx,
+                candidate_subject_id,
+                response,
+            )
             .await
     }
 
@@ -535,11 +828,21 @@ impl PostgresAuthMethodRegistry {
             .await
     }
 
+    pub(crate) async fn build_credential_creation_commit_work<'tx>(
+        &self,
+        tx: &mut Tx<'tx>,
+        request: CredentialCreationMethodWorkBuildRequest<'_>,
+    ) -> Result<CredentialMethodWorkBuild, PostgresAuthMethodBuildError> {
+        self.plugin_for_credential_target(request.new_credential)?
+            .build_credential_creation_commit_work(tx, request)
+            .await
+    }
+
     pub(crate) async fn build_credential_lifecycle_commit_work<'tx>(
         &self,
         tx: &mut Tx<'tx>,
         request: CredentialLifecycleMethodWorkBuildRequest<'_>,
-    ) -> Result<Vec<MethodCommitWork>, PostgresAuthMethodBuildError> {
+    ) -> Result<CredentialMethodWorkBuild, PostgresAuthMethodBuildError> {
         self.plugin_for_credential_target(request.target_credential)?
             .build_credential_lifecycle_commit_work(tx, request)
             .await
@@ -599,6 +902,36 @@ impl PostgresAuthMethodRegistry {
                 method_label: target.method_label().to_owned(),
             }
         })
+    }
+}
+
+#[derive(Debug)]
+pub(crate) enum PostgresAuthMethodDurableEffectQueueRegistrationError {
+    Queue(queue::Error),
+}
+
+impl fmt::Display for PostgresAuthMethodDurableEffectQueueRegistrationError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Queue(error) => write!(
+                f,
+                "auth method durable-effect queue registration failed: {error}"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for PostgresAuthMethodDurableEffectQueueRegistrationError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Queue(error) => Some(error),
+        }
+    }
+}
+
+impl From<queue::Error> for PostgresAuthMethodDurableEffectQueueRegistrationError {
+    fn from(error: queue::Error) -> Self {
+        Self::Queue(error)
     }
 }
 
@@ -732,6 +1065,12 @@ pub(crate) enum KnownSubjectActiveProofMethodVerification {
     Rejected,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum RecoveryCredentialActiveProofMethodVerification {
+    Accepted(VerifiedActiveProofMethodResponse),
+    Rejected,
+}
+
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub(crate) struct ActiveProofMethodAuthoritativeConfirmation {
     method_commit_work: Vec<MethodCommitWork>,
@@ -766,11 +1105,93 @@ pub(crate) enum CredentialResetMethodWorkAuthority<'a> {
 }
 
 #[derive(Clone, Copy, Debug)]
+pub(crate) struct CredentialCreationMethodWorkBuildRequest<'a> {
+    pub(crate) now: UnixSeconds,
+    pub(crate) new_credential: &'a CredentialInstanceMetadata,
+    pub(crate) method_payload: &'a CredentialCreationMethodPayload,
+}
+
+#[derive(Debug)]
+pub(crate) struct CredentialMethodWorkBuild {
+    method_commit_work: Vec<MethodCommitWork>,
+    post_commit_response_material: PostCommitMethodResponseMaterial,
+}
+
+impl CredentialMethodWorkBuild {
+    pub(crate) fn from_method_commit_work(method_commit_work: Vec<MethodCommitWork>) -> Self {
+        Self {
+            method_commit_work,
+            post_commit_response_material: PostCommitMethodResponseMaterial::empty(),
+        }
+    }
+
+    pub(crate) fn new(
+        method_commit_work: Vec<MethodCommitWork>,
+        post_commit_response_material: PostCommitMethodResponseMaterial,
+    ) -> Self {
+        Self {
+            method_commit_work,
+            post_commit_response_material,
+        }
+    }
+
+    pub(crate) fn into_parts(self) -> (Vec<MethodCommitWork>, PostCommitMethodResponseMaterial) {
+        (self.method_commit_work, self.post_commit_response_material)
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
 pub(crate) struct CredentialLifecycleMethodWorkBuildRequest<'a> {
     pub(crate) now: UnixSeconds,
     pub(crate) target_credential: &'a CredentialInstanceMetadata,
-    pub(crate) pending_action: &'a PendingCredentialLifecycleActionRecord,
+    pub(crate) action: CredentialLifecycleAction,
+    pub(crate) replacement_successor: Option<&'a CredentialReplacementSuccessor>,
     pub(crate) method_payload: &'a CredentialLifecycleMethodPayload,
+    pub(crate) authority: CredentialLifecycleMethodWorkAuthority<'a>,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum CredentialLifecycleMethodWorkAuthority<'a> {
+    ImmediateReplacement {
+        lifecycle_context: &'a CredentialLifecycleActionContext,
+    },
+    ImmediateRotation {
+        lifecycle_context: &'a CredentialLifecycleActionContext,
+    },
+    ImmediateRegeneration {
+        lifecycle_context: &'a CredentialLifecycleActionContext,
+    },
+    MaturePendingAction {
+        pending_action: &'a PendingCredentialLifecycleActionRecord,
+    },
+}
+
+fn unsupported_credential_lifecycle_operation_label(
+    request: &CredentialLifecycleMethodWorkBuildRequest<'_>,
+) -> &'static str {
+    match (request.action, request.authority) {
+        (
+            CredentialLifecycleAction::Replace,
+            CredentialLifecycleMethodWorkAuthority::ImmediateReplacement { .. },
+        ) => "authenticated_credential_replacement",
+        (
+            CredentialLifecycleAction::Rotate,
+            CredentialLifecycleMethodWorkAuthority::ImmediateRotation { .. },
+        ) => "authenticated_credential_rotation",
+        (
+            CredentialLifecycleAction::Regenerate,
+            CredentialLifecycleMethodWorkAuthority::ImmediateRegeneration { .. },
+        ) => "authenticated_credential_regeneration",
+        (
+            CredentialLifecycleAction::Replace,
+            CredentialLifecycleMethodWorkAuthority::MaturePendingAction { .. },
+        ) => "mature_pending_credential_replacement",
+        (
+            CredentialLifecycleAction::Regenerate,
+            CredentialLifecycleMethodWorkAuthority::MaturePendingAction { .. },
+        ) => "mature_pending_credential_regeneration",
+        _ => "credential_lifecycle_action",
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -804,9 +1225,174 @@ impl ActiveProofMethodChallengeBuild {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct PostgresAuthMethodMountedRouteCapabilities {
+    out_of_band_full_authentication: bool,
+    no_session_recovery_credential: bool,
+    credential_creation: bool,
+    credential_reset: bool,
+    credential_replacement: bool,
+    credential_regeneration: bool,
+    credential_rotation: bool,
+    out_of_band_identifier_change: bool,
+}
+
+impl PostgresAuthMethodMountedRouteCapabilities {
+    pub(crate) const fn empty() -> Self {
+        Self {
+            out_of_band_full_authentication: false,
+            no_session_recovery_credential: false,
+            credential_creation: false,
+            credential_reset: false,
+            credential_replacement: false,
+            credential_regeneration: false,
+            credential_rotation: false,
+            out_of_band_identifier_change: false,
+        }
+    }
+
+    pub(crate) const fn with_out_of_band_full_authentication(mut self) -> Self {
+        self.out_of_band_full_authentication = true;
+        self
+    }
+
+    pub(crate) const fn with_no_session_recovery_credential(mut self) -> Self {
+        self.no_session_recovery_credential = true;
+        self
+    }
+
+    pub(crate) const fn with_credential_creation(mut self) -> Self {
+        self.credential_creation = true;
+        self
+    }
+
+    pub(crate) const fn with_credential_reset(mut self) -> Self {
+        self.credential_reset = true;
+        self
+    }
+
+    pub(crate) const fn with_credential_replacement(mut self) -> Self {
+        self.credential_replacement = true;
+        self
+    }
+
+    pub(crate) const fn with_credential_regeneration(mut self) -> Self {
+        self.credential_regeneration = true;
+        self
+    }
+
+    pub(crate) const fn with_credential_rotation(mut self) -> Self {
+        self.credential_rotation = true;
+        self
+    }
+
+    pub(crate) const fn with_out_of_band_identifier_change(mut self) -> Self {
+        self.out_of_band_identifier_change = true;
+        self
+    }
+
+    pub(crate) const fn out_of_band_full_authentication(self) -> bool {
+        self.out_of_band_full_authentication
+    }
+
+    pub(crate) const fn no_session_recovery_credential(self) -> bool {
+        self.no_session_recovery_credential
+    }
+
+    pub(crate) const fn credential_creation(self) -> bool {
+        self.credential_creation
+    }
+
+    pub(crate) const fn credential_reset(self) -> bool {
+        self.credential_reset
+    }
+
+    pub(crate) const fn credential_replacement(self) -> bool {
+        self.credential_replacement
+    }
+
+    pub(crate) const fn credential_regeneration(self) -> bool {
+        self.credential_regeneration
+    }
+
+    pub(crate) const fn credential_rotation(self) -> bool {
+        self.credential_rotation
+    }
+
+    pub(crate) const fn out_of_band_identifier_change(self) -> bool {
+        self.out_of_band_identifier_change
+    }
+}
+
 pub(crate) struct PostgresOutOfBandChallengeIssueBuild {
     response_secret: ActiveProofChallengeResponseSecret,
     method_commit_work: Vec<MethodCommitWork>,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct PostgresOutOfBandChallengeStartBuildRequest<'a> {
+    pub(crate) now: UnixSeconds,
+    pub(crate) proof_use: ProofUse,
+    pub(crate) attempt_id: &'a ActiveProofAttemptId,
+    pub(crate) challenge_id: &'a ActiveProofChallengeId,
+    pub(crate) method_payload: &'a [u8],
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct PostgresOutOfBandChallengeStartBuild {
+    challenge_dedupe_key: OutOfBandChallengeDedupeKey,
+    recipient_handle: String,
+    idempotency_key: String,
+}
+
+impl PostgresOutOfBandChallengeStartBuild {
+    pub(crate) fn new(
+        challenge_dedupe_key: OutOfBandChallengeDedupeKey,
+        recipient_handle: String,
+        idempotency_key: String,
+    ) -> Result<Self, Error> {
+        if recipient_handle.is_empty() {
+            return Err(Error::EmptyOutOfBandRecipientHandle);
+        }
+        validate_auth_string_not_too_long(
+            "out-of-band recipient handle",
+            &recipient_handle,
+            OUT_OF_BAND_RECIPIENT_HANDLE_MAX_BYTES,
+        )?;
+        if idempotency_key.is_empty() {
+            return Err(Error::EmptyOutOfBandDeliveryIdempotencyKey);
+        }
+        validate_auth_identifier_string(
+            "out-of-band delivery idempotency key",
+            &idempotency_key,
+            DELIVERY_IDEMPOTENCY_KEY_MAX_BYTES,
+        )?;
+        Ok(Self {
+            challenge_dedupe_key,
+            recipient_handle,
+            idempotency_key,
+        })
+    }
+
+    pub(crate) fn into_issue_request(
+        self,
+        now: UnixSeconds,
+        attempt_id: ActiveProofAttemptId,
+        challenge_id: ActiveProofChallengeId,
+        method: ProofMethodDeclaration,
+        replaceable_created_at_or_before: Option<UnixSeconds>,
+    ) -> IssueOutOfBandChallengeRequest {
+        IssueOutOfBandChallengeRequest {
+            now,
+            attempt_id,
+            challenge_id,
+            method,
+            challenge_dedupe_key: self.challenge_dedupe_key,
+            replaceable_created_at_or_before,
+            recipient_handle: self.recipient_handle,
+            idempotency_key: self.idempotency_key,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

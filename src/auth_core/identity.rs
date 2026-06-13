@@ -1,7 +1,7 @@
 use std::fmt;
 use std::marker::PhantomData;
 
-use super::*;
+use super::prelude::*;
 
 /// Opaque identifier for auth records of one semantic kind.
 #[derive(Clone, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -68,6 +68,10 @@ pub enum ActiveProofChallengeIdKind {}
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum VerifiedProofSourceIdKind {}
 
+/// Semantic marker for verified admin/support intervention identifiers.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub enum AdminSupportInterventionIdKind {}
+
 /// Semantic marker for effective recovery-authority identifiers.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum RecoveryAuthorityIdKind {}
@@ -97,6 +101,9 @@ pub type ActiveProofChallengeId = Id<ActiveProofChallengeIdKind>;
 
 /// Opaque identifier for the credential or external authority that produced a proof.
 pub type VerifiedProofSourceId = Id<VerifiedProofSourceIdKind>;
+
+/// Opaque identifier for one verified admin/support lifecycle intervention.
+pub type AdminSupportInterventionId = Id<AdminSupportInterventionIdKind>;
 
 /// Opaque identifier for one effective authority that can recover or mutate credentials.
 pub type RecoveryAuthorityId = Id<RecoveryAuthorityIdKind>;

@@ -1,4 +1,4 @@
-use super::*;
+use super::prelude::*;
 
 /// Audit event committed with auth mutations.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -70,22 +70,58 @@ pub enum AuditEventKind {
     CredentialResetExecuted,
     /// A delayed credential reset action was cancelled.
     CredentialResetPendingActionCancelled,
-    /// A delayed credential replacement action was executed.
+    /// A credential was added.
+    CredentialAdded,
+    /// A credential replacement was authorized for immediate execution.
+    CredentialReplacementAuthorized,
+    /// A delayed credential replacement action was scheduled.
+    CredentialReplacementPendingActionScheduled,
+    /// A credential replacement action was executed.
     CredentialReplacementExecuted,
     /// A delayed credential replacement action was cancelled.
     CredentialReplacementPendingActionCancelled,
-    /// A delayed credential removal action was executed.
+    /// A credential removal was authorized for immediate execution.
+    CredentialRemovalAuthorized,
+    /// A delayed credential removal action was scheduled.
+    CredentialRemovalPendingActionScheduled,
+    /// A credential removal action was executed.
     CredentialRemovalExecuted,
     /// A delayed credential removal action was cancelled.
     CredentialRemovalPendingActionCancelled,
+    /// A credential-set regeneration was authorized for immediate execution.
+    CredentialRegenerationAuthorized,
+    /// A delayed credential-set regeneration action was scheduled.
+    CredentialRegenerationPendingActionScheduled,
     /// A delayed credential-set regeneration action was executed.
     CredentialRegenerationExecuted,
     /// A delayed credential-set regeneration action was cancelled.
     CredentialRegenerationPendingActionCancelled,
+    /// A credential verifier or secret was rotated.
+    CredentialRotated,
+    /// A support/admin intervention was requested.
+    AdminSupportInterventionRequested,
+    /// A support/admin intervention was approved.
+    AdminSupportInterventionApproved,
+    /// A support/admin intervention was denied.
+    AdminSupportInterventionDenied,
+    /// A support/admin intervention expired.
+    AdminSupportInterventionExpired,
+    /// A support/admin intervention authorized credential lifecycle work immediately.
+    AdminSupportCredentialLifecycleInterventionAuthorized,
+    /// A support/admin intervention scheduled delayed credential lifecycle work.
+    AdminSupportCredentialLifecycleInterventionPendingActionScheduled,
     /// A delayed subject-auth-state deletion action was scheduled.
     SubjectAuthStateDeletionPendingActionScheduled,
     /// A delayed subject-auth-state deletion action was executed.
     SubjectAuthStateDeletionExecuted,
     /// A delayed subject-auth-state deletion action was cancelled.
     SubjectAuthStateDeletionPendingActionCancelled,
+    /// A candidate out-of-band identifier binding was proven and reserved.
+    OutOfBandIdentifierChangeCandidateBindingReserved,
+    /// A delayed out-of-band identifier change action was scheduled.
+    OutOfBandIdentifierChangePendingActionScheduled,
+    /// A delayed out-of-band identifier change action was cancelled.
+    OutOfBandIdentifierChangePendingActionCancelled,
+    /// A subject's out-of-band identifier binding was changed.
+    OutOfBandIdentifierChanged,
 }

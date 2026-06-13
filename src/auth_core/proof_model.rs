@@ -1,4 +1,4 @@
-use super::*;
+use super::prelude::*;
 
 /// Core-owned proof family.
 ///
@@ -59,7 +59,7 @@ impl ProofFamily {
                 mechanism: ProofMechanism::RotatingBearerCredential,
             },
             Self::RecoveryCode => ProofSemantics {
-                subject_role: ProofSubjectRole::RequiresKnownSubject,
+                subject_role: ProofSubjectRole::CanBindExistingSubjectFromVerifier,
                 interaction: ProofInteraction::Active,
                 mechanism: ProofMechanism::OneTimeRecoveryCredential,
             },
@@ -76,6 +76,7 @@ impl ProofFamily {
             (Self::OutOfBandCode, ProofUse::SilentlyReviveTrustedDeviceSession) => false,
             (Self::OutOfBandCode, ProofUse::ReduceAuthenticationRequirement) => false,
             (Self::OutOfBandCode, ProofUse::RecoverOrReplaceCredential) => false,
+            (Self::OutOfBandCode, ProofUse::ProveOutOfBandIdentifierChangeCandidate) => true,
 
             (Self::MessageSignature, ProofUse::BindSubjectToActiveProofAttempt) => true,
             (Self::MessageSignature, ProofUse::ContributeToFullAuthentication) => true,
@@ -84,6 +85,7 @@ impl ProofFamily {
             (Self::MessageSignature, ProofUse::SilentlyReviveTrustedDeviceSession) => false,
             (Self::MessageSignature, ProofUse::ReduceAuthenticationRequirement) => false,
             (Self::MessageSignature, ProofUse::RecoverOrReplaceCredential) => false,
+            (Self::MessageSignature, ProofUse::ProveOutOfBandIdentifierChangeCandidate) => false,
 
             (Self::OriginBoundPublicKey, ProofUse::BindSubjectToActiveProofAttempt) => true,
             (Self::OriginBoundPublicKey, ProofUse::ContributeToFullAuthentication) => true,
@@ -92,6 +94,9 @@ impl ProofFamily {
             (Self::OriginBoundPublicKey, ProofUse::SilentlyReviveTrustedDeviceSession) => false,
             (Self::OriginBoundPublicKey, ProofUse::ReduceAuthenticationRequirement) => false,
             (Self::OriginBoundPublicKey, ProofUse::RecoverOrReplaceCredential) => false,
+            (Self::OriginBoundPublicKey, ProofUse::ProveOutOfBandIdentifierChangeCandidate) => {
+                false
+            }
 
             (Self::FederatedIdentityAssertion, ProofUse::BindSubjectToActiveProofAttempt) => true,
             (Self::FederatedIdentityAssertion, ProofUse::ContributeToFullAuthentication) => true,
@@ -104,6 +109,10 @@ impl ProofFamily {
             }
             (Self::FederatedIdentityAssertion, ProofUse::ReduceAuthenticationRequirement) => false,
             (Self::FederatedIdentityAssertion, ProofUse::RecoverOrReplaceCredential) => false,
+            (
+                Self::FederatedIdentityAssertion,
+                ProofUse::ProveOutOfBandIdentifierChangeCandidate,
+            ) => false,
 
             (Self::SharedSecretOtp, ProofUse::BindSubjectToActiveProofAttempt) => false,
             (Self::SharedSecretOtp, ProofUse::ContributeToFullAuthentication) => true,
@@ -112,6 +121,7 @@ impl ProofFamily {
             (Self::SharedSecretOtp, ProofUse::SilentlyReviveTrustedDeviceSession) => false,
             (Self::SharedSecretOtp, ProofUse::ReduceAuthenticationRequirement) => false,
             (Self::SharedSecretOtp, ProofUse::RecoverOrReplaceCredential) => false,
+            (Self::SharedSecretOtp, ProofUse::ProveOutOfBandIdentifierChangeCandidate) => false,
 
             (Self::TrustedDevice, ProofUse::BindSubjectToActiveProofAttempt) => false,
             (Self::TrustedDevice, ProofUse::ContributeToFullAuthentication) => false,
@@ -120,6 +130,7 @@ impl ProofFamily {
             (Self::TrustedDevice, ProofUse::SilentlyReviveTrustedDeviceSession) => true,
             (Self::TrustedDevice, ProofUse::ReduceAuthenticationRequirement) => true,
             (Self::TrustedDevice, ProofUse::RecoverOrReplaceCredential) => false,
+            (Self::TrustedDevice, ProofUse::ProveOutOfBandIdentifierChangeCandidate) => false,
 
             (Self::RecoveryCode, ProofUse::BindSubjectToActiveProofAttempt) => false,
             (Self::RecoveryCode, ProofUse::ContributeToFullAuthentication) => true,
@@ -128,6 +139,7 @@ impl ProofFamily {
             (Self::RecoveryCode, ProofUse::SilentlyReviveTrustedDeviceSession) => false,
             (Self::RecoveryCode, ProofUse::ReduceAuthenticationRequirement) => false,
             (Self::RecoveryCode, ProofUse::RecoverOrReplaceCredential) => true,
+            (Self::RecoveryCode, ProofUse::ProveOutOfBandIdentifierChangeCandidate) => false,
         }
     }
 
@@ -224,6 +236,8 @@ pub enum ProofUse {
     ReduceAuthenticationRequirement,
     /// Recover or replace another credential.
     RecoverOrReplaceCredential,
+    /// Prove reachability of a candidate out-of-band identifier before lifecycle authorization.
+    ProveOutOfBandIdentifierChangeCandidate,
 }
 
 /// Whether a concrete proof method is online-guessable and must use weak-proof guards.

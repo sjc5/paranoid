@@ -32,6 +32,11 @@ pub const ACTIVE_PROOF_METHOD_RESPONSE_PAYLOAD_MAX_BYTES: usize = 64 * 1024;
 pub const CHALLENGE_BOUND_CONFIGURED_SECRET_FAST_FAIL_BLOOM_FILTER_MAX_BYTES: usize = 512;
 /// Maximum number of hash probes for a challenge-bound configured-secret Bloom filter.
 pub const CHALLENGE_BOUND_CONFIGURED_SECRET_FAST_FAIL_BLOOM_FILTER_MAX_HASH_COUNT: u8 = 32;
+/// Maximum number of recovery authorities on one pending identifier-change candidate.
+pub const OUT_OF_BAND_IDENTIFIER_CHANGE_CANDIDATE_AUTHORITY_MAX_COUNT: usize = 16;
+/// Maximum byte length for encoded pending identifier-change candidate authority ids.
+pub const OUT_OF_BAND_IDENTIFIER_CHANGE_CANDIDATE_AUTHORITY_IDS_MAX_BYTES: usize =
+    2 + OUT_OF_BAND_IDENTIFIER_CHANGE_CANDIDATE_AUTHORITY_MAX_COUNT * (2 + ID_MAX_BYTES);
 
 pub(super) fn validate_auth_string_not_too_long(
     input_name: &'static str,

@@ -1,4 +1,4 @@
-use super::*;
+use super::prelude::*;
 
 /// Response-local effect applied only after a successful commit.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -33,6 +33,8 @@ pub enum DurableEffectCommand {
     SendOutOfBandMessage(OutOfBandMessageCommand),
     /// Notify the user or security log about a significant auth event.
     NotifySecurityEvent(SecurityNotificationCommand),
+    /// Ask the mounted application to apply subject data lifecycle work.
+    ApplyApplicationSubjectDataLifecycle(ApplicationSubjectDataLifecycleCommand),
 }
 
 /// Out-of-band message command.
@@ -59,6 +61,36 @@ pub struct SecurityNotificationCommand {
     pub subject_id: SubjectId,
 }
 
+/// App-owned subject data lifecycle work committed by auth-state deletion.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ApplicationSubjectDataLifecycleCommand {
+    /// App-owned subject data action requested by the mounted auth flow.
+    pub action: ApplicationSubjectDataLifecycleAction,
+    /// Subject whose app-owned data should be updated.
+    pub subject_id: SubjectId,
+    /// Time the auth transition committed this durable request.
+    pub requested_at: UnixSeconds,
+}
+
+/// App-owned subject data action requested after auth-state deletion commits.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum ApplicationSubjectDataLifecycleAction {
+    /// Delete app-owned data associated with the subject.
+    DeleteSubjectData,
+    /// Disable app-owned data associated with the subject without deleting it.
+    DisableSubjectData,
+}
+
+impl ApplicationSubjectDataLifecycleAction {
+    /// Returns the stable Queue/application label for this action.
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::DeleteSubjectData => "delete_subject_data",
+            Self::DisableSubjectData => "disable_subject_data",
+        }
+    }
+}
+
 /// Core-owned security notification kind.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum SecurityNotificationKind {
@@ -72,22 +104,56 @@ pub enum SecurityNotificationKind {
     CredentialResetExecuted,
     /// A delayed credential reset action was cancelled.
     CredentialResetPendingActionCancelled,
-    /// A delayed credential replacement action was executed.
+    /// A credential was added.
+    CredentialAdded,
+    /// A credential replacement was authorized for immediate execution.
+    CredentialReplacementAuthorized,
+    /// A delayed credential replacement action was scheduled.
+    CredentialReplacementPendingActionScheduled,
+    /// A credential replacement action was executed.
     CredentialReplacementExecuted,
     /// A delayed credential replacement action was cancelled.
     CredentialReplacementPendingActionCancelled,
-    /// A delayed credential removal action was executed.
+    /// A credential removal was authorized for immediate execution.
+    CredentialRemovalAuthorized,
+    /// A delayed credential removal action was scheduled.
+    CredentialRemovalPendingActionScheduled,
+    /// A credential removal action was executed.
     CredentialRemovalExecuted,
     /// A delayed credential removal action was cancelled.
     CredentialRemovalPendingActionCancelled,
+    /// A credential-set regeneration was authorized for immediate execution.
+    CredentialRegenerationAuthorized,
+    /// A delayed credential-set regeneration action was scheduled.
+    CredentialRegenerationPendingActionScheduled,
     /// A delayed credential-set regeneration action was executed.
     CredentialRegenerationExecuted,
     /// A delayed credential-set regeneration action was cancelled.
     CredentialRegenerationPendingActionCancelled,
+    /// A credential verifier or secret was rotated.
+    CredentialRotated,
+    /// A support/admin intervention was requested.
+    AdminSupportInterventionRequested,
+    /// A support/admin intervention was approved.
+    AdminSupportInterventionApproved,
+    /// A support/admin intervention was denied.
+    AdminSupportInterventionDenied,
+    /// A support/admin intervention expired.
+    AdminSupportInterventionExpired,
+    /// A support/admin intervention authorized credential lifecycle work immediately.
+    AdminSupportCredentialLifecycleInterventionAuthorized,
+    /// A support/admin intervention scheduled delayed credential lifecycle work.
+    AdminSupportCredentialLifecycleInterventionPendingActionScheduled,
     /// A delayed subject-auth-state deletion action was scheduled.
     SubjectAuthStateDeletionPendingActionScheduled,
     /// A delayed subject-auth-state deletion action was executed.
     SubjectAuthStateDeletionExecuted,
     /// A delayed subject-auth-state deletion action was cancelled.
     SubjectAuthStateDeletionPendingActionCancelled,
+    /// A delayed out-of-band identifier change action was scheduled.
+    OutOfBandIdentifierChangePendingActionScheduled,
+    /// A delayed out-of-band identifier change action was cancelled.
+    OutOfBandIdentifierChangePendingActionCancelled,
+    /// A subject's out-of-band identifier binding was changed.
+    OutOfBandIdentifierChanged,
 }

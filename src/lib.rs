@@ -133,4 +133,5 @@ pub mod queue;
 pub mod web;
 
 #[cfg(feature = "__auth_wip")]
+#[allow(dead_code)]
 mod auth_core;

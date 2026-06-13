@@ -33,9 +33,12 @@ fn core_storage_schema_contract_names_reducer_owned_record_families() {
             CoreStorageRecordKind::SubjectAuthState,
             CoreStorageRecordKind::CredentialInstance,
             CoreStorageRecordKind::CredentialRecoveryAuthority,
+            CoreStorageRecordKind::SubjectLifecycleAuthority,
             CoreStorageRecordKind::LifecycleAuthoritySource,
+            CoreStorageRecordKind::OutOfBandIdentifierBinding,
             CoreStorageRecordKind::PendingCredentialLifecycleAction,
             CoreStorageRecordKind::PendingSubjectLifecycleAction,
+            CoreStorageRecordKind::AdminSupportIntervention,
             CoreStorageRecordKind::AuditEvent,
             CoreStorageRecordKind::CoreDurableEffectCommand,
         ]
@@ -59,11 +62,15 @@ fn postgres_schema_contract_names_table_families() {
             PostgresAuthCoreTable::SubjectAuthState,
             PostgresAuthCoreTable::CredentialInstance,
             PostgresAuthCoreTable::CredentialRecoveryAuthority,
+            PostgresAuthCoreTable::SubjectLifecycleAuthority,
             PostgresAuthCoreTable::LifecycleAuthoritySource,
+            PostgresAuthCoreTable::OutOfBandIdentifierBinding,
             PostgresAuthCoreTable::PendingCredentialLifecycleAction,
             PostgresAuthCoreTable::PendingSubjectLifecycleAction,
+            PostgresAuthCoreTable::AdminSupportIntervention,
             PostgresAuthCoreTable::AuditEvent,
             PostgresAuthCoreTable::CoreDurableEffectCommand,
+            PostgresAuthCoreTable::CoreDurableEffectQueueDispatch,
         ]
     );
     assert_eq!(
@@ -79,12 +86,28 @@ fn postgres_schema_contract_names_table_families() {
         "auth_credential_instances"
     );
     assert_eq!(
+        PostgresAuthCoreTable::SubjectLifecycleAuthority.default_suffix(),
+        "auth_subject_lifecycle_authorities"
+    );
+    assert_eq!(
+        PostgresAuthCoreTable::OutOfBandIdentifierBinding.default_suffix(),
+        "auth_out_of_band_identifier_bindings"
+    );
+    assert_eq!(
         PostgresAuthCoreTable::PendingCredentialLifecycleAction.default_suffix(),
         "auth_credential_lifecycle_pending_actions"
     );
     assert_eq!(
         PostgresAuthCoreTable::PendingSubjectLifecycleAction.default_suffix(),
         "auth_subject_lifecycle_pending_actions"
+    );
+    assert_eq!(
+        PostgresAuthCoreTable::AdminSupportIntervention.default_suffix(),
+        "auth_admin_support_interventions"
+    );
+    assert_eq!(
+        PostgresAuthCoreTable::CoreDurableEffectQueueDispatch.default_suffix(),
+        "auth_core_durable_effect_queue_dispatches"
     );
 }
 
@@ -151,6 +174,18 @@ fn postgres_schema_validation_pins_collation_and_fixed_byte_checks() {
             )
     );
 
+    let support_intervention_table =
+        postgres_table_validation(PostgresAuthCoreTable::AdminSupportIntervention);
+    assert!(
+        support_intervention_table
+            .uniqueness()
+            .iter()
+            .any(
+                |constraint| constraint.name() == "admin_support_open_intervention"
+                    && constraint.predicate() == Some(PostgresUniquePredicate::OpenRow)
+            )
+    );
+
     let satisfied_proof_table =
         postgres_table_validation(PostgresAuthCoreTable::ActiveProofSatisfiedProof);
     let source_kind_column = satisfied_proof_table
@@ -167,6 +202,48 @@ fn postgres_schema_validation_pins_collation_and_fixed_byte_checks() {
         .expect("proof source id column");
     assert_eq!(source_id_column.storage(), PostgresColumnStorage::Bytea);
     assert!(source_id_column.nullable());
+
+    let credential_instance_table =
+        postgres_table_validation(PostgresAuthCoreTable::CredentialInstance);
+    let credential_instance_columns = credential_instance_table
+        .columns()
+        .iter()
+        .map(|column| (column.name(), column.storage(), column.nullable()))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        credential_instance_columns,
+        vec![
+            (
+                "credential_instance_id",
+                PostgresColumnStorage::Bytea,
+                false
+            ),
+            ("subject_id", PostgresColumnStorage::Bytea, false),
+            ("credential_kind", PostgresColumnStorage::Integer, false),
+            ("method_label", PostgresColumnStorage::TextCollateC, false),
+            ("reset_policy_role", PostgresColumnStorage::Integer, false),
+            ("lifecycle_state", PostgresColumnStorage::Integer, false),
+            ("created_at", PostgresColumnStorage::Bigint, false),
+            ("updated_at", PostgresColumnStorage::Bigint, false),
+        ]
+    );
+    let credential_method_label_column = credential_instance_table
+        .columns()
+        .iter()
+        .find(|column| column.name() == "method_label")
+        .expect("credential method label column");
+    assert!(
+        credential_method_label_column
+            .checks()
+            .contains(&PostgresColumnValidationCheck::TextUsesBytewiseCollation)
+    );
+    assert!(
+        credential_instance_table
+            .uniqueness()
+            .iter()
+            .any(|constraint| constraint.name() == "primary_key"
+                && constraint.columns() == ["credential_instance_id"])
+    );
 }
 
 #[test]
@@ -217,6 +294,8 @@ fn postgres_schema_contract_uses_byte_stable_storage_for_correctness_columns() {
         for column in table.columns() {
             match column.value() {
                 PostgresColumnValueContract::OpaqueIdBytes { .. }
+                | PostgresColumnValueContract::FixedOpaqueBytes { .. }
+                | PostgresColumnValueContract::BoundedOpaqueBytes { .. }
                 | PostgresColumnValueContract::MacOverSecretBytes { .. } => {
                     assert_eq!(column.storage(), PostgresColumnStorage::Bytea);
                 }
@@ -225,6 +304,7 @@ fn postgres_schema_contract_uses_byte_stable_storage_for_correctness_columns() {
                 }
                 PostgresColumnValueContract::SecretVersion
                 | PostgresColumnValueContract::UnixSeconds
+                | PostgresColumnValueContract::NonNegativeBigint
                 | PostgresColumnValueContract::GeneratedIdentity => {
                     assert_eq!(column.storage(), PostgresColumnStorage::Bigint);
                 }
@@ -242,53 +322,159 @@ fn postgres_schema_contract_uses_byte_stable_storage_for_correctness_columns() {
 
 #[test]
 fn postgres_schema_contract_maps_storage_targets_to_table_families() {
-    assert_eq!(
-        PostgresAuthCoreSchemaContract::table_for_storage_target(&CoreStorageTarget::Session(id(
-            "session"
-        ))),
-        PostgresAuthCoreTable::Session,
-    );
-    assert_eq!(
-        PostgresAuthCoreSchemaContract::table_for_storage_target(
-            &CoreStorageTarget::SessionCredentialSecret {
+    let mappings = [
+        (
+            CoreStorageTarget::Session(id("session")),
+            PostgresAuthCoreTable::Session,
+        ),
+        (
+            CoreStorageTarget::SessionCredentialSecret {
                 session_id: id("session"),
                 secret_version: version(4),
-            }
+            },
+            PostgresAuthCoreTable::SessionCredentialSecretMac,
         ),
-        PostgresAuthCoreTable::SessionCredentialSecretMac,
-    );
-    assert_eq!(
-        PostgresAuthCoreSchemaContract::table_for_storage_target(
-            &CoreStorageTarget::OpenOutOfBandChallengeDedupeKey(dedupe_key(
-                "login:email-hash:window"
-            ))
+        (
+            CoreStorageTarget::TrustedDeviceCredential(id("device")),
+            PostgresAuthCoreTable::TrustedDeviceCredential,
         ),
-        PostgresAuthCoreTable::ActiveProofChallenge,
-    );
-    assert_eq!(
-        PostgresAuthCoreSchemaContract::table_for_storage_target(
-            &CoreStorageTarget::CredentialInstance(id("credential"))
+        (
+            CoreStorageTarget::TrustedDeviceCredentialSecret {
+                device_credential_id: id("device"),
+                secret_version: version(4),
+            },
+            PostgresAuthCoreTable::TrustedDeviceCredentialSecretMac,
         ),
-        PostgresAuthCoreTable::CredentialInstance,
-    );
-    assert_eq!(
-        PostgresAuthCoreSchemaContract::table_for_storage_target(
-            &CoreStorageTarget::OpenPendingCredentialLifecycleActionForTarget {
+        (
+            CoreStorageTarget::ActiveProofAttempt(id("attempt")),
+            PostgresAuthCoreTable::ActiveProofAttempt,
+        ),
+        (
+            CoreStorageTarget::ActiveProofContinuationSecret {
+                attempt_id: id("attempt"),
+            },
+            PostgresAuthCoreTable::ActiveProofContinuationSecretMac,
+        ),
+        (
+            CoreStorageTarget::ActiveProofChallenge(id("challenge")),
+            PostgresAuthCoreTable::ActiveProofChallenge,
+        ),
+        (
+            CoreStorageTarget::ActiveProofChallengesForAttemptProofFamily {
+                attempt_id: id("attempt"),
+                proof_family: ProofFamily::OutOfBandCode,
+            },
+            PostgresAuthCoreTable::ActiveProofChallenge,
+        ),
+        (
+            CoreStorageTarget::OpenOutOfBandChallengeDedupeKey(dedupe_key(
+                "login:email-hash:window",
+            )),
+            PostgresAuthCoreTable::ActiveProofChallenge,
+        ),
+        (
+            CoreStorageTarget::SubjectAuthState(id("subject")),
+            PostgresAuthCoreTable::SubjectAuthState,
+        ),
+        (
+            CoreStorageTarget::CredentialInstance(id("credential")),
+            PostgresAuthCoreTable::CredentialInstance,
+        ),
+        (
+            CoreStorageTarget::CredentialRecoveryAuthority {
                 target_credential_instance_id: id("credential"),
-                action: CredentialLifecycleAction::Reset,
-            }
+                action: CredentialLifecycleAction::Create,
+                authority_id: id("authority"),
+                timing: RecoveryAuthorityTiming::Immediate,
+            },
+            PostgresAuthCoreTable::CredentialRecoveryAuthority,
         ),
-        PostgresAuthCoreTable::PendingCredentialLifecycleAction,
-    );
-    assert_eq!(
-        PostgresAuthCoreSchemaContract::table_for_storage_target(
-            &CoreStorageTarget::OpenPendingSubjectLifecycleActionForSubject {
+        (
+            CoreStorageTarget::CredentialRecoveryAuthoritiesForCredential(id("credential")),
+            PostgresAuthCoreTable::CredentialRecoveryAuthority,
+        ),
+        (
+            CoreStorageTarget::SubjectLifecycleAuthority {
                 subject_id: id("subject"),
                 action: SubjectLifecycleAction::DeleteSubjectAuthState,
-            }
+                authority_id: id("authority"),
+                timing: RecoveryAuthorityTiming::Immediate,
+            },
+            PostgresAuthCoreTable::SubjectLifecycleAuthority,
         ),
-        PostgresAuthCoreTable::PendingSubjectLifecycleAction,
-    );
+        (
+            CoreStorageTarget::SubjectLifecycleAuthoritiesForSubject(id("subject")),
+            PostgresAuthCoreTable::SubjectLifecycleAuthority,
+        ),
+        (
+            CoreStorageTarget::LifecycleAuthoritySource {
+                source_kind: LifecycleAuthoritySourceKind::CredentialInstance,
+                source_id: id("credential"),
+                authority_id: id("authority"),
+            },
+            PostgresAuthCoreTable::LifecycleAuthoritySource,
+        ),
+        (
+            CoreStorageTarget::LifecycleAuthoritySourcesForSource {
+                source_kind: LifecycleAuthoritySourceKind::CredentialInstance,
+                source_id: id("credential"),
+            },
+            PostgresAuthCoreTable::LifecycleAuthoritySource,
+        ),
+        (
+            CoreStorageTarget::OutOfBandIdentifierBinding(id("source")),
+            PostgresAuthCoreTable::OutOfBandIdentifierBinding,
+        ),
+        (
+            CoreStorageTarget::PendingCredentialLifecycleAction(id("pending-credential")),
+            PostgresAuthCoreTable::PendingCredentialLifecycleAction,
+        ),
+        (
+            CoreStorageTarget::OpenPendingCredentialLifecycleActionForTarget {
+                target_credential_instance_id: id("credential"),
+                action: CredentialLifecycleAction::Reset,
+            },
+            PostgresAuthCoreTable::PendingCredentialLifecycleAction,
+        ),
+        (
+            CoreStorageTarget::PendingSubjectLifecycleAction(id("pending-subject")),
+            PostgresAuthCoreTable::PendingSubjectLifecycleAction,
+        ),
+        (
+            CoreStorageTarget::OpenPendingSubjectLifecycleActionForSubject {
+                subject_id: id("subject"),
+                action: SubjectLifecycleAction::DeleteSubjectAuthState,
+            },
+            PostgresAuthCoreTable::PendingSubjectLifecycleAction,
+        ),
+        (
+            CoreStorageTarget::AdminSupportIntervention(id("intervention")),
+            PostgresAuthCoreTable::AdminSupportIntervention,
+        ),
+        (
+            CoreStorageTarget::OpenAdminSupportInterventionForTarget {
+                target_credential_instance_id: id("credential"),
+                action: CredentialLifecycleAction::Reset,
+            },
+            PostgresAuthCoreTable::AdminSupportIntervention,
+        ),
+        (
+            CoreStorageTarget::AuditEvents,
+            PostgresAuthCoreTable::AuditEvent,
+        ),
+        (
+            CoreStorageTarget::CoreDurableEffectCommands,
+            PostgresAuthCoreTable::CoreDurableEffectCommand,
+        ),
+    ];
+
+    for (target, table) in mappings {
+        assert_eq!(
+            PostgresAuthCoreSchemaContract::table_for_storage_target(&target),
+            table,
+            "wrong Postgres table for {target:?}"
+        );
+    }
 }
 
 #[test]
@@ -400,6 +586,18 @@ fn postgres_schema_contract_pins_uniqueness_for_open_challenges_and_child_rows()
                     && constraint.predicate() == Some(PostgresUniquePredicate::OpenRow)
             )
     );
+
+    let durable_effect_dispatch_table =
+        postgres_table(PostgresAuthCoreTable::CoreDurableEffectQueueDispatch);
+    assert_eq!(
+        durable_effect_dispatch_table
+            .uniqueness()
+            .iter()
+            .find(|constraint| constraint.name() == "primary_key")
+            .expect("durable effect dispatch primary key")
+            .columns(),
+        &["effect_command_id"]
+    );
 }
 
 #[test]
@@ -492,6 +690,7 @@ fn postgres_precondition_execution_uses_unique_index_for_open_challenge_dedupe()
         &Precondition::NoOpenOutOfBandChallengeForDedupeKey {
             challenge_dedupe_key: dedupe_key("login:email-hash:window"),
             now: at(40),
+            replaceable_created_at_or_before: Some(at(20)),
         },
     );
 
@@ -510,8 +709,9 @@ fn postgres_precondition_execution_uses_unique_index_for_open_challenge_dedupe()
     assert_eq!(
         contract.validation_steps(),
         &[
-            PostgresPreconditionValidationStep::CloseExpiredOpenOutOfBandChallengesBeforeDedupeCheck {
+            PostgresPreconditionValidationStep::CloseReplaceableOpenOutOfBandChallengesBeforeDedupeCheck {
                 now: at(40),
+                replaceable_created_at_or_before: Some(at(20)),
             },
             PostgresPreconditionValidationStep::TreatOpenChallengeDedupeUniqueViolationAsPreconditionFailure,
         ]
@@ -542,6 +742,127 @@ fn postgres_precondition_execution_guards_credential_reset_target_and_pending_un
         &[
             PostgresPreconditionValidationStep::CredentialInstanceStillActiveWithSubject {
                 subject_id: id("subject"),
+            }
+        ]
+    );
+
+    let posture_guard = PostgresPreconditionExecutionContract::for_precondition(
+        &Precondition::SubjectRetainsRequiredCredentialPostureAfterRemoval {
+            subject_id: id("subject"),
+            removed_credential_instance_id: id("credential"),
+            removed_credential_reset_policy_role: CredentialResetPolicyRole::SecondFactorCredential,
+        },
+    );
+    assert_eq!(
+        posture_guard.kind(),
+        CorePreconditionKind::SubjectRetainsRequiredCredentialPostureAfterRemoval
+    );
+    assert_eq!(
+        posture_guard.lock_steps(),
+        &[
+            PostgresPreconditionLockStep::SelectActiveCredentialInstancesForSubjectForUpdate {
+                subject_id: id("subject"),
+            },
+            PostgresPreconditionLockStep::SelectActiveCredentialRecoveryAuthoritiesForSubjectForUpdate {
+                subject_id: id("subject"),
+            }
+        ]
+    );
+    assert_eq!(
+        posture_guard.validation_steps(),
+        &[
+            PostgresPreconditionValidationStep::SubjectRetainsRequiredCredentialPostureAfterRemoval {
+                subject_id: id("subject"),
+                removed_credential_instance_id: id("credential"),
+                removed_credential_reset_policy_role: CredentialResetPolicyRole::SecondFactorCredential,
+            }
+        ]
+    );
+
+    let target_credential = message_signature_credential_metadata("credential");
+    let replacement_successor = replacement_successor_inheriting_target_policy(
+        "replacement-credential",
+        &target_credential,
+        [CredentialRecoveryAuthority::new(
+            id("credential"),
+            CredentialLifecycleAction::Replace,
+            id("replacement-authority"),
+            RecoveryAuthorityTiming::Immediate,
+        )],
+        [id("replacement-successor-authority")],
+    );
+    let replacement_posture_guard = PostgresPreconditionExecutionContract::for_precondition(
+        &Precondition::SubjectRetainsRequiredCredentialPostureAfterReplacement {
+            subject_id: id("subject"),
+            replaced_credential_instance_id: id("credential"),
+            replaced_credential_reset_policy_role:
+                CredentialResetPolicyRole::SecondFactorCredential,
+            successor: replacement_successor.clone(),
+        },
+    );
+    assert_eq!(
+        replacement_posture_guard.kind(),
+        CorePreconditionKind::SubjectRetainsRequiredCredentialPostureAfterReplacement
+    );
+    assert_eq!(
+        replacement_posture_guard.lock_steps(),
+        &[
+            PostgresPreconditionLockStep::SelectActiveCredentialInstancesForSubjectForUpdate {
+                subject_id: id("subject"),
+            },
+            PostgresPreconditionLockStep::SelectActiveCredentialRecoveryAuthoritiesForSubjectForUpdate {
+                subject_id: id("subject"),
+            }
+        ]
+    );
+    assert_eq!(
+        replacement_posture_guard.validation_steps(),
+        &[
+            PostgresPreconditionValidationStep::SubjectRetainsRequiredCredentialPostureAfterReplacement {
+                subject_id: id("subject"),
+                replaced_credential_instance_id: id("credential"),
+                replaced_credential_reset_policy_role: CredentialResetPolicyRole::SecondFactorCredential,
+                successor: replacement_successor,
+            }
+        ]
+    );
+
+    let added_credential = message_signature_credential_metadata("added-credential");
+    let added_recovery_authorities = vec![CredentialRecoveryAuthority::new(
+        id("added-credential"),
+        CredentialLifecycleAction::Reset,
+        id("added-credential-authority"),
+        RecoveryAuthorityTiming::Immediate,
+    )];
+    let addition_posture_guard = PostgresPreconditionExecutionContract::for_precondition(
+        &Precondition::SubjectRetainsRequiredCredentialPostureAfterAddition {
+            subject_id: id("subject"),
+            added_credential: added_credential.clone(),
+            added_recovery_authorities: added_recovery_authorities.clone(),
+        },
+    );
+    assert_eq!(
+        addition_posture_guard.kind(),
+        CorePreconditionKind::SubjectRetainsRequiredCredentialPostureAfterAddition
+    );
+    assert_eq!(
+        addition_posture_guard.lock_steps(),
+        &[
+            PostgresPreconditionLockStep::SelectActiveCredentialInstancesForSubjectForUpdate {
+                subject_id: id("subject"),
+            },
+            PostgresPreconditionLockStep::SelectActiveCredentialRecoveryAuthoritiesForSubjectForUpdate {
+                subject_id: id("subject"),
+            }
+        ]
+    );
+    assert_eq!(
+        addition_posture_guard.validation_steps(),
+        &[
+            PostgresPreconditionValidationStep::SubjectRetainsRequiredCredentialPostureAfterAddition {
+                subject_id: id("subject"),
+                added_credential,
+                added_recovery_authorities,
             }
         ]
     );
@@ -733,6 +1054,151 @@ fn postgres_precondition_execution_guards_credential_reset_target_and_pending_un
             }
         ]
     );
+
+    let active_identifier_guard = PostgresPreconditionExecutionContract::for_precondition(
+        &Precondition::OutOfBandIdentifierBindingStillActive {
+            source_id: id("current-email-source"),
+            subject_id: id("subject"),
+        },
+    );
+    assert_eq!(
+        active_identifier_guard.kind(),
+        CorePreconditionKind::OutOfBandIdentifierBindingStillActive
+    );
+    assert_eq!(
+        active_identifier_guard.lock_steps(),
+        &[PostgresPreconditionLockStep::SelectExistingRowForUpdate {
+            target: CoreStorageTarget::OutOfBandIdentifierBinding(id("current-email-source")),
+            table: PostgresAuthCoreTable::OutOfBandIdentifierBinding,
+        }]
+    );
+    assert_eq!(
+        active_identifier_guard.validation_steps(),
+        &[
+            PostgresPreconditionValidationStep::OutOfBandIdentifierBindingActiveWithSubject {
+                subject_id: id("subject"),
+            }
+        ]
+    );
+
+    let pending_identifier_guard = PostgresPreconditionExecutionContract::for_precondition(
+        &Precondition::OutOfBandIdentifierBindingStillPendingActivation {
+            source_id: id("candidate-email-source"),
+            subject_id: id("subject"),
+        },
+    );
+    assert_eq!(
+        pending_identifier_guard.kind(),
+        CorePreconditionKind::OutOfBandIdentifierBindingStillPendingActivation
+    );
+    assert_eq!(
+        pending_identifier_guard.lock_steps(),
+        &[PostgresPreconditionLockStep::SelectExistingRowForUpdate {
+            target: CoreStorageTarget::OutOfBandIdentifierBinding(id("candidate-email-source")),
+            table: PostgresAuthCoreTable::OutOfBandIdentifierBinding,
+        }]
+    );
+    assert_eq!(
+        pending_identifier_guard.validation_steps(),
+        &[PostgresPreconditionValidationStep::OutOfBandIdentifierBindingPendingActivationWithSubject {
+            subject_id: id("subject"),
+        }]
+    );
+
+    let support_uniqueness_guard = PostgresPreconditionExecutionContract::for_precondition(
+        &Precondition::NoOpenAdminSupportInterventionForTarget {
+            subject_id: id("subject"),
+            target_credential_instance_id: id("credential"),
+            action: CredentialLifecycleAction::Replace,
+            now: at(100),
+        },
+    );
+    assert_eq!(
+        support_uniqueness_guard.kind(),
+        CorePreconditionKind::NoOpenAdminSupportInterventionForTarget
+    );
+    assert_eq!(
+        support_uniqueness_guard.lock_steps(),
+        &[
+            PostgresPreconditionLockStep::UseOpenAdminSupportInterventionUniqueIndex {
+                target_credential_instance_id: id("credential"),
+                action: CredentialLifecycleAction::Replace,
+            }
+        ]
+    );
+    assert_eq!(
+        support_uniqueness_guard.validation_steps(),
+        &[
+            PostgresPreconditionValidationStep::CloseExpiredOpenAdminSupportInterventionsBeforeUniquenessCheck {
+                now: at(100),
+            },
+            PostgresPreconditionValidationStep::TreatOpenAdminSupportInterventionUniqueViolationAsPreconditionFailure,
+        ]
+    );
+
+    let support_open_guard = PostgresPreconditionExecutionContract::for_precondition(
+        &Precondition::AdminSupportInterventionStillOpen {
+            intervention_id: id("support-intervention"),
+            subject_id: id("subject"),
+            target_credential_instance_id: id("credential"),
+            action: CredentialLifecycleAction::Replace,
+            now: at(100),
+        },
+    );
+    assert_eq!(
+        support_open_guard.kind(),
+        CorePreconditionKind::AdminSupportInterventionStillOpen
+    );
+    assert_eq!(
+        support_open_guard.lock_steps(),
+        &[PostgresPreconditionLockStep::SelectExistingRowForUpdate {
+            target: CoreStorageTarget::AdminSupportIntervention(id("support-intervention")),
+            table: PostgresAuthCoreTable::AdminSupportIntervention,
+        }]
+    );
+    assert_eq!(
+        support_open_guard.validation_steps(),
+        &[
+            PostgresPreconditionValidationStep::AdminSupportInterventionOpenUnexpiredAndTargetMatched {
+                subject_id: id("subject"),
+                target_credential_instance_id: id("credential"),
+                action: CredentialLifecycleAction::Replace,
+                now: at(100),
+            }
+        ]
+    );
+
+    let support_expired_guard = PostgresPreconditionExecutionContract::for_precondition(
+        &Precondition::AdminSupportInterventionStillExpiredOpen {
+            intervention_id: id("support-intervention"),
+            subject_id: id("subject"),
+            target_credential_instance_id: id("credential"),
+            action: CredentialLifecycleAction::Replace,
+            now: at(200),
+        },
+    );
+    assert_eq!(
+        support_expired_guard.kind(),
+        CorePreconditionKind::AdminSupportInterventionStillExpiredOpen
+    );
+    assert_eq!(
+        support_expired_guard.lock_steps(),
+        &[PostgresPreconditionLockStep::SelectExistingRowForUpdate {
+            target: CoreStorageTarget::AdminSupportIntervention(id("support-intervention")),
+            table: PostgresAuthCoreTable::AdminSupportIntervention,
+        }]
+    );
+    assert_eq!(
+        support_expired_guard.validation_steps(),
+        &[
+            PostgresPreconditionValidationStep::AdminSupportInterventionExpiredOpenAndTargetMatched {
+                subject_id: id("subject"),
+                target_credential_instance_id: id("credential"),
+                action: CredentialLifecycleAction::Replace,
+                now: at(200),
+            }
+        ]
+    );
 }
 
 #[test]
@@ -790,6 +1256,101 @@ fn postgres_mutation_execution_distinguishes_locked_delete_and_monotonic_upsert(
         &PostgresMutationWriteStep::UpdatePreviouslyLockedRow {
             target: CoreStorageTarget::CredentialInstance(id("credential")),
             table: PostgresAuthCoreTable::CredentialInstance,
+        }
+    );
+
+    let create_credential = PostgresMutationExecutionContract::for_mutation(
+        &Mutation::CreateCredentialInstanceMetadata {
+            metadata: message_signature_credential_metadata("credential"),
+            created_at: at(100),
+        },
+    );
+    assert_eq!(
+        create_credential.kind(),
+        CoreMutationKind::CreateCredentialInstanceMetadata
+    );
+    assert_eq!(
+        create_credential.write_step(),
+        &PostgresMutationWriteStep::InsertUniqueRow {
+            target: CoreStorageTarget::CredentialInstance(id("credential")),
+            table: PostgresAuthCoreTable::CredentialInstance,
+        }
+    );
+
+    let create_authority = PostgresMutationExecutionContract::for_mutation(
+        &Mutation::CreateCredentialRecoveryAuthority {
+            authority: CredentialRecoveryAuthority::new(
+                id("credential"),
+                CredentialLifecycleAction::Create,
+                id("authority"),
+                RecoveryAuthorityTiming::Immediate,
+            ),
+            created_at: at(100),
+        },
+    );
+    assert_eq!(
+        create_authority.kind(),
+        CoreMutationKind::CreateCredentialRecoveryAuthority
+    );
+    assert_eq!(
+        create_authority.write_step(),
+        &PostgresMutationWriteStep::InsertUniqueRow {
+            target: CoreStorageTarget::CredentialRecoveryAuthority {
+                target_credential_instance_id: id("credential"),
+                action: CredentialLifecycleAction::Create,
+                authority_id: id("authority"),
+                timing: RecoveryAuthorityTiming::Immediate,
+            },
+            table: PostgresAuthCoreTable::CredentialRecoveryAuthority,
+        }
+    );
+
+    let create_authority_source = PostgresMutationExecutionContract::for_mutation(
+        &Mutation::CreateLifecycleAuthoritySource {
+            source: LifecycleAuthoritySource::VerifiedProofSource(VerifiedProofSource::new(
+                VerifiedProofSourceKind::CredentialInstance,
+                id("credential"),
+            )),
+            authority_id: id("authority"),
+            created_at: at(100),
+        },
+    );
+    assert_eq!(
+        create_authority_source.kind(),
+        CoreMutationKind::CreateLifecycleAuthoritySource
+    );
+    assert_eq!(
+        create_authority_source.write_step(),
+        &PostgresMutationWriteStep::InsertUniqueRow {
+            target: CoreStorageTarget::LifecycleAuthoritySource {
+                source_kind: LifecycleAuthoritySourceKind::CredentialInstance,
+                source_id: id("credential"),
+                authority_id: id("authority"),
+            },
+            table: PostgresAuthCoreTable::LifecycleAuthoritySource,
+        }
+    );
+
+    let delete_authority_sources_for_source = PostgresMutationExecutionContract::for_mutation(
+        &Mutation::DeleteLifecycleAuthoritySourcesForSource {
+            source: LifecycleAuthoritySource::VerifiedProofSource(VerifiedProofSource::new(
+                VerifiedProofSourceKind::OutOfBandIdentifier,
+                id("identifier-source"),
+            )),
+        },
+    );
+    assert_eq!(
+        delete_authority_sources_for_source.kind(),
+        CoreMutationKind::DeleteLifecycleAuthoritySourcesForSource
+    );
+    assert_eq!(
+        delete_authority_sources_for_source.write_step(),
+        &PostgresMutationWriteStep::HardDeleteMatchingRowsWithSingleStatement {
+            target: CoreStorageTarget::LifecycleAuthoritySourcesForSource {
+                source_kind: LifecycleAuthoritySourceKind::OutOfBandIdentifier,
+                source_id: id("identifier-source"),
+            },
+            table: PostgresAuthCoreTable::LifecycleAuthoritySource,
         }
     );
 
@@ -918,6 +1479,48 @@ fn postgres_mutation_execution_distinguishes_locked_delete_and_monotonic_upsert(
                 "pending-subject-deletion"
             )),
             table: PostgresAuthCoreTable::PendingSubjectLifecycleAction,
+        }
+    );
+
+    let create_support_intervention =
+        PostgresMutationExecutionContract::for_mutation(&Mutation::CreateAdminSupportIntervention(
+            AdminSupportInterventionRecord::new_requested(
+                id("support-intervention"),
+                id("subject"),
+                id("credential"),
+                CredentialLifecycleAction::Replace,
+                at(100),
+                at(200),
+            )
+            .expect("support intervention"),
+        ));
+    assert_eq!(
+        create_support_intervention.kind(),
+        CoreMutationKind::CreateAdminSupportIntervention
+    );
+    assert_eq!(
+        create_support_intervention.write_step(),
+        &PostgresMutationWriteStep::InsertUniqueRow {
+            target: CoreStorageTarget::AdminSupportIntervention(id("support-intervention")),
+            table: PostgresAuthCoreTable::AdminSupportIntervention,
+        }
+    );
+
+    let close_support_intervention =
+        PostgresMutationExecutionContract::for_mutation(&Mutation::CloseAdminSupportIntervention {
+            intervention_id: id("support-intervention"),
+            status: AdminSupportInterventionStatus::Approved,
+            closed_at: at(150),
+        });
+    assert_eq!(
+        close_support_intervention.kind(),
+        CoreMutationKind::CloseAdminSupportIntervention
+    );
+    assert_eq!(
+        close_support_intervention.write_step(),
+        &PostgresMutationWriteStep::UpdatePreviouslyLockedRow {
+            target: CoreStorageTarget::AdminSupportIntervention(id("support-intervention")),
+            table: PostgresAuthCoreTable::AdminSupportIntervention,
         }
     );
 }
@@ -1215,6 +1818,7 @@ fn out_of_band_dedupe_precondition_requires_uniqueness_not_absent_row_locking() 
         &Precondition::NoOpenOutOfBandChallengeForDedupeKey {
             challenge_dedupe_key: dedupe_key("login:email-hash:window"),
             now: at(40),
+            replaceable_created_at_or_before: Some(at(20)),
         },
     );
 
@@ -1257,6 +1861,107 @@ fn credential_lifecycle_preconditions_lock_target_and_enforce_pending_uniqueness
     assert_eq!(
         target_guard.validation_requirements(),
         &[StorageValidationRequirement::CredentialInstanceStillActive]
+    );
+
+    let posture_guard = CorePreconditionStorageContract::for_precondition(
+        &Precondition::SubjectRetainsRequiredCredentialPostureAfterRemoval {
+            subject_id: id("subject"),
+            removed_credential_instance_id: id("credential"),
+            removed_credential_reset_policy_role: CredentialResetPolicyRole::SecondFactorCredential,
+        },
+    );
+    assert_eq!(
+        posture_guard.kind(),
+        CorePreconditionKind::SubjectRetainsRequiredCredentialPostureAfterRemoval
+    );
+    assert_eq!(
+        posture_guard.lock_requirements(),
+        &[
+            StorageLockRequirement::LockActiveCredentialInstancesForSubjectForUpdate {
+                subject_id: id("subject"),
+            },
+            StorageLockRequirement::LockActiveCredentialRecoveryAuthoritiesForSubjectForUpdate {
+                subject_id: id("subject"),
+            }
+        ]
+    );
+    assert_eq!(
+        posture_guard.validation_requirements(),
+        &[StorageValidationRequirement::SubjectRetainsRequiredCredentialPostureAfterRemoval]
+    );
+
+    let target_credential = message_signature_credential_metadata("credential");
+    let replacement_successor = replacement_successor_inheriting_target_policy(
+        "replacement-credential",
+        &target_credential,
+        [CredentialRecoveryAuthority::new(
+            id("credential"),
+            CredentialLifecycleAction::Replace,
+            id("replacement-authority"),
+            RecoveryAuthorityTiming::Immediate,
+        )],
+        [id("replacement-successor-authority")],
+    );
+    let replacement_posture_guard = CorePreconditionStorageContract::for_precondition(
+        &Precondition::SubjectRetainsRequiredCredentialPostureAfterReplacement {
+            subject_id: id("subject"),
+            replaced_credential_instance_id: id("credential"),
+            replaced_credential_reset_policy_role:
+                CredentialResetPolicyRole::SecondFactorCredential,
+            successor: replacement_successor,
+        },
+    );
+    assert_eq!(
+        replacement_posture_guard.kind(),
+        CorePreconditionKind::SubjectRetainsRequiredCredentialPostureAfterReplacement
+    );
+    assert_eq!(
+        replacement_posture_guard.lock_requirements(),
+        &[
+            StorageLockRequirement::LockActiveCredentialInstancesForSubjectForUpdate {
+                subject_id: id("subject"),
+            },
+            StorageLockRequirement::LockActiveCredentialRecoveryAuthoritiesForSubjectForUpdate {
+                subject_id: id("subject"),
+            }
+        ]
+    );
+    assert_eq!(
+        replacement_posture_guard.validation_requirements(),
+        &[StorageValidationRequirement::SubjectRetainsRequiredCredentialPostureAfterReplacement]
+    );
+
+    let added_credential = message_signature_credential_metadata("added-credential");
+    let addition_posture_guard = CorePreconditionStorageContract::for_precondition(
+        &Precondition::SubjectRetainsRequiredCredentialPostureAfterAddition {
+            subject_id: id("subject"),
+            added_credential,
+            added_recovery_authorities: vec![CredentialRecoveryAuthority::new(
+                id("added-credential"),
+                CredentialLifecycleAction::Reset,
+                id("added-credential-authority"),
+                RecoveryAuthorityTiming::Immediate,
+            )],
+        },
+    );
+    assert_eq!(
+        addition_posture_guard.kind(),
+        CorePreconditionKind::SubjectRetainsRequiredCredentialPostureAfterAddition
+    );
+    assert_eq!(
+        addition_posture_guard.lock_requirements(),
+        &[
+            StorageLockRequirement::LockActiveCredentialInstancesForSubjectForUpdate {
+                subject_id: id("subject"),
+            },
+            StorageLockRequirement::LockActiveCredentialRecoveryAuthoritiesForSubjectForUpdate {
+                subject_id: id("subject"),
+            }
+        ]
+    );
+    assert_eq!(
+        addition_posture_guard.validation_requirements(),
+        &[StorageValidationRequirement::SubjectRetainsRequiredCredentialPostureAfterAddition]
     );
 
     let pending_guard = CorePreconditionStorageContract::for_precondition(
@@ -1402,6 +2107,48 @@ fn credential_lifecycle_preconditions_lock_target_and_enforce_pending_uniqueness
         subject_cancellation_guard.validation_requirements(),
         &[StorageValidationRequirement::PendingSubjectLifecycleActionStillCancellableForSubject]
     );
+
+    let active_identifier_guard = CorePreconditionStorageContract::for_precondition(
+        &Precondition::OutOfBandIdentifierBindingStillActive {
+            source_id: id("current-email-source"),
+            subject_id: id("subject"),
+        },
+    );
+    assert_eq!(
+        active_identifier_guard.kind(),
+        CorePreconditionKind::OutOfBandIdentifierBindingStillActive
+    );
+    assert_eq!(
+        active_identifier_guard.lock_requirements(),
+        &[StorageLockRequirement::LockExistingRowForUpdate(
+            CoreStorageTarget::OutOfBandIdentifierBinding(id("current-email-source"))
+        )]
+    );
+    assert_eq!(
+        active_identifier_guard.validation_requirements(),
+        &[StorageValidationRequirement::OutOfBandIdentifierBindingStillActive]
+    );
+
+    let pending_identifier_guard = CorePreconditionStorageContract::for_precondition(
+        &Precondition::OutOfBandIdentifierBindingStillPendingActivation {
+            source_id: id("candidate-email-source"),
+            subject_id: id("subject"),
+        },
+    );
+    assert_eq!(
+        pending_identifier_guard.kind(),
+        CorePreconditionKind::OutOfBandIdentifierBindingStillPendingActivation
+    );
+    assert_eq!(
+        pending_identifier_guard.lock_requirements(),
+        &[StorageLockRequirement::LockExistingRowForUpdate(
+            CoreStorageTarget::OutOfBandIdentifierBinding(id("candidate-email-source"))
+        )]
+    );
+    assert_eq!(
+        pending_identifier_guard.validation_requirements(),
+        &[StorageValidationRequirement::OutOfBandIdentifierBindingStillPendingActivation]
+    );
 }
 
 #[test]
@@ -1525,6 +2272,90 @@ fn mutation_storage_contract_distinguishes_updates_hard_deletes_and_monotonic_up
         )))
     );
 
+    let create_credential =
+        CoreMutationStorageContract::for_mutation(&Mutation::CreateCredentialInstanceMetadata {
+            metadata: message_signature_credential_metadata("credential"),
+            created_at: at(100),
+        });
+    assert_eq!(
+        create_credential.kind(),
+        CoreMutationKind::CreateCredentialInstanceMetadata
+    );
+    assert_eq!(
+        create_credential.write_requirement(),
+        &StorageWriteRequirement::InsertUnique(CoreStorageTarget::CredentialInstance(id(
+            "credential"
+        )))
+    );
+
+    let create_authority =
+        CoreMutationStorageContract::for_mutation(&Mutation::CreateCredentialRecoveryAuthority {
+            authority: CredentialRecoveryAuthority::new(
+                id("credential"),
+                CredentialLifecycleAction::Create,
+                id("authority"),
+                RecoveryAuthorityTiming::Immediate,
+            ),
+            created_at: at(100),
+        });
+    assert_eq!(
+        create_authority.kind(),
+        CoreMutationKind::CreateCredentialRecoveryAuthority
+    );
+    assert_eq!(
+        create_authority.write_requirement(),
+        &StorageWriteRequirement::InsertUnique(CoreStorageTarget::CredentialRecoveryAuthority {
+            target_credential_instance_id: id("credential"),
+            action: CredentialLifecycleAction::Create,
+            authority_id: id("authority"),
+            timing: RecoveryAuthorityTiming::Immediate,
+        })
+    );
+
+    let create_authority_source =
+        CoreMutationStorageContract::for_mutation(&Mutation::CreateLifecycleAuthoritySource {
+            source: LifecycleAuthoritySource::VerifiedProofSource(VerifiedProofSource::new(
+                VerifiedProofSourceKind::CredentialInstance,
+                id("credential"),
+            )),
+            authority_id: id("authority"),
+            created_at: at(100),
+        });
+    assert_eq!(
+        create_authority_source.kind(),
+        CoreMutationKind::CreateLifecycleAuthoritySource
+    );
+    assert_eq!(
+        create_authority_source.write_requirement(),
+        &StorageWriteRequirement::InsertUnique(CoreStorageTarget::LifecycleAuthoritySource {
+            source_kind: LifecycleAuthoritySourceKind::CredentialInstance,
+            source_id: id("credential"),
+            authority_id: id("authority"),
+        })
+    );
+
+    let delete_authority_sources_for_source = CoreMutationStorageContract::for_mutation(
+        &Mutation::DeleteLifecycleAuthoritySourcesForSource {
+            source: LifecycleAuthoritySource::VerifiedProofSource(VerifiedProofSource::new(
+                VerifiedProofSourceKind::OutOfBandIdentifier,
+                id("identifier-source"),
+            )),
+        },
+    );
+    assert_eq!(
+        delete_authority_sources_for_source.kind(),
+        CoreMutationKind::DeleteLifecycleAuthoritySourcesForSource
+    );
+    assert_eq!(
+        delete_authority_sources_for_source.write_requirement(),
+        &StorageWriteRequirement::HardDeleteRowsMatching(
+            CoreStorageTarget::LifecycleAuthoritySourcesForSource {
+                source_kind: LifecycleAuthoritySourceKind::OutOfBandIdentifier,
+                source_id: id("identifier-source"),
+            }
+        )
+    );
+
     let create_pending = CoreMutationStorageContract::for_mutation(
         &Mutation::CreatePendingCredentialLifecycleAction(
             PendingCredentialLifecycleActionRecord::new_open(
@@ -1622,6 +2453,49 @@ fn mutation_storage_contract_distinguishes_updates_hard_deletes_and_monotonic_up
         &StorageWriteRequirement::UpdateLockedRow(
             CoreStorageTarget::PendingSubjectLifecycleAction(id("pending-subject-deletion"))
         )
+    );
+
+    let create_identifier_binding =
+        CoreMutationStorageContract::for_mutation(&Mutation::CreateOutOfBandIdentifierBinding {
+            record: OutOfBandIdentifierBindingRecord::new(
+                VerifiedProofSource::new(
+                    VerifiedProofSourceKind::OutOfBandIdentifier,
+                    id("candidate-email-source"),
+                ),
+                id("subject"),
+                "email_otp",
+                OutOfBandIdentifierBindingLifecycleState::PendingActivation,
+            )
+            .expect("candidate identifier binding"),
+            created_at: at(250),
+        });
+    assert_eq!(
+        create_identifier_binding.kind(),
+        CoreMutationKind::CreateOutOfBandIdentifierBinding
+    );
+    assert_eq!(
+        create_identifier_binding.write_requirement(),
+        &StorageWriteRequirement::InsertUnique(CoreStorageTarget::OutOfBandIdentifierBinding(id(
+            "candidate-email-source"
+        )))
+    );
+
+    let activate_identifier_binding = CoreMutationStorageContract::for_mutation(
+        &Mutation::SetOutOfBandIdentifierBindingLifecycleState {
+            source_id: id("candidate-email-source"),
+            lifecycle_state: OutOfBandIdentifierBindingLifecycleState::Active,
+            updated_at: at(250),
+        },
+    );
+    assert_eq!(
+        activate_identifier_binding.kind(),
+        CoreMutationKind::SetOutOfBandIdentifierBindingLifecycleState
+    );
+    assert_eq!(
+        activate_identifier_binding.write_requirement(),
+        &StorageWriteRequirement::UpdateLockedRow(CoreStorageTarget::OutOfBandIdentifierBinding(
+            id("candidate-email-source")
+        ))
     );
 }
 

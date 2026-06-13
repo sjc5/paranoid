@@ -1,7 +1,8 @@
 use std::cmp::min;
 
+use super::prelude::*;
 use super::session_lifecycle_helpers::*;
-use super::{active_proof, audit_event, transition, *};
+use super::{active_proof, audit_event, transition};
 
 pub(super) fn complete_full_authentication(
     config: &Config,

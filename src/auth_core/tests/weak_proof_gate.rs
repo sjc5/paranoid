@@ -148,6 +148,7 @@ fn hashcash_response_expires_before_state_load() {
         attempt_id: id("hashcash-expiry-attempt"),
         proof_use: ProofUse::SatisfyStepUp,
         subject_id: Some(id("hashcash-expiry-subject")),
+        subject_binding: ActiveProofContinuationSubjectBinding::RuntimeBoundSubject,
         attempt_fast_fail_until: at(120),
     };
     let secret_response =
@@ -406,6 +407,7 @@ fn weak_gate_adapter_registry_fails_closed_for_unsupported_or_ambiguous_gates() 
             attempt_id: id("unregistered-gate-attempt"),
             proof_use: ProofUse::ContributeToFullAuthentication,
             subject_id: Some(id("unregistered-gate-subject")),
+            subject_binding: ActiveProofContinuationSubjectBinding::RuntimeBoundSubject,
             attempt_fast_fail_until: at(100),
         },
         &proof,

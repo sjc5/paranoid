@@ -1,5 +1,5 @@
+use super::prelude::*;
 use super::proof_policy::validate_satisfied_proof_stack_for_use;
-use super::*;
 
 pub(super) fn validate_proof_use_can_be_satisfied_by_active_proof(
     proof_use: ProofUse,
@@ -41,8 +41,30 @@ pub(crate) fn validate_known_subject_active_proof_method(
     method: &ProofMethodDeclaration,
 ) -> Result<(), Error> {
     let contract = MethodAdapterContract::for_method(method.clone());
-    if method.semantics().subject_role != ProofSubjectRole::RequiresKnownSubject
+    if !matches!(
+        contract.verification().completion_input(),
+        MethodCompletionInputKind::ConfiguredSecretProof
+            | MethodCompletionInputKind::RecoveryCredential
+    ) || method.semantics().interaction != ProofInteraction::Active
+        || contract.challenge_cookie().kind() != MethodChallengeCookieKind::NotUsed
+    {
+        return Err(Error::ProofMethodCannotCompleteKnownSubjectActiveProof {
+            family: method.family(),
+        });
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_recovery_credential_active_proof_method(
+    method: &ProofMethodDeclaration,
+) -> Result<(), Error> {
+    let contract = MethodAdapterContract::for_method(method.clone());
+    if method.family() != ProofFamily::RecoveryCode
         || method.semantics().interaction != ProofInteraction::Active
+        || contract.verification().completion_input()
+            != MethodCompletionInputKind::RecoveryCredential
+        || contract.verification().subject_binding()
+            != MethodVerifiedProofSubjectBinding::MethodMayResolve
         || contract.challenge_cookie().kind() != MethodChallengeCookieKind::NotUsed
     {
         return Err(Error::ProofMethodCannotCompleteKnownSubjectActiveProof {
@@ -281,6 +303,26 @@ pub(super) fn require_active_proof_continuation_for_use_before_state_load(
 ) -> Result<&ActiveProofContinuationCookieDraft, Error> {
     let continuation = require_active_proof_continuation_before_state_load(presented_cookies, now)?;
     continuation.validate_for_use_before_state_load(now, proof_use)?;
+    Ok(continuation)
+}
+
+pub(super) fn require_verified_proof_bound_recovery_continuation_before_state_load(
+    presented_cookies: &PresentedAuthCookies,
+    now: UnixSeconds,
+) -> Result<&ActiveProofContinuationCookieDraft, Error> {
+    let continuation = require_active_proof_continuation_for_use_before_state_load(
+        presented_cookies,
+        now,
+        ProofUse::RecoverOrReplaceCredential,
+    )?;
+    if continuation.subject_id.is_none() {
+        return Err(Error::InvalidActiveProofContinuationCookiePayload);
+    }
+    if continuation.subject_binding
+        != ActiveProofContinuationSubjectBinding::VerifiedProofBoundSubject
+    {
+        return Err(Error::InvalidActiveProofContinuationCookiePayload);
+    }
     Ok(continuation)
 }
 

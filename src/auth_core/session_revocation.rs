@@ -1,5 +1,6 @@
+use super::prelude::*;
 use super::session_lifecycle_helpers::*;
-use super::{audit_event, transition, *};
+use super::{audit_event, transition};
 
 pub(super) fn logout_current_session(
     command: LogoutCurrentSession,

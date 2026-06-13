@@ -10,7 +10,9 @@
 //! use paranoid::db::BootstrapConfig;
 //! use paranoid::queue::EnqueueOptions;
 //!
-//! let stores = BootstrapConfig::default().migrate_schema(&pool).await?;
+//! let stores = BootstrapConfig::from_schema_name_text("__paranoid")?
+//!     .migrate_schema(&pool)
+//!     .await?;
 //! let queue = stores.queue;
 //!
 //! let result = queue

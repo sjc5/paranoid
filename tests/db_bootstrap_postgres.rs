@@ -63,8 +63,9 @@ async fn concurrent_bootstrap_migrates_subsystem_tables_in_one_schema() {
 }
 
 #[test]
-fn bootstrap_default_layout_uses_schema_as_the_paranoid_namespace() {
-    let config = BootstrapConfig::default();
+fn bootstrap_explicit_layout_uses_schema_as_the_paranoid_namespace() {
+    let config = BootstrapConfig::from_schema_name_text("__paranoid")
+        .expect("explicit bootstrap schema name");
     let table_names = config.table_names();
 
     for table_name in [

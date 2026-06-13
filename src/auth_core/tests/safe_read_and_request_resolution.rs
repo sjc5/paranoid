@@ -244,6 +244,30 @@ fn safe_read_cache_cannot_authenticate_state_changing_requests() {
 }
 
 #[test]
+fn request_resolution_does_not_require_network_or_user_agent_identity() {
+    let loaded = loaded_session(200);
+
+    let transition = reduce_command(
+        &config(),
+        Command::ResolveRequest(ResolveRequest {
+            now: at(60),
+            request_kind: RequestKind::StateChanging,
+            fresh_session_id: None,
+        }),
+        &loaded,
+    )
+    .expect("request resolution should use auth cookies and authoritative state");
+
+    assert!(matches!(
+        transition.outcome,
+        Outcome::Authenticated(Authenticated {
+            source: AuthenticationSource::AuthoritativeSession,
+            ..
+        })
+    ));
+}
+
+#[test]
 fn safe_read_cache_cannot_authenticate_sensitive_requests() {
     let mut loaded = loaded_session(200);
     loaded

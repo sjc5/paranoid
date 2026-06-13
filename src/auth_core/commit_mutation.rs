@@ -1,4 +1,4 @@
-use super::*;
+use super::prelude::*;
 
 /// Commit-time precondition.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -80,6 +80,8 @@ pub enum Precondition {
         challenge_dedupe_key: OutOfBandChallengeDedupeKey,
         /// Transition time used to ignore already-expired challenges.
         now: UnixSeconds,
+        /// Live challenges created at or before this timestamp may be replaced.
+        replaceable_created_at_or_before: Option<UnixSeconds>,
     },
     /// Target credential metadata must still be active and owned by the loaded subject.
     CredentialInstanceStillActive {
@@ -87,6 +89,35 @@ pub enum Precondition {
         credential_instance_id: VerifiedProofSourceId,
         /// Subject that must own the credential.
         subject_id: SubjectId,
+    },
+    /// Subject must retain an acceptable credential posture after removing the target.
+    SubjectRetainsRequiredCredentialPostureAfterRemoval {
+        /// Subject that must retain an acceptable credential posture.
+        subject_id: SubjectId,
+        /// Credential instance being removed or disabled.
+        removed_credential_instance_id: VerifiedProofSourceId,
+        /// Reset policy role of the credential being removed.
+        removed_credential_reset_policy_role: CredentialResetPolicyRole,
+    },
+    /// Subject must retain an acceptable credential posture after replacing the target.
+    SubjectRetainsRequiredCredentialPostureAfterReplacement {
+        /// Subject that must retain an acceptable credential posture.
+        subject_id: SubjectId,
+        /// Credential instance being replaced.
+        replaced_credential_instance_id: VerifiedProofSourceId,
+        /// Reset policy role of the credential being replaced.
+        replaced_credential_reset_policy_role: CredentialResetPolicyRole,
+        /// Successor credential created by the replacement.
+        successor: CredentialReplacementSuccessor,
+    },
+    /// Adding a credential must not create a collapsed ordinary/second-factor posture.
+    SubjectRetainsRequiredCredentialPostureAfterAddition {
+        /// Subject that must retain an honest credential posture.
+        subject_id: SubjectId,
+        /// Credential instance being added.
+        added_credential: CredentialInstanceMetadata,
+        /// Recovery authorities being added with the credential.
+        added_recovery_authorities: Vec<CredentialRecoveryAuthority>,
     },
     /// No open pending action may already exist for this target/action pair.
     NoOpenPendingCredentialLifecycleActionForTarget {
@@ -152,6 +183,57 @@ pub enum Precondition {
         /// Subject lifecycle action.
         action: SubjectLifecycleAction,
         /// Transition time used to decide cancellability.
+        now: UnixSeconds,
+    },
+    /// Out-of-band identifier binding must still be active for this subject.
+    OutOfBandIdentifierBindingStillActive {
+        /// Identifier source to guard.
+        source_id: VerifiedProofSourceId,
+        /// Subject that must own the binding.
+        subject_id: SubjectId,
+    },
+    /// Out-of-band identifier binding must still be pending activation for this subject.
+    OutOfBandIdentifierBindingStillPendingActivation {
+        /// Identifier source to guard.
+        source_id: VerifiedProofSourceId,
+        /// Subject that must own the binding.
+        subject_id: SubjectId,
+    },
+    /// No open admin/support intervention may already exist for this target/action pair.
+    NoOpenAdminSupportInterventionForTarget {
+        /// Subject targeted by the intervention.
+        subject_id: SubjectId,
+        /// Target credential instance.
+        target_credential_instance_id: VerifiedProofSourceId,
+        /// Lifecycle action.
+        action: CredentialLifecycleAction,
+        /// Transition time used to close expired interventions.
+        now: UnixSeconds,
+    },
+    /// Admin/support intervention must still be open, unexpired, and target-matched.
+    AdminSupportInterventionStillOpen {
+        /// Intervention to guard.
+        intervention_id: AdminSupportInterventionId,
+        /// Subject targeted by the intervention.
+        subject_id: SubjectId,
+        /// Target credential instance.
+        target_credential_instance_id: VerifiedProofSourceId,
+        /// Lifecycle action.
+        action: CredentialLifecycleAction,
+        /// Transition time used to decide liveness.
+        now: UnixSeconds,
+    },
+    /// Admin/support intervention must still be open, expired, and target-matched.
+    AdminSupportInterventionStillExpiredOpen {
+        /// Intervention to guard.
+        intervention_id: AdminSupportInterventionId,
+        /// Subject targeted by the intervention.
+        subject_id: SubjectId,
+        /// Target credential instance.
+        target_credential_instance_id: VerifiedProofSourceId,
+        /// Lifecycle action.
+        action: CredentialLifecycleAction,
+        /// Transition time used to decide expiry.
         now: UnixSeconds,
     },
 }
@@ -291,6 +373,34 @@ pub enum Mutation {
         /// Time the action was authorized.
         authorized_at: UnixSeconds,
     },
+    /// Create core-visible metadata for a new credential instance.
+    CreateCredentialInstanceMetadata {
+        /// New credential instance metadata.
+        metadata: CredentialInstanceMetadata,
+        /// Creation timestamp.
+        created_at: UnixSeconds,
+    },
+    /// Create one recovery-authority edge for a credential instance.
+    CreateCredentialRecoveryAuthority {
+        /// Recovery-authority edge to persist.
+        authority: CredentialRecoveryAuthority,
+        /// Creation timestamp.
+        created_at: UnixSeconds,
+    },
+    /// Create one lifecycle authority-source mapping.
+    CreateLifecycleAuthoritySource {
+        /// Lifecycle authority source.
+        source: LifecycleAuthoritySource,
+        /// Effective recovery authority represented by the source.
+        authority_id: RecoveryAuthorityId,
+        /// Creation timestamp.
+        created_at: UnixSeconds,
+    },
+    /// Delete every lifecycle authority-source mapping for one source.
+    DeleteLifecycleAuthoritySourcesForSource {
+        /// Lifecycle authority source whose authority mappings must be replaced.
+        source: LifecycleAuthoritySource,
+    },
     /// Create a delayed credential lifecycle action.
     CreatePendingCredentialLifecycleAction(PendingCredentialLifecycleActionRecord),
     /// Record a core-visible credential lifecycle action that has executed.
@@ -324,6 +434,33 @@ pub enum Mutation {
     ClosePendingSubjectLifecycleAction {
         /// Pending action to close.
         pending_action_id: PendingSubjectLifecycleActionId,
+        /// Closure timestamp.
+        closed_at: UnixSeconds,
+    },
+    /// Create a Paranoid-owned out-of-band identifier binding row.
+    CreateOutOfBandIdentifierBinding {
+        /// Binding record to insert.
+        record: OutOfBandIdentifierBindingRecord,
+        /// Creation timestamp.
+        created_at: UnixSeconds,
+    },
+    /// Set an out-of-band identifier binding lifecycle state.
+    SetOutOfBandIdentifierBindingLifecycleState {
+        /// Identifier source to update.
+        source_id: VerifiedProofSourceId,
+        /// New lifecycle state.
+        lifecycle_state: OutOfBandIdentifierBindingLifecycleState,
+        /// Update timestamp.
+        updated_at: UnixSeconds,
+    },
+    /// Create a support/admin intervention record.
+    CreateAdminSupportIntervention(AdminSupportInterventionRecord),
+    /// Close a support/admin intervention after approval, denial, or expiry.
+    CloseAdminSupportIntervention {
+        /// Intervention to close.
+        intervention_id: AdminSupportInterventionId,
+        /// Terminal status to write.
+        status: AdminSupportInterventionStatus,
         /// Closure timestamp.
         closed_at: UnixSeconds,
     },

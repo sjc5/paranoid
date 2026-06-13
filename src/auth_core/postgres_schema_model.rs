@@ -1,4 +1,4 @@
-use super::*;
+use super::prelude::*;
 
 const POSTGRES_AUTH_CORE_TABLES: &[PostgresAuthCoreTable] = &[
     PostgresAuthCoreTable::Session,
@@ -13,11 +13,15 @@ const POSTGRES_AUTH_CORE_TABLES: &[PostgresAuthCoreTable] = &[
     PostgresAuthCoreTable::SubjectAuthState,
     PostgresAuthCoreTable::CredentialInstance,
     PostgresAuthCoreTable::CredentialRecoveryAuthority,
+    PostgresAuthCoreTable::SubjectLifecycleAuthority,
     PostgresAuthCoreTable::LifecycleAuthoritySource,
+    PostgresAuthCoreTable::OutOfBandIdentifierBinding,
     PostgresAuthCoreTable::PendingCredentialLifecycleAction,
     PostgresAuthCoreTable::PendingSubjectLifecycleAction,
+    PostgresAuthCoreTable::AdminSupportIntervention,
     PostgresAuthCoreTable::AuditEvent,
     PostgresAuthCoreTable::CoreDurableEffectCommand,
+    PostgresAuthCoreTable::CoreDurableEffectQueueDispatch,
 ];
 
 /// Postgres schema contract for reducer-owned auth state.
@@ -63,11 +67,20 @@ impl PostgresAuthCoreSchemaContract {
             }
             CoreStorageTarget::SubjectAuthState(_) => PostgresAuthCoreTable::SubjectAuthState,
             CoreStorageTarget::CredentialInstance(_) => PostgresAuthCoreTable::CredentialInstance,
-            CoreStorageTarget::CredentialRecoveryAuthoritiesForCredential(_) => {
+            CoreStorageTarget::CredentialRecoveryAuthority { .. }
+            | CoreStorageTarget::CredentialRecoveryAuthoritiesForCredential(_) => {
                 PostgresAuthCoreTable::CredentialRecoveryAuthority
             }
-            CoreStorageTarget::LifecycleAuthoritySource { .. } => {
+            CoreStorageTarget::SubjectLifecycleAuthority { .. }
+            | CoreStorageTarget::SubjectLifecycleAuthoritiesForSubject(_) => {
+                PostgresAuthCoreTable::SubjectLifecycleAuthority
+            }
+            CoreStorageTarget::LifecycleAuthoritySource { .. }
+            | CoreStorageTarget::LifecycleAuthoritySourcesForSource { .. } => {
                 PostgresAuthCoreTable::LifecycleAuthoritySource
+            }
+            CoreStorageTarget::OutOfBandIdentifierBinding(_) => {
+                PostgresAuthCoreTable::OutOfBandIdentifierBinding
             }
             CoreStorageTarget::PendingCredentialLifecycleAction(_)
             | CoreStorageTarget::OpenPendingCredentialLifecycleActionForTarget { .. } => {
@@ -76,6 +89,10 @@ impl PostgresAuthCoreSchemaContract {
             CoreStorageTarget::PendingSubjectLifecycleAction(_)
             | CoreStorageTarget::OpenPendingSubjectLifecycleActionForSubject { .. } => {
                 PostgresAuthCoreTable::PendingSubjectLifecycleAction
+            }
+            CoreStorageTarget::AdminSupportIntervention(_)
+            | CoreStorageTarget::OpenAdminSupportInterventionForTarget { .. } => {
+                PostgresAuthCoreTable::AdminSupportIntervention
             }
             CoreStorageTarget::AuditEvents => PostgresAuthCoreTable::AuditEvent,
             CoreStorageTarget::CoreDurableEffectCommands => {
@@ -120,16 +137,24 @@ pub enum PostgresAuthCoreTable {
     CredentialInstance,
     /// Recovery-authority edges for credential lifecycle actions.
     CredentialRecoveryAuthority,
+    /// Recovery-authority edges for subject lifecycle actions.
+    SubjectLifecycleAuthority,
     /// Mapping from lifecycle evidence sources to effective recovery authorities.
     LifecycleAuthoritySource,
+    /// Paranoid-owned out-of-band identifier bindings.
+    OutOfBandIdentifierBinding,
     /// Delayed credential lifecycle actions.
     PendingCredentialLifecycleAction,
     /// Delayed subject lifecycle actions.
     PendingSubjectLifecycleAction,
+    /// Stored support/admin interventions.
+    AdminSupportIntervention,
     /// Append-only audit event stream.
     AuditEvent,
     /// Durable core effect command outbox.
     CoreDurableEffectCommand,
+    /// Permanent Queue dispatch ledger for core effect commands.
+    CoreDurableEffectQueueDispatch,
 }
 
 impl PostgresAuthCoreTable {
@@ -148,11 +173,15 @@ impl PostgresAuthCoreTable {
             Self::SubjectAuthState => "auth_subject_state",
             Self::CredentialInstance => "auth_credential_instances",
             Self::CredentialRecoveryAuthority => "auth_credential_recovery_authorities",
+            Self::SubjectLifecycleAuthority => "auth_subject_lifecycle_authorities",
             Self::LifecycleAuthoritySource => "auth_lifecycle_authority_sources",
+            Self::OutOfBandIdentifierBinding => "auth_out_of_band_identifier_bindings",
             Self::PendingCredentialLifecycleAction => "auth_credential_lifecycle_pending_actions",
             Self::PendingSubjectLifecycleAction => "auth_subject_lifecycle_pending_actions",
+            Self::AdminSupportIntervention => "auth_admin_support_interventions",
             Self::AuditEvent => "auth_audit_events",
             Self::CoreDurableEffectCommand => "auth_core_durable_effect_commands",
+            Self::CoreDurableEffectQueueDispatch => "auth_core_durable_effect_queue_dispatches",
         }
     }
 
@@ -177,15 +206,20 @@ impl PostgresAuthCoreTable {
             Self::SubjectAuthState => CoreStorageRecordKind::SubjectAuthState,
             Self::CredentialInstance => CoreStorageRecordKind::CredentialInstance,
             Self::CredentialRecoveryAuthority => CoreStorageRecordKind::CredentialRecoveryAuthority,
+            Self::SubjectLifecycleAuthority => CoreStorageRecordKind::SubjectLifecycleAuthority,
             Self::LifecycleAuthoritySource => CoreStorageRecordKind::LifecycleAuthoritySource,
+            Self::OutOfBandIdentifierBinding => CoreStorageRecordKind::OutOfBandIdentifierBinding,
             Self::PendingCredentialLifecycleAction => {
                 CoreStorageRecordKind::PendingCredentialLifecycleAction
             }
             Self::PendingSubjectLifecycleAction => {
                 CoreStorageRecordKind::PendingSubjectLifecycleAction
             }
+            Self::AdminSupportIntervention => CoreStorageRecordKind::AdminSupportIntervention,
             Self::AuditEvent => CoreStorageRecordKind::AuditEvent,
-            Self::CoreDurableEffectCommand => CoreStorageRecordKind::CoreDurableEffectCommand,
+            Self::CoreDurableEffectCommand | Self::CoreDurableEffectQueueDispatch => {
+                CoreStorageRecordKind::CoreDurableEffectCommand
+            }
         }
     }
 }
@@ -376,6 +410,7 @@ impl PostgresAuthCoreTableContract {
                     id_column("subject_id", false),
                     core_enum_column("credential_kind", false),
                     validated_text_column("method_label", false, METHOD_LABEL_MAX_BYTES),
+                    core_enum_column("reset_policy_role", false),
                     core_enum_column("lifecycle_state", false),
                     unix_seconds_column("created_at", false),
                     unix_seconds_column("updated_at", false),
@@ -400,6 +435,23 @@ impl PostgresAuthCoreTableContract {
                 ])],
                 PostgresTableWritePolicy::Mutable,
             ),
+            PostgresAuthCoreTable::SubjectLifecycleAuthority => table_contract(
+                table,
+                vec![
+                    id_column("subject_id", false),
+                    core_enum_column("subject_lifecycle_action", false),
+                    id_column("authority_id", false),
+                    core_enum_column("authority_timing", false),
+                    unix_seconds_column("created_at", false),
+                ],
+                vec![primary_key([
+                    "subject_id",
+                    "subject_lifecycle_action",
+                    "authority_id",
+                    "authority_timing",
+                ])],
+                PostgresTableWritePolicy::Mutable,
+            ),
             PostgresAuthCoreTable::LifecycleAuthoritySource => table_contract(
                 table,
                 vec![
@@ -409,6 +461,19 @@ impl PostgresAuthCoreTableContract {
                     unix_seconds_column("created_at", false),
                 ],
                 vec![primary_key(["source_kind", "source_id", "authority_id"])],
+                PostgresTableWritePolicy::Mutable,
+            ),
+            PostgresAuthCoreTable::OutOfBandIdentifierBinding => table_contract(
+                table,
+                vec![
+                    id_column("source_id", false),
+                    id_column("subject_id", false),
+                    validated_text_column("proof_method_label", false, METHOD_LABEL_MAX_BYTES),
+                    core_enum_column("lifecycle_state", false),
+                    unix_seconds_column("created_at", false),
+                    unix_seconds_column("updated_at", false),
+                ],
+                vec![primary_key(["source_id"])],
                 PostgresTableWritePolicy::Mutable,
             ),
             PostgresAuthCoreTable::PendingCredentialLifecycleAction => table_contract(
@@ -439,6 +504,13 @@ impl PostgresAuthCoreTableContract {
                     id_column("pending_action_id", false),
                     id_column("subject_id", false),
                     core_enum_column("subject_lifecycle_action", false),
+                    id_column("current_identifier_source_id", true),
+                    id_column("candidate_identifier_source_id", true),
+                    bounded_opaque_bytes_column(
+                        "candidate_identifier_authority_ids",
+                        true,
+                        OUT_OF_BAND_IDENTIFIER_CHANGE_CANDIDATE_AUTHORITY_IDS_MAX_BYTES,
+                    ),
                     unix_seconds_column("requested_at", false),
                     unix_seconds_column("earliest_execute_at", false),
                     unix_seconds_column("expires_at", false),
@@ -449,6 +521,28 @@ impl PostgresAuthCoreTableContract {
                     unique(
                         "subject_lifecycle_open_pending_action",
                         ["subject_id", "subject_lifecycle_action"],
+                        Some(PostgresUniquePredicate::OpenRow),
+                    ),
+                ],
+                PostgresTableWritePolicy::Mutable,
+            ),
+            PostgresAuthCoreTable::AdminSupportIntervention => table_contract(
+                table,
+                vec![
+                    id_column("intervention_id", false),
+                    id_column("subject_id", false),
+                    id_column("target_credential_instance_id", false),
+                    core_enum_column("lifecycle_action", false),
+                    core_enum_column("status", false),
+                    unix_seconds_column("requested_at", false),
+                    unix_seconds_column("expires_at", false),
+                    unix_seconds_column("closed_at", true),
+                ],
+                vec![
+                    primary_key(["intervention_id"]),
+                    unique(
+                        "admin_support_open_intervention",
+                        ["target_credential_instance_id", "lifecycle_action"],
                         Some(PostgresUniquePredicate::OpenRow),
                     ),
                 ],
@@ -499,6 +593,26 @@ impl PostgresAuthCoreTableContract {
                 ],
                 vec![primary_key(["effect_command_id"])],
                 PostgresTableWritePolicy::AppendOnly,
+            ),
+            PostgresAuthCoreTable::CoreDurableEffectQueueDispatch => table_contract(
+                table,
+                vec![
+                    nonnegative_bigint_column("effect_command_id", false),
+                    fixed_opaque_bytes_column("queue_job_id", false, crate::id::SORTABLE_ID_SIZE),
+                    validated_text_column(
+                        "task_name",
+                        false,
+                        crate::db::queue::MAX_QUEUE_TASK_NAME_BYTES,
+                    ),
+                    validated_text_column(
+                        "dedupe_key",
+                        false,
+                        crate::db::queue::MAX_QUEUE_DEDUPE_KEY_BYTES,
+                    ),
+                    unix_seconds_column("enqueued_at", false),
+                ],
+                vec![primary_key(["effect_command_id"])],
+                PostgresTableWritePolicy::InsertOnly,
             ),
         }
     }
@@ -578,6 +692,16 @@ pub enum PostgresColumnValueContract {
         /// Maximum byte length.
         max_bytes: usize,
     },
+    /// Opaque bytes with exact length.
+    FixedOpaqueBytes {
+        /// Exact byte length.
+        exact_bytes: usize,
+    },
+    /// Non-empty opaque bytes with an explicit maximum length.
+    BoundedOpaqueBytes {
+        /// Maximum byte length.
+        max_bytes: usize,
+    },
     /// `crate::crypto::MacOverSecret` bytes.
     MacOverSecretBytes {
         /// Exact byte length.
@@ -589,6 +713,8 @@ pub enum PostgresColumnValueContract {
     UnixSeconds,
     /// Non-negative counter.
     Counter,
+    /// Non-negative bigint value.
+    NonNegativeBigint,
     /// Core enum discriminant represented as a small numeric domain.
     CoreEnumDiscriminant,
     /// Validated auth-core identifier or display text under bytewise collation.
@@ -773,6 +899,32 @@ fn id_column(name: &'static str, nullable: bool) -> PostgresColumnContract {
     )
 }
 
+fn fixed_opaque_bytes_column(
+    name: &'static str,
+    nullable: bool,
+    exact_bytes: usize,
+) -> PostgresColumnContract {
+    column(
+        name,
+        PostgresColumnStorage::Bytea,
+        PostgresColumnValueContract::FixedOpaqueBytes { exact_bytes },
+        nullable,
+    )
+}
+
+fn bounded_opaque_bytes_column(
+    name: &'static str,
+    nullable: bool,
+    max_bytes: usize,
+) -> PostgresColumnContract {
+    column(
+        name,
+        PostgresColumnStorage::Bytea,
+        PostgresColumnValueContract::BoundedOpaqueBytes { max_bytes },
+        nullable,
+    )
+}
+
 fn mac_over_secret_column(name: &'static str) -> PostgresColumnContract {
     column(
         name,
@@ -807,6 +959,15 @@ fn counter_column(name: &'static str, nullable: bool) -> PostgresColumnContract 
         name,
         PostgresColumnStorage::Integer,
         PostgresColumnValueContract::Counter,
+        nullable,
+    )
+}
+
+fn nonnegative_bigint_column(name: &'static str, nullable: bool) -> PostgresColumnContract {
+    column(
+        name,
+        PostgresColumnStorage::Bigint,
+        PostgresColumnValueContract::NonNegativeBigint,
         nullable,
     )
 }

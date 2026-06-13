@@ -10,6 +10,7 @@ fn credential_instance_metadata_records_totp_as_shared_secret_credential_source(
         subject_id.clone(),
         CredentialInstanceKind::SharedSecretOtpVerifier,
         "totp",
+        CredentialResetPolicyRole::SecondFactorCredential,
         CredentialLifecycleState::Active,
     )
     .expect("TOTP credential metadata");
@@ -22,12 +23,79 @@ fn credential_instance_metadata_records_totp_as_shared_secret_credential_source(
     );
     assert_eq!(metadata.proof_family(), ProofFamily::SharedSecretOtp);
     assert_eq!(metadata.method_label(), "totp");
+    assert_eq!(
+        metadata.reset_policy_role(),
+        CredentialResetPolicyRole::SecondFactorCredential
+    );
     assert_eq!(metadata.lifecycle_state(), CredentialLifecycleState::Active);
     assert!(metadata.can_produce_new_proofs());
     assert_eq!(
         metadata.verified_proof_source(),
         VerifiedProofSource::new(VerifiedProofSourceKind::CredentialInstance, credential_id)
     );
+}
+
+#[test]
+fn credential_instance_metadata_records_every_app_owned_credential_kind() {
+    let cases = [
+        (
+            CredentialInstanceKind::MessageSignatureVerifier,
+            ProofFamily::MessageSignature,
+            "password_derived_signature",
+            CredentialResetPolicyRole::OrdinaryCredential,
+        ),
+        (
+            CredentialInstanceKind::SharedSecretOtpVerifier,
+            ProofFamily::SharedSecretOtp,
+            "totp",
+            CredentialResetPolicyRole::SecondFactorCredential,
+        ),
+        (
+            CredentialInstanceKind::OriginBoundPublicKeyCredential,
+            ProofFamily::OriginBoundPublicKey,
+            "webauthn_passkey",
+            CredentialResetPolicyRole::SecondFactorCredential,
+        ),
+        (
+            CredentialInstanceKind::RecoveryCodeCredential,
+            ProofFamily::RecoveryCode,
+            "recovery_code",
+            CredentialResetPolicyRole::SecondFactorCredential,
+        ),
+        (
+            CredentialInstanceKind::TrustedDeviceCredential,
+            ProofFamily::TrustedDevice,
+            "trusted_device",
+            CredentialResetPolicyRole::OrdinaryCredential,
+        ),
+    ];
+
+    for (kind, proof_family, method_label, reset_policy_role) in cases {
+        let credential_id: VerifiedProofSourceId =
+            id(&format!("{method_label}-credential-instance"));
+        let subject_id: SubjectId = id(&format!("{method_label}-subject"));
+        let metadata = CredentialInstanceMetadata::new(
+            credential_id.clone(),
+            subject_id.clone(),
+            kind,
+            method_label,
+            reset_policy_role,
+            CredentialLifecycleState::Active,
+        )
+        .expect("credential metadata");
+
+        assert_eq!(metadata.credential_instance_id(), &credential_id);
+        assert_eq!(metadata.subject_id(), &subject_id);
+        assert_eq!(metadata.kind(), kind);
+        assert_eq!(metadata.proof_family(), proof_family);
+        assert_eq!(metadata.method_label(), method_label);
+        assert_eq!(metadata.reset_policy_role(), reset_policy_role);
+        assert_eq!(metadata.lifecycle_state(), CredentialLifecycleState::Active);
+        assert_eq!(
+            metadata.verified_proof_source(),
+            VerifiedProofSource::new(VerifiedProofSourceKind::CredentialInstance, credential_id)
+        );
+    }
 }
 
 #[test]
@@ -75,6 +143,7 @@ fn credential_instance_metadata_validates_method_label_domain() {
             id("subject"),
             CredentialInstanceKind::SharedSecretOtpVerifier,
             "",
+            CredentialResetPolicyRole::SecondFactorCredential,
             CredentialLifecycleState::Active,
         ),
         Err(Error::EmptyProofMethodLabel)
@@ -85,6 +154,7 @@ fn credential_instance_metadata_validates_method_label_domain() {
             id("subject"),
             CredentialInstanceKind::SharedSecretOtpVerifier,
             "totp app",
+            CredentialResetPolicyRole::SecondFactorCredential,
             CredentialLifecycleState::Active,
         ),
         Err(Error::InvalidIdentifierString {

@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
-use super::*;
+use super::prelude::*;
 
 const HASHCASH_METHOD_LABEL: &str = "hashcash";
 const HASHCASH_PAYLOAD_VERSION: u8 = 1;

@@ -1,7 +1,7 @@
 use std::cmp::min;
 
 use super::active_proof_support::*;
-use super::*;
+use super::prelude::*;
 
 pub(super) use super::active_proof_support::{
     append_active_proof_attempt_closure_to_plan, ensure_active_proof_attempt_matches_subject,
@@ -227,6 +227,10 @@ fn start_active_proof_attempt_for_subject(
                 attempt_id: attempt_id.clone(),
                 proof_use,
                 subject_id: subject_id.clone(),
+                subject_binding: match subject_id {
+                    Some(_) => ActiveProofContinuationSubjectBinding::RuntimeBoundSubject,
+                    None => ActiveProofContinuationSubjectBinding::NoSubject,
+                },
                 attempt_fast_fail_until: expires_at,
             },
         ));
@@ -315,6 +319,9 @@ pub(super) fn issue_out_of_band_challenge(
         .push(Precondition::NoOpenOutOfBandChallengeForDedupeKey {
             challenge_dedupe_key: command.challenge_dedupe_key,
             now: command.now,
+            replaceable_created_at_or_before: command
+                .now
+                .checked_sub_duration(config.out_of_band_challenge_replacement_cooldown),
         });
     plan.mutations
         .push(Mutation::CreateActiveProofChallenge(challenge_record));
@@ -601,6 +608,9 @@ pub(super) fn complete_active_proof_challenge(
     validate_weak_proof_gate_for_proof(&proof, &command.weak_proof_gate)?;
     let subject_id_after_completion =
         active_proof_subject_id_after_completion(attempt, &proof, supplied_subject_id)?;
+    let should_reissue_subject_bound_continuation = attempt.proof_use
+        == ProofUse::RecoverOrReplaceCredential
+        && subject_id_after_completion.is_some();
     ensure_active_proof_attempt_not_subject_revoked(
         loaded,
         attempt,
@@ -670,6 +680,19 @@ pub(super) fn complete_active_proof_challenge(
         proof: satisfied_proof,
         satisfied_at: command.now,
     });
+    if should_reissue_subject_bound_continuation {
+        plan.response_effects
+            .push(ResponseEffect::IssueActiveProofContinuationCookie(
+                ActiveProofContinuationCookieDraft {
+                    attempt_id: command.attempt_id.clone(),
+                    proof_use: attempt.proof_use,
+                    subject_id: subject_id_after_completion.clone(),
+                    subject_binding:
+                        ActiveProofContinuationSubjectBinding::VerifiedProofBoundSubject,
+                    attempt_fast_fail_until: attempt.expires_at,
+                },
+            ));
+    }
     plan.method_commit_work.extend(command.method_commit_work);
     plan.audit_events
         .push(active_proof_audit_event(ActiveProofAuditEventInput {
@@ -688,6 +711,105 @@ pub(super) fn complete_active_proof_challenge(
             attempt_id: command.attempt_id,
             proof,
         },
+        plan,
+    ))
+}
+
+pub(super) fn reserve_out_of_band_identifier_change_candidate_binding(
+    command: ReserveOutOfBandIdentifierChangeCandidateBinding,
+    loaded: &LoadedState,
+) -> Result<Transition, Error> {
+    let attempt = loaded_active_attempt(loaded)?;
+    validate_active_proof_attempt_id(&command.attempt_id, attempt)?;
+    ensure_active_proof_attempt_is_open(command.now, attempt)?;
+    if attempt.proof_use != ProofUse::ProveOutOfBandIdentifierChangeCandidate {
+        return Err(Error::LoadedStateContradiction(
+            "identifier-change candidate binding requires the candidate identifier proof use",
+        ));
+    }
+    let subject_id = attempt
+        .subject_id
+        .clone()
+        .ok_or(Error::LoadedStateContradiction(
+            "identifier-change candidate binding requires a subject-bound active-proof attempt",
+        ))?;
+    ensure_active_proof_attempt_not_subject_revoked(loaded, attempt, Some(&subject_id))?;
+
+    let challenge = loaded_active_challenge(loaded)?;
+    validate_active_proof_challenge_id(&command.challenge_id, challenge)?;
+    validate_challenge_attempt_pair(attempt, challenge)?;
+    ensure_active_proof_challenge_is_open(command.now, challenge)?;
+    let proof = challenge.proof.clone();
+    validate_proof_for_use(&proof, attempt.proof_use)?;
+    validate_weak_proof_gate_for_proof(&proof, &command.weak_proof_gate)?;
+    if !command.stateless_fast_fail.was_verified_before_state_load() {
+        return Err(Error::StatelessFastFailVerificationRequired);
+    }
+    if command.candidate_identifier_source.kind() != VerifiedProofSourceKind::OutOfBandIdentifier {
+        return Err(Error::InvalidConfig(
+            "identifier-change candidate source must be an out-of-band identifier",
+        ));
+    }
+    validate_method_commit_work_for_proof(&proof, &command.method_commit_work)?;
+    let binding = OutOfBandIdentifierBindingRecord::new(
+        command.candidate_identifier_source.clone(),
+        subject_id.clone(),
+        proof.method_label.clone(),
+        OutOfBandIdentifierBindingLifecycleState::PendingActivation,
+    )?;
+    let weak_proof_gate = command.weak_proof_gate.verified_summary();
+
+    let mut plan = CommitPlan::default();
+    plan.preconditions
+        .push(Precondition::ActiveProofChallengeStillOpen {
+            challenge_id: challenge.challenge_id.clone(),
+            now: command.now,
+        });
+    plan.mutations.push(
+        Mutation::CloseOpenActiveProofChallengesForAttemptProofFamily {
+            attempt_id: attempt.attempt_id.clone(),
+            proof_family: challenge.proof.family,
+            closed_at: command.now,
+        },
+    );
+    plan.response_effects
+        .push(ResponseEffect::DeleteActiveProofChallengeCookie);
+    append_active_proof_attempt_closure_to_plan(
+        &mut plan,
+        command.now,
+        attempt,
+        Some(subject_id.clone()),
+        None,
+        None,
+    );
+    plan.mutations
+        .push(Mutation::CreateOutOfBandIdentifierBinding {
+            record: binding,
+            created_at: command.now,
+        });
+    plan.method_commit_work.extend(command.method_commit_work);
+    plan.audit_events
+        .push(active_proof_audit_event(ActiveProofAuditEventInput {
+            kind: AuditEventKind::OutOfBandIdentifierChangeCandidateBindingReserved,
+            occurred_at: command.now,
+            subject_id: Some(subject_id.clone()),
+            session_id: None,
+            device_credential_id: None,
+            attempt_id: Some(command.attempt_id.clone()),
+            challenge_id: Some(command.challenge_id.clone()),
+            weak_proof_gate,
+        }));
+
+    Ok(transition(
+        Outcome::OutOfBandIdentifierChangeCandidateBindingReserved(
+            OutOfBandIdentifierChangeCandidateBindingReservationOutcome {
+                subject_id,
+                candidate_identifier_source_id: command
+                    .candidate_identifier_source
+                    .source_id()
+                    .clone(),
+            },
+        ),
         plan,
     ))
 }

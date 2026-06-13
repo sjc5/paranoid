@@ -155,7 +155,8 @@ impl ProofPolicy {
             ProofUse::BindSubjectToActiveProofAttempt
             | ProofUse::SilentlyReviveTrustedDeviceSession
             | ProofUse::ReduceAuthenticationRequirement
-            | ProofUse::RecoverOrReplaceCredential => None,
+            | ProofUse::RecoverOrReplaceCredential
+            | ProofUse::ProveOutOfBandIdentifierChangeCandidate => None,
         }
     }
 }
@@ -509,6 +510,9 @@ fn evaluate_satisfied_proof_stack_for_use(
         }
         ProofUse::RecoverOrReplaceCredential => {
             proof_stack_contains_family(proofs, ProofFamily::RecoveryCode)
+        }
+        ProofUse::ProveOutOfBandIdentifierChangeCandidate => {
+            proof_stack_contains_family(proofs, ProofFamily::OutOfBandCode)
         }
         ProofUse::ContributeToFullAuthentication
         | ProofUse::ReviveTrustedDeviceWithActiveProof

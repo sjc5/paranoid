@@ -190,8 +190,8 @@ impl CredentialMaterializingCommitStore {
     ) -> Result<(), InMemoryCommitError> {
         work.validate_for_commit()
             .map_err(InMemoryCommitError::CoreCommitWorkInvalid)?;
-        self.state.ensure_preconditions(&work.preconditions)?;
         let mut next = self.clone();
+        next.state.ensure_preconditions(&work.preconditions)?;
         for fresh_secret in &work.fresh_credential_secrets {
             next.materialize_fresh_credential_secret(fresh_secret, generated)?;
         }

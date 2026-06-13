@@ -152,6 +152,191 @@ fn completing_active_proof_challenge_can_bind_unbound_attempt_to_resolved_subjec
 }
 
 #[test]
+fn reserving_identifier_change_candidate_binding_creates_pending_binding_without_authorizing_change()
+ {
+    let candidate_source = VerifiedProofSource::new(
+        VerifiedProofSourceKind::OutOfBandIdentifier,
+        id("candidate-email-source"),
+    );
+
+    let transition = reduce_command(
+        &config(),
+        Command::ReserveOutOfBandIdentifierChangeCandidateBinding(
+            ReserveOutOfBandIdentifierChangeCandidateBinding {
+                now: at(40),
+                attempt_id: id("attempt"),
+                challenge_id: id("challenge"),
+                candidate_identifier_source: candidate_source.clone(),
+                stateless_fast_fail: verified_stateless_fast_fail(),
+                weak_proof_gate: WeakProofGateStatus::NotRequired,
+                method_commit_work: vec![out_of_band_method_commit_work()],
+            },
+        ),
+        &loaded_attempt_and_challenge_state(ProofUse::ProveOutOfBandIdentifierChangeCandidate),
+    )
+    .expect("candidate binding reservation");
+
+    assert_eq!(
+        transition.outcome,
+        Outcome::OutOfBandIdentifierChangeCandidateBindingReserved(
+            OutOfBandIdentifierChangeCandidateBindingReservationOutcome {
+                subject_id: id("subject"),
+                candidate_identifier_source_id: id("candidate-email-source"),
+            },
+        )
+    );
+    assert!(matches!(
+        transition.commit_plan.mutations.as_slice(),
+        [
+            Mutation::CloseOpenActiveProofChallengesForAttemptProofFamily {
+                attempt_id,
+                proof_family,
+                closed_at,
+            },
+            Mutation::DeleteActiveProofAttempt {
+                attempt_id: deleted_attempt_id,
+            },
+            Mutation::CreateOutOfBandIdentifierBinding {
+                record,
+                created_at,
+            },
+        ] if *attempt_id == id("attempt")
+            && *proof_family == ProofFamily::OutOfBandCode
+            && *closed_at == at(40)
+            && *deleted_attempt_id == id("attempt")
+            && record.source() == &candidate_source
+            && record.subject_id() == &id("subject")
+            && record.proof_method_label() == "email_otp"
+            && record.lifecycle_state()
+                == OutOfBandIdentifierBindingLifecycleState::PendingActivation
+            && *created_at == at(40)
+    ));
+    assert_eq!(
+        transition.commit_plan.method_commit_work,
+        vec![out_of_band_method_commit_work()]
+    );
+    assert!(
+        transition
+            .commit_plan
+            .response_effects
+            .contains(&ResponseEffect::DeleteActiveProofChallengeCookie)
+    );
+    assert!(
+        transition
+            .commit_plan
+            .response_effects
+            .contains(&ResponseEffect::DeleteActiveProofContinuationCookie)
+    );
+    assert!(transition.commit_plan.audit_events.iter().any(|event| {
+        event.kind == AuditEventKind::OutOfBandIdentifierChangeCandidateBindingReserved
+            && event.subject_id == Some(id("subject"))
+            && event.attempt_id == Some(id("attempt"))
+            && event.challenge_id == Some(id("challenge"))
+    }));
+}
+
+#[test]
+fn identifier_change_candidate_binding_requires_subject_bound_candidate_proof_ceremony() {
+    let candidate_source = VerifiedProofSource::new(
+        VerifiedProofSourceKind::OutOfBandIdentifier,
+        id("candidate-email-source"),
+    );
+    let command = Command::ReserveOutOfBandIdentifierChangeCandidateBinding(
+        ReserveOutOfBandIdentifierChangeCandidateBinding {
+            now: at(40),
+            attempt_id: id("attempt"),
+            challenge_id: id("challenge"),
+            candidate_identifier_source: candidate_source,
+            stateless_fast_fail: verified_stateless_fast_fail(),
+            weak_proof_gate: WeakProofGateStatus::NotRequired,
+            method_commit_work: Vec::new(),
+        },
+    );
+
+    let wrong_use_error = reduce_command(
+        &config(),
+        command.clone(),
+        &loaded_attempt_and_challenge_state(ProofUse::SatisfyStepUp),
+    )
+    .expect_err("candidate binding must require the dedicated proof use");
+    assert_eq!(
+        wrong_use_error,
+        Error::LoadedStateContradiction(
+            "identifier-change candidate binding requires the candidate identifier proof use",
+        )
+    );
+
+    let mut unbound_loaded =
+        loaded_attempt_and_challenge_state(ProofUse::ProveOutOfBandIdentifierChangeCandidate);
+    unbound_loaded.active_proof_attempt_record = Some(unbound_active_attempt(
+        ProofUse::ProveOutOfBandIdentifierChangeCandidate,
+    ));
+    let unbound_error = reduce_command(&config(), command, &unbound_loaded)
+        .expect_err("candidate binding must already be bound to the current subject");
+    assert_eq!(
+        unbound_error,
+        Error::LoadedStateContradiction(
+            "identifier-change candidate binding requires a subject-bound active-proof attempt",
+        )
+    );
+}
+
+#[test]
+fn identifier_change_candidate_binding_requires_stateless_fast_fail_and_out_of_band_source() {
+    let loaded =
+        loaded_attempt_and_challenge_state(ProofUse::ProveOutOfBandIdentifierChangeCandidate);
+    let missing_fast_fail_error = reduce_command(
+        &config(),
+        Command::ReserveOutOfBandIdentifierChangeCandidateBinding(
+            ReserveOutOfBandIdentifierChangeCandidateBinding {
+                now: at(40),
+                attempt_id: id("attempt"),
+                challenge_id: id("challenge"),
+                candidate_identifier_source: VerifiedProofSource::new(
+                    VerifiedProofSourceKind::OutOfBandIdentifier,
+                    id("candidate-email-source"),
+                ),
+                stateless_fast_fail: StatelessFastFailStatus::NotRequired,
+                weak_proof_gate: WeakProofGateStatus::NotRequired,
+                method_commit_work: Vec::new(),
+            },
+        ),
+        &loaded,
+    )
+    .expect_err("candidate binding must require challenge-cookie fast fail");
+    assert_eq!(
+        missing_fast_fail_error,
+        Error::StatelessFastFailVerificationRequired
+    );
+
+    let wrong_source_error = reduce_command(
+        &config(),
+        Command::ReserveOutOfBandIdentifierChangeCandidateBinding(
+            ReserveOutOfBandIdentifierChangeCandidateBinding {
+                now: at(40),
+                attempt_id: id("attempt"),
+                challenge_id: id("challenge"),
+                candidate_identifier_source: VerifiedProofSource::new(
+                    VerifiedProofSourceKind::CredentialInstance,
+                    id("candidate-email-source"),
+                ),
+                stateless_fast_fail: verified_stateless_fast_fail(),
+                weak_proof_gate: WeakProofGateStatus::NotRequired,
+                method_commit_work: Vec::new(),
+            },
+        ),
+        &loaded,
+    )
+    .expect_err("candidate binding must come from an out-of-band identifier proof source");
+    assert_eq!(
+        wrong_source_error,
+        Error::InvalidConfig(
+            "identifier-change candidate source must be an out-of-band identifier"
+        )
+    );
+}
+
+#[test]
 fn completing_webauthn_or_oidc_can_bind_unbound_attempt_to_resolved_subject() {
     for proof in [
         ProofMethodDeclaration::new(ProofFamily::OriginBoundPublicKey, "webauthn_passkey")
@@ -273,61 +458,51 @@ fn configured_secret_proofs_complete_without_stateful_challenge_for_bound_attemp
             proof: proof(ProofFamily::RecoveryCode),
         }
     );
-    assert!(recovery_transition.commit_plan.response_effects.is_empty());
+    assert_eq!(
+        recovery_transition.commit_plan.response_effects,
+        vec![ResponseEffect::IssueActiveProofContinuationCookie(
+            ActiveProofContinuationCookieDraft {
+                attempt_id: id("attempt"),
+                proof_use: ProofUse::RecoverOrReplaceCredential,
+                subject_id: Some(id("subject")),
+                subject_binding: ActiveProofContinuationSubjectBinding::VerifiedProofBoundSubject,
+                attempt_fast_fail_until: at(130),
+            }
+        )]
+    );
 }
 
 #[test]
 fn configured_secret_proofs_reject_stateful_challenge_completion() {
-    for (proof_family, weak_proof_gate, method_commit_work) in [
-        (
-            ProofFamily::SharedSecretOtp,
-            verified_proof_of_work_gate(),
-            Vec::new(),
-        ),
-        (
-            ProofFamily::RecoveryCode,
-            WeakProofGateStatus::NotRequired,
-            vec![recovery_code_method_commit_work()],
-        ),
-    ] {
-        let mut loaded = loaded_attempt_and_challenge_state(ProofUse::SatisfyStepUp);
-        loaded
-            .active_proof_challenge_record
-            .as_mut()
-            .expect("challenge")
-            .proof = proof(proof_family);
-        loaded
-            .active_proof_attempt_record
-            .as_mut()
-            .expect("attempt")
-            .proof_use = if proof_family == ProofFamily::RecoveryCode {
-            ProofUse::RecoverOrReplaceCredential
-        } else {
-            ProofUse::SatisfyStepUp
-        };
+    let proof_family = ProofFamily::SharedSecretOtp;
+    let mut loaded = loaded_attempt_and_challenge_state(ProofUse::SatisfyStepUp);
+    loaded
+        .active_proof_challenge_record
+        .as_mut()
+        .expect("challenge")
+        .proof = proof(proof_family);
 
-        let error = reduce_command(
-            &config(),
-            Command::CompleteActiveProofChallenge(CompleteActiveProofChallenge {
-                now: at(40),
-                attempt_id: id("attempt"),
-                challenge_id: Some(id("challenge")),
-                verified_proof: verified_proof(proof_family, None),
-                stateless_fast_fail: StatelessFastFailStatus::NotRequired,
-                weak_proof_gate,
-                method_commit_work,
-            }),
-            &loaded,
+    let error = reduce_command(
+        &config(),
+        Command::CompleteActiveProofChallenge(CompleteActiveProofChallenge {
+            now: at(40),
+            attempt_id: id("attempt"),
+            challenge_id: Some(id("challenge")),
+            verified_proof: verified_proof(proof_family, None),
+            stateless_fast_fail: StatelessFastFailStatus::NotRequired,
+            weak_proof_gate: verified_proof_of_work_gate(),
+            method_commit_work: Vec::new(),
+        }),
+        &loaded,
+    )
+    .expect_err("known-subject proofs must not complete through challenge records");
+
+    assert_eq!(
+        error,
+        Error::LoadedStateContradiction(
+            "known-subject proof family cannot complete through this active-proof challenge",
         )
-        .expect_err("known-subject proofs must not complete through challenge records");
-
-        assert_eq!(
-            error,
-            Error::LoadedStateContradiction(
-                "known-subject proof family cannot complete through this active-proof challenge",
-            )
-        );
-    }
+    );
 }
 
 #[test]

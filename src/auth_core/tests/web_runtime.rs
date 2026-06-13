@@ -217,7 +217,7 @@ fn refreshed_session_targets() -> Vec<(CoreStorageTarget, &'static [u8])> {
 fn issue_out_of_band_challenge_command() -> Command {
     Command::IssueOutOfBandChallenge(
         issue_out_of_band_challenge_request()
-            .into_request(id("attempt"), id("challenge"))
+            .into_request(id("attempt"), id("challenge"), Some(at(10)))
             .into_command_with_stateless_fast_fail_cookie(
                 active_proof_challenge_cookie(),
                 vec![out_of_band_method_commit_work()],
@@ -249,6 +249,7 @@ fn active_proof_continuation_headers(
                     attempt_id,
                     proof_use,
                     subject_id: None,
+                    subject_binding: ActiveProofContinuationSubjectBinding::NoSubject,
                     attempt_fast_fail_until,
                 },
                 AuthCredentialSecret::try_from(b"runtime-test-continuation".as_slice())
@@ -886,6 +887,65 @@ fn web_runtime_rejects_direct_credential_lifecycle_commands() {
             [email_authority],
         )],
     );
+    let replacement_authority = CredentialRecoveryAuthority::new(
+        target_credential_id.clone(),
+        CredentialLifecycleAction::Replace,
+        id("replacement-authority"),
+        RecoveryAuthorityTiming::Immediate,
+    );
+    let replacement_successor = replacement_successor_inheriting_target_policy(
+        "replacement-password-credential",
+        &target_credential,
+        [replacement_authority.clone()],
+        [id("replacement-password-authority")],
+    );
+    let replacement_lifecycle_context = credential_lifecycle_context(
+        target_credential.clone(),
+        [replacement_authority],
+        [credential_instance_lifecycle_evidence(
+            "replacement-source",
+            [id("replacement-authority")],
+        )],
+    );
+    let removal_lifecycle_context = credential_lifecycle_context(
+        target_credential.clone(),
+        [CredentialRecoveryAuthority::new(
+            target_credential_id.clone(),
+            CredentialLifecycleAction::Remove,
+            id("removal-authority"),
+            RecoveryAuthorityTiming::Immediate,
+        )],
+        [credential_instance_lifecycle_evidence(
+            "removal-source",
+            [id("removal-authority")],
+        )],
+    );
+    let regeneration_lifecycle_context = credential_lifecycle_context(
+        target_credential.clone(),
+        [CredentialRecoveryAuthority::new(
+            target_credential_id.clone(),
+            CredentialLifecycleAction::Regenerate,
+            id("regeneration-authority"),
+            RecoveryAuthorityTiming::Immediate,
+        )],
+        [credential_instance_lifecycle_evidence(
+            "regeneration-source",
+            [id("regeneration-authority")],
+        )],
+    );
+    let rotation_lifecycle_context = credential_lifecycle_context(
+        target_credential.clone(),
+        [CredentialRecoveryAuthority::new(
+            target_credential_id.clone(),
+            CredentialLifecycleAction::Rotate,
+            id("rotation-authority"),
+            RecoveryAuthorityTiming::Immediate,
+        )],
+        [credential_instance_lifecycle_evidence(
+            "rotation-source",
+            [id("rotation-authority")],
+        )],
+    );
     let pending_reset = PendingCredentialLifecycleActionRecord::new_open(
         id("pending-reset"),
         id("subject"),
@@ -899,7 +959,7 @@ fn web_runtime_rejects_direct_credential_lifecycle_commands() {
     let pending_replacement = PendingCredentialLifecycleActionRecord::new_open(
         id("pending-replacement"),
         id("subject"),
-        target_credential_id,
+        target_credential_id.clone(),
         CredentialLifecycleAction::Replace,
         at(100),
         at(200),
@@ -915,6 +975,69 @@ fn web_runtime_rejects_direct_credential_lifecycle_commands() {
         at(300),
     )
     .expect("pending subject deletion");
+    let pending_identifier_change =
+        PendingSubjectLifecycleActionRecord::new_open_out_of_band_identifier_change(
+            id("pending-identifier-change"),
+            id("subject"),
+            id("pending-identifier-change-current"),
+            id("pending-identifier-change-candidate"),
+            vec![id("pending-identifier-change-authority")],
+            at(100),
+            at(200),
+            at(300),
+        )
+        .expect("pending identifier change");
+    let identifier_change_subject_id = id("direct-identifier-change-subject");
+    let identifier_change_current_source_id = id("direct-identifier-change-current");
+    let identifier_change_candidate_source_id = id("direct-identifier-change-candidate");
+    let identifier_change_authority = id("direct-identifier-change-authority");
+    let identifier_change_context = identifier_change_context_for_runtime_boundary_test(
+        identifier_change_subject_id.clone(),
+        identifier_change_current_source_id,
+        identifier_change_candidate_source_id.clone(),
+        [SubjectLifecycleAuthority::new(
+            identifier_change_subject_id,
+            SubjectLifecycleAction::ChangeOutOfBandIdentifier,
+            identifier_change_authority.clone(),
+            RecoveryAuthorityTiming::Immediate,
+        )],
+        [out_of_band_identifier_lifecycle_evidence(
+            "direct-identifier-change-current",
+            [identifier_change_authority],
+        )],
+    );
+    let support_intervention = VerifiedAdminSupportCredentialLifecycleIntervention::new(
+        id("support-intervention"),
+        id("subject"),
+        target_credential.credential_instance_id().clone(),
+        CredentialLifecycleAction::Reset,
+        at(10),
+        at(60),
+    )
+    .expect("support intervention");
+    let support_lifecycle_context = credential_lifecycle_context(
+        target_credential.clone(),
+        [CredentialRecoveryAuthority::new(
+            target_credential.credential_instance_id().clone(),
+            CredentialLifecycleAction::Reset,
+            id("support-authority"),
+            RecoveryAuthorityTiming::Immediate,
+        )],
+        [LifecycleAuthorityEvidence::admin_support_intervention(
+            support_intervention.clone(),
+            [id("support-authority")],
+        )
+        .expect("support evidence")],
+    );
+    let support_intervention_record = AdminSupportInterventionRecord::new_requested(
+        id("support-intervention-record"),
+        id("subject"),
+        target_credential.credential_instance_id().clone(),
+        CredentialLifecycleAction::Reset,
+        at(10),
+        at(60),
+    )
+    .expect("support intervention record");
 
     let cases = [
         (
@@ -925,10 +1048,38 @@ fn web_runtime_rejects_direct_credential_lifecycle_commands() {
                 independent_evidence_required:
                     CredentialLifecycleIndependentEvidenceRequirement::Required,
                 pending_action: None,
-                immediate_subject_auth_revocation:
-                    CredentialResetSubjectAuthRevocation::PreserveExistingAuthState,
             }),
             Error::CredentialResetPlanningRequiresRuntimeLifecycleDecision,
+        ),
+        (
+            Command::PlanCredentialReset(PlanCredentialReset {
+                now: at(150),
+                lifecycle_context: lifecycle_context.clone(),
+                active_proof_attempt_to_close: Some(active_attempt(
+                    ProofUse::RecoverOrReplaceCredential,
+                )),
+                independent_evidence_required:
+                    CredentialLifecycleIndependentEvidenceRequirement::Required,
+                pending_action: Some(PendingCredentialLifecycleActionSchedule {
+                    pending_action_id: id("direct-recovery-reset-pending"),
+                    earliest_execute_at: at(200),
+                    expires_at: at(300),
+                }),
+            }),
+            Error::CredentialResetPlanningRequiresRuntimeLifecycleDecision,
+        ),
+        (
+            Command::ExecuteCredentialReset(ExecuteCredentialReset {
+                now: at(250),
+                execution_authority: CredentialResetExecutionAuthority::Immediate {
+                    lifecycle_context: lifecycle_context.clone(),
+                    independent_evidence_required:
+                        CredentialLifecycleIndependentEvidenceRequirement::Required,
+                },
+                active_proof_attempt_to_close: None,
+                method_commit_work: vec![password_reset_method_commit_work(b"verifier")],
+            }),
+            Error::CredentialResetExecutionRequiresRuntimeMethodDispatch,
         ),
         (
             Command::ExecuteCredentialReset(ExecuteCredentialReset {
@@ -938,11 +1089,107 @@ fn web_runtime_rejects_direct_credential_lifecycle_commands() {
                     independent_evidence_required:
                         CredentialLifecycleIndependentEvidenceRequirement::Required,
                 },
-                method_commit_work: vec![password_reset_method_commit_work(b"verifier")],
-                subject_auth_revocation:
-                    CredentialResetSubjectAuthRevocation::PreserveExistingAuthState,
+                active_proof_attempt_to_close: Some(active_attempt(
+                    ProofUse::RecoverOrReplaceCredential,
+                )),
+                method_commit_work: vec![password_reset_method_commit_work(
+                    b"direct-recovery-reset-verifier",
+                )],
             }),
             Error::CredentialResetExecutionRequiresRuntimeMethodDispatch,
+        ),
+        (
+            Command::AddCredential(AddCredential {
+                now: at(150),
+                lifecycle_context: credential_lifecycle_context(
+                    message_signature_credential_metadata("new-password-credential"),
+                    [CredentialRecoveryAuthority::new(
+                        id("new-password-credential"),
+                        CredentialLifecycleAction::Create,
+                        id("addition-authority"),
+                        RecoveryAuthorityTiming::Immediate,
+                    )],
+                    [credential_instance_lifecycle_evidence(
+                        "addition-source",
+                        [id("addition-authority")],
+                    )],
+                ),
+                independent_evidence_required:
+                    CredentialLifecycleIndependentEvidenceRequirement::NotRequired,
+                new_credential_authority_ids: vec![id("new-password-authority")],
+                method_commit_work: vec![password_creation_method_commit_work(
+                    b"new-password-verifier",
+                )],
+            }),
+            Error::CredentialAdditionRequiresRuntimeMethodDispatch,
+        ),
+        (
+            Command::PlanCredentialReplacement(PlanCredentialReplacement {
+                now: at(150),
+                lifecycle_context: replacement_lifecycle_context.clone(),
+                independent_evidence_required:
+                    CredentialLifecycleIndependentEvidenceRequirement::NotRequired,
+                pending_action: None,
+            }),
+            Error::CredentialReplacementPlanningRequiresRuntimeLifecycleDecision,
+        ),
+        (
+            Command::ExecuteCredentialReplacement(ExecuteCredentialReplacement {
+                now: at(250),
+                execution_authority: CredentialReplacementExecutionAuthority {
+                    lifecycle_context: replacement_lifecycle_context,
+                    independent_evidence_required:
+                        CredentialLifecycleIndependentEvidenceRequirement::NotRequired,
+                },
+                successor: replacement_successor.clone(),
+                method_commit_work: vec![password_reset_method_commit_work(
+                    b"replacement-verifier",
+                )],
+            }),
+            Error::CredentialReplacementExecutionRequiresRuntimeMethodDispatch,
+        ),
+        (
+            Command::PlanCredentialRemoval(PlanCredentialRemoval {
+                now: at(150),
+                lifecycle_context: removal_lifecycle_context.clone(),
+                independent_evidence_required:
+                    CredentialLifecycleIndependentEvidenceRequirement::NotRequired,
+                pending_action: None,
+            }),
+            Error::CredentialRemovalPlanningRequiresRuntimeLifecycleDecision,
+        ),
+        (
+            Command::ExecuteCredentialRemoval(ExecuteCredentialRemoval {
+                now: at(250),
+                execution_authority: CredentialRemovalExecutionAuthority {
+                    lifecycle_context: removal_lifecycle_context,
+                    independent_evidence_required:
+                        CredentialLifecycleIndependentEvidenceRequirement::NotRequired,
+                },
+            }),
+            Error::CredentialRemovalExecutionRequiresRuntimeLifecycleDecision,
+        ),
+        (
+            Command::PlanCredentialRegeneration(PlanCredentialRegeneration {
+                now: at(150),
+                lifecycle_context: regeneration_lifecycle_context,
+                independent_evidence_required:
+                    CredentialLifecycleIndependentEvidenceRequirement::NotRequired,
+                pending_action: None,
+            }),
+            Error::CredentialRegenerationPlanningRequiresRuntimeLifecycleDecision,
+        ),
+        (
+            Command::ExecuteCredentialRotation(ExecuteCredentialRotation {
+                now: at(250),
+                execution_authority: CredentialRotationExecutionAuthority {
+                    lifecycle_context: rotation_lifecycle_context,
+                    independent_evidence_required:
+                        CredentialLifecycleIndependentEvidenceRequirement::NotRequired,
+                },
+                method_commit_work: vec![password_reset_method_commit_work(b"rotated-verifier")],
+            }),
+            Error::CredentialRotationExecutionRequiresRuntimeMethodDispatch,
         ),
         (
             Command::CancelPendingCredentialReset(CancelPendingCredentialReset {
@@ -958,9 +1205,8 @@ fn web_runtime_rejects_direct_credential_lifecycle_commands() {
                     now: at(250),
                     target_credential: target_credential.clone(),
                     pending_action: pending_replacement.clone(),
+                    replacement_successor: Some(replacement_successor),
                     method_commit_work: vec![password_reset_method_commit_work(b"verifier")],
-                    subject_auth_revocation:
-                        CredentialLifecycleSubjectAuthRevocation::PreserveExistingAuthState,
                 },
             ),
             Error::CredentialLifecycleExecutionRequiresRuntimeMethodDispatch,
@@ -974,6 +1220,57 @@ fn web_runtime_rejects_direct_credential_lifecycle_commands() {
                 },
             ),
             Error::CredentialLifecycleCancellationRequiresRuntimeLifecycleDecision,
+        ),
+        (
+            Command::PlanAdminSupportCredentialLifecycleIntervention(
+                PlanAdminSupportCredentialLifecycleIntervention {
+                    now: at(30),
+                    intervention: support_intervention,
+                    lifecycle_context: support_lifecycle_context.clone(),
+                    independent_evidence_required:
+                        CredentialLifecycleIndependentEvidenceRequirement::NotRequired,
+                    pending_action: None,
+                },
+            ),
+            Error::AdminSupportInterventionPlanningRequiresRuntimeLifecycleDecision,
+        ),
+        (
+            Command::RequestAdminSupportIntervention(RequestAdminSupportIntervention {
+                now: at(30),
+                intervention_id: id("support-intervention-request"),
+                subject_id: id("subject"),
+                target_credential_instance_id: support_intervention_record
+                    .target_credential_instance_id
+                    .clone(),
+                action: CredentialLifecycleAction::Reset,
+                expires_at: at(60),
+            }),
+            Error::AdminSupportInterventionWorkflowRequiresRuntimeLifecycleDecision,
+        ),
+        (
+            Command::ApproveAdminSupportIntervention(ApproveAdminSupportIntervention {
+                now: at(30),
+                intervention: support_intervention_record.clone(),
+                lifecycle_context: support_lifecycle_context,
+                independent_evidence_required:
+                    CredentialLifecycleIndependentEvidenceRequirement::NotRequired,
+                pending_action: None,
+            }),
+            Error::AdminSupportInterventionWorkflowRequiresRuntimeLifecycleDecision,
+        ),
+        (
+            Command::DenyAdminSupportIntervention(DenyAdminSupportIntervention {
+                now: at(30),
+                intervention: support_intervention_record.clone(),
+            }),
+            Error::AdminSupportInterventionWorkflowRequiresRuntimeLifecycleDecision,
+        ),
+        (
+            Command::ExpireAdminSupportIntervention(ExpireAdminSupportIntervention {
+                now: at(60),
+                intervention: support_intervention_record,
+            }),
+            Error::AdminSupportInterventionWorkflowRequiresRuntimeLifecycleDecision,
         ),
         (
             Command::ScheduleSubjectAuthStateDeletion(ScheduleSubjectAuthStateDeletion {
@@ -992,6 +1289,7 @@ fn web_runtime_rejects_direct_credential_lifecycle_commands() {
                 ExecutePendingSubjectAuthStateDeletion {
                     now: at(250),
                     pending_action: pending_subject_deletion.clone(),
+                    application_subject_data_lifecycle_action: None,
                 },
             ),
             Error::SubjectAuthStateDeletionExecutionRequiresRuntimeLifecycleDecision,
@@ -1002,6 +1300,62 @@ fn web_runtime_rejects_direct_credential_lifecycle_commands() {
                 pending_action: pending_subject_deletion,
             }),
             Error::SubjectAuthStateDeletionCancellationRequiresRuntimeLifecycleDecision,
+        ),
+        (
+            Command::PlanOutOfBandIdentifierChange(PlanOutOfBandIdentifierChange {
+                now: at(150),
+                change_context: identifier_change_context.clone(),
+                independent_evidence_required:
+                    SubjectLifecycleIndependentEvidenceRequirement::NotRequired,
+                candidate_authority_ids: vec![id("direct-identifier-change-candidate-authority")],
+                pending_action: None,
+            }),
+            Error::OutOfBandIdentifierChangeRequiresRuntimeLifecycleDecision,
+        ),
+        (
+            Command::ReserveOutOfBandIdentifierChangeCandidateBinding(
+                ReserveOutOfBandIdentifierChangeCandidateBinding {
+                    now: at(150),
+                    attempt_id: id("direct-identifier-change-attempt"),
+                    challenge_id: id("direct-identifier-change-challenge"),
+                    candidate_identifier_source: VerifiedProofSource::new(
+                        VerifiedProofSourceKind::OutOfBandIdentifier,
+                        identifier_change_candidate_source_id,
+                    ),
+                    stateless_fast_fail: verified_stateless_fast_fail(),
+                    weak_proof_gate: WeakProofGateStatus::NotRequired,
+                    method_commit_work: Vec::new(),
+                },
+            ),
+            Error::OutOfBandIdentifierChangeRequiresRuntimeLifecycleDecision,
+        ),
+        (
+            Command::ExecuteOutOfBandIdentifierChange(ExecuteOutOfBandIdentifierChange {
+                now: at(250),
+                change_context: identifier_change_context,
+                independent_evidence_required:
+                    SubjectLifecycleIndependentEvidenceRequirement::NotRequired,
+                candidate_authority_ids: vec![id("direct-identifier-change-candidate-authority")],
+            }),
+            Error::OutOfBandIdentifierChangeRequiresRuntimeLifecycleDecision,
+        ),
+        (
+            Command::ExecutePendingOutOfBandIdentifierChange(
+                ExecutePendingOutOfBandIdentifierChange {
+                    now: at(250),
+                    pending_action: pending_identifier_change.clone(),
+                },
+            ),
+            Error::OutOfBandIdentifierChangeRequiresRuntimeLifecycleDecision,
+        ),
+        (
+            Command::CancelPendingOutOfBandIdentifierChange(
+                CancelPendingOutOfBandIdentifierChange {
+                    now: at(150),
+                    pending_action: pending_identifier_change,
+                },
+            ),
+            Error::OutOfBandIdentifierChangeRequiresRuntimeLifecycleDecision,
         ),
     ];
 

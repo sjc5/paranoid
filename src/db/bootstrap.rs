@@ -9,9 +9,6 @@ use std::time::Duration;
 const BOOTSTRAP_SCHEMA_CREATION_RACE_MAX_ATTEMPTS: u32 = 64;
 const BOOTSTRAP_SCHEMA_CREATION_RACE_RETRY_DELAY: Duration = Duration::from_millis(25);
 
-/// Default schema name for Paranoid-owned DB primitive bootstrap.
-pub const DEFAULT_BOOTSTRAP_SCHEMA_NAME: &str = "__paranoid";
-
 /// Schema-local table name for Paranoid's bootstrap schema ledger.
 pub const BOOTSTRAP_SCHEMA_LEDGER_TABLE_NAME: &str = "schema_ledger";
 
@@ -117,15 +114,6 @@ pub enum BootstrapError {
         /// Rollback failure.
         rollback_error: Box<Error>,
     },
-}
-
-impl Default for BootstrapConfig {
-    fn default() -> Self {
-        Self {
-            schema_name: PgSchemaName::from_identifier_text(DEFAULT_BOOTSTRAP_SCHEMA_NAME)
-                .expect("default bootstrap schema name must be a valid Postgres identifier"),
-        }
-    }
 }
 
 impl BootstrapConfig {
@@ -350,8 +338,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn default_bootstrap_config_derives_every_store_table_from_one_schema() {
-        let config = BootstrapConfig::default();
+    fn explicit_bootstrap_config_derives_every_store_table_from_one_schema() {
+        let config =
+            BootstrapConfig::from_schema_name_text("__paranoid").expect("explicit schema name");
         let stores = config
             .stores_for_already_migrated_schema()
             .expect("bootstrap stores");
@@ -374,8 +363,9 @@ mod tests {
     }
 
     #[test]
-    fn default_bootstrap_config_uses_distinct_subsystem_tables_and_one_schema_ledger() {
-        let stores = BootstrapConfig::default()
+    fn explicit_bootstrap_config_uses_distinct_subsystem_tables_and_one_schema_ledger() {
+        let stores = BootstrapConfig::from_schema_name_text("__paranoid")
+            .expect("explicit schema name")
             .stores_for_already_migrated_schema()
             .expect("bootstrap stores");
 

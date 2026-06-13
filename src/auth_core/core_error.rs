@@ -1,6 +1,6 @@
 use std::fmt;
 
-use super::*;
+use super::prelude::*;
 
 /// Auth core reducer error.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -83,6 +83,8 @@ pub enum Error {
     EmptyOutOfBandChallengeDedupeKey,
     /// Out-of-band recipient handles must not be empty.
     EmptyOutOfBandRecipientHandle,
+    /// An out-of-band recipient handle payload was malformed.
+    InvalidOutOfBandRecipientHandle,
     /// Delivery idempotency keys must not be empty.
     EmptyOutOfBandDeliveryIdempotencyKey,
     /// A transition requiring authentication proof was given no proofs.
@@ -140,18 +142,40 @@ pub enum Error {
     CredentialResetPlanningRequiresRuntimeLifecycleDecision,
     /// Credential reset execution requires runtime-owned method dispatch.
     CredentialResetExecutionRequiresRuntimeMethodDispatch,
+    /// Credential replacement planning requires runtime-owned lifecycle-authority loading.
+    CredentialReplacementPlanningRequiresRuntimeLifecycleDecision,
+    /// Credential replacement execution requires runtime-owned method dispatch.
+    CredentialReplacementExecutionRequiresRuntimeMethodDispatch,
+    /// Credential removal planning requires runtime-owned lifecycle-authority loading.
+    CredentialRemovalPlanningRequiresRuntimeLifecycleDecision,
+    /// Credential removal execution requires runtime-owned lifecycle-authority loading.
+    CredentialRemovalExecutionRequiresRuntimeLifecycleDecision,
+    /// Credential-set regeneration planning requires runtime-owned lifecycle-authority loading.
+    CredentialRegenerationPlanningRequiresRuntimeLifecycleDecision,
+    /// Credential-set regeneration execution requires runtime-owned method dispatch.
+    CredentialRegenerationExecutionRequiresRuntimeMethodDispatch,
+    /// Credential rotation execution requires runtime-owned method dispatch.
+    CredentialRotationExecutionRequiresRuntimeMethodDispatch,
     /// Pending credential reset cancellation requires runtime-owned lifecycle loading.
     CredentialResetCancellationRequiresRuntimeLifecycleDecision,
+    /// Credential addition requires runtime-owned method dispatch.
+    CredentialAdditionRequiresRuntimeMethodDispatch,
     /// Non-reset credential lifecycle execution requires runtime-owned method dispatch.
     CredentialLifecycleExecutionRequiresRuntimeMethodDispatch,
     /// Non-reset credential lifecycle cancellation requires runtime-owned lifecycle loading.
     CredentialLifecycleCancellationRequiresRuntimeLifecycleDecision,
+    /// Admin/support intervention planning requires runtime-owned lifecycle loading.
+    AdminSupportInterventionPlanningRequiresRuntimeLifecycleDecision,
+    /// Admin/support intervention workflow requires runtime-owned lifecycle loading.
+    AdminSupportInterventionWorkflowRequiresRuntimeLifecycleDecision,
     /// Subject auth-state deletion scheduling requires runtime-owned lifecycle loading.
     SubjectAuthStateDeletionSchedulingRequiresRuntimeLifecycleDecision,
     /// Subject auth-state deletion execution requires runtime-owned lifecycle loading.
     SubjectAuthStateDeletionExecutionRequiresRuntimeLifecycleDecision,
     /// Subject auth-state deletion cancellation requires runtime-owned lifecycle loading.
     SubjectAuthStateDeletionCancellationRequiresRuntimeLifecycleDecision,
+    /// Out-of-band identifier changes require runtime-owned lifecycle loading.
+    OutOfBandIdentifierChangeRequiresRuntimeLifecycleDecision,
     /// Out-of-band proof completion must use the challenge-response runtime path.
     OutOfBandActiveProofCompletionRequiresChallengeResponse,
     /// A verified proof carried a subject even though its family cannot resolve subjects.
@@ -187,14 +211,42 @@ pub enum Error {
     InvalidCredentialLifecyclePendingActionTiming,
     /// A delayed subject lifecycle action had impossible timing.
     InvalidSubjectLifecyclePendingActionTiming,
+    /// An admin/support intervention had impossible timing.
+    InvalidAdminSupportInterventionTiming,
     /// A credential lifecycle transition was not authorized by loaded policy.
     CredentialLifecycleActionNotAuthorized,
+    /// Unauthenticated recovery reset scheduling may only create delayed reset actions.
+    UnauthenticatedCredentialRecoveryResetSchedulingRequiresDelayedAction,
+    /// An admin/support intervention is not open and live for approval.
+    AdminSupportInterventionNotApprovable,
+    /// An admin/support intervention is not open and live for denial.
+    AdminSupportInterventionNotDeniable,
+    /// An admin/support intervention is not open and expired for expiry cleanup.
+    AdminSupportInterventionNotExpirable,
     /// Credential reset execution requires method-owned verifier mutation work.
     CredentialResetExecutionMissingMethodCommitWork,
     /// Credential reset execution method work did not match the target credential.
     CredentialResetExecutionMethodCommitWorkTargetMismatch,
     /// A non-reset pending credential lifecycle command was given reset action state.
     NonResetPendingCredentialLifecycleActionCannotBeReset,
+    /// Credential addition requires method-owned verifier or secret creation work.
+    CredentialAdditionMissingMethodCommitWork,
+    /// Credential addition method work did not match the new credential.
+    CredentialAdditionMethodCommitWorkTargetMismatch,
+    /// Credential addition recovery-authority metadata did not target the new credential.
+    CredentialAdditionRecoveryAuthorityTargetMismatch,
+    /// Credential replacement did not include the successor credential.
+    CredentialReplacementExecutionMissingSuccessorCredential,
+    /// Credential replacement successor used the same id as the target.
+    CredentialReplacementSuccessorCredentialIdMatchesTarget,
+    /// Credential replacement successor did not belong to the target subject.
+    CredentialReplacementSuccessorSubjectMismatch,
+    /// Credential replacement successor did not preserve the target method contract.
+    CredentialReplacementSuccessorMethodMismatch,
+    /// Credential replacement recovery-authority metadata did not target the successor.
+    CredentialReplacementRecoveryAuthorityTargetMismatch,
+    /// A non-replacement credential lifecycle command included replacement successor state.
+    CredentialLifecycleExecutionUnexpectedReplacementSuccessorCredential,
     /// Credential lifecycle execution requires method-owned work for this action.
     CredentialLifecycleExecutionMissingMethodCommitWork,
     /// Credential lifecycle execution method work did not match the target credential.
@@ -229,6 +281,8 @@ pub enum Error {
     EmptyCredentialResetMethodPayload,
     /// Credential lifecycle method payloads must not be empty.
     EmptyCredentialLifecycleMethodPayload,
+    /// Credential creation method payloads must not be empty.
+    EmptyCredentialCreationMethodPayload,
     /// Active-proof challenge fast-fail nonces must be exactly 32 bytes.
     InvalidActiveProofChallengeFastFailNonceLength {
         /// Actual byte length.
@@ -295,6 +349,10 @@ pub enum Error {
     WeakProofGateVerificationFailed,
     /// The challenge-issue preflight response did not match the configured gate.
     ChallengeIssuePreflightGateMismatch,
+    /// The delayed no-session recovery reset scheduling route must receive an empty body.
+    NonEmptyMountedNoSessionCredentialRecoveryScheduleResetRouteBody,
+    /// The delayed subject-auth-state deletion scheduling route must receive an empty body.
+    NonEmptyMountedSubjectAuthStateDeletionScheduleRouteBody,
     /// The active-proof attempt is no longer usable.
     ActiveProofAttemptNotOpen,
     /// The active-proof challenge is no longer usable.
@@ -469,6 +527,9 @@ impl fmt::Display for Error {
             Self::EmptyOutOfBandRecipientHandle => {
                 write!(f, "auth core: out-of-band recipient handle is empty")
             }
+            Self::InvalidOutOfBandRecipientHandle => {
+                write!(f, "auth core: out-of-band recipient handle is invalid")
+            }
             Self::EmptyOutOfBandDeliveryIdempotencyKey => {
                 write!(
                     f,
@@ -574,10 +635,58 @@ impl fmt::Display for Error {
                     "auth core: credential reset execution requires runtime-owned method dispatch"
                 )
             }
+            Self::CredentialReplacementPlanningRequiresRuntimeLifecycleDecision => {
+                write!(
+                    f,
+                    "auth core: credential replacement planning requires runtime-owned lifecycle decision"
+                )
+            }
+            Self::CredentialReplacementExecutionRequiresRuntimeMethodDispatch => {
+                write!(
+                    f,
+                    "auth core: credential replacement execution requires runtime-owned method dispatch"
+                )
+            }
+            Self::CredentialRemovalPlanningRequiresRuntimeLifecycleDecision => {
+                write!(
+                    f,
+                    "auth core: credential removal planning requires runtime-owned lifecycle decision"
+                )
+            }
+            Self::CredentialRemovalExecutionRequiresRuntimeLifecycleDecision => {
+                write!(
+                    f,
+                    "auth core: credential removal execution requires runtime-owned lifecycle decision"
+                )
+            }
+            Self::CredentialRegenerationPlanningRequiresRuntimeLifecycleDecision => {
+                write!(
+                    f,
+                    "auth core: credential regeneration planning requires runtime-owned lifecycle decision"
+                )
+            }
+            Self::CredentialRegenerationExecutionRequiresRuntimeMethodDispatch => {
+                write!(
+                    f,
+                    "auth core: credential regeneration execution requires runtime-owned method dispatch"
+                )
+            }
+            Self::CredentialRotationExecutionRequiresRuntimeMethodDispatch => {
+                write!(
+                    f,
+                    "auth core: credential rotation execution requires runtime-owned method dispatch"
+                )
+            }
             Self::CredentialResetCancellationRequiresRuntimeLifecycleDecision => {
                 write!(
                     f,
                     "auth core: credential reset cancellation requires runtime-owned lifecycle decision"
+                )
+            }
+            Self::CredentialAdditionRequiresRuntimeMethodDispatch => {
+                write!(
+                    f,
+                    "auth core: credential addition requires runtime-owned method dispatch"
                 )
             }
             Self::CredentialLifecycleExecutionRequiresRuntimeMethodDispatch => {
@@ -590,6 +699,18 @@ impl fmt::Display for Error {
                 write!(
                     f,
                     "auth core: credential lifecycle cancellation requires runtime-owned lifecycle decision"
+                )
+            }
+            Self::AdminSupportInterventionPlanningRequiresRuntimeLifecycleDecision => {
+                write!(
+                    f,
+                    "auth core: admin support intervention planning requires runtime-owned lifecycle decision"
+                )
+            }
+            Self::AdminSupportInterventionWorkflowRequiresRuntimeLifecycleDecision => {
+                write!(
+                    f,
+                    "auth core: admin support intervention workflow requires runtime-owned lifecycle decision"
                 )
             }
             Self::SubjectAuthStateDeletionSchedulingRequiresRuntimeLifecycleDecision => {
@@ -608,6 +729,12 @@ impl fmt::Display for Error {
                 write!(
                     f,
                     "auth core: subject auth-state deletion cancellation requires runtime-owned lifecycle decision"
+                )
+            }
+            Self::OutOfBandIdentifierChangeRequiresRuntimeLifecycleDecision => {
+                write!(
+                    f,
+                    "auth core: out-of-band identifier change requires runtime-owned lifecycle decision"
                 )
             }
             Self::OutOfBandActiveProofCompletionRequiresChallengeResponse => {
@@ -652,11 +779,29 @@ impl fmt::Display for Error {
                     "auth core: subject lifecycle pending action timing is invalid"
                 )
             }
+            Self::InvalidAdminSupportInterventionTiming => {
+                write!(f, "auth core: admin support intervention timing is invalid")
+            }
             Self::CredentialLifecycleActionNotAuthorized => {
                 write!(
                     f,
                     "auth core: credential lifecycle action is not authorized"
                 )
+            }
+            Self::UnauthenticatedCredentialRecoveryResetSchedulingRequiresDelayedAction => {
+                write!(
+                    f,
+                    "auth core: unauthenticated credential recovery reset scheduling requires delayed-action policy"
+                )
+            }
+            Self::AdminSupportInterventionNotApprovable => {
+                write!(f, "auth core: admin support intervention is not approvable")
+            }
+            Self::AdminSupportInterventionNotDeniable => {
+                write!(f, "auth core: admin support intervention is not deniable")
+            }
+            Self::AdminSupportInterventionNotExpirable => {
+                write!(f, "auth core: admin support intervention is not expirable")
             }
             Self::CredentialResetExecutionMissingMethodCommitWork => {
                 write!(
@@ -674,6 +819,60 @@ impl fmt::Display for Error {
                 write!(
                     f,
                     "auth core: non-reset pending credential lifecycle action cannot be reset"
+                )
+            }
+            Self::CredentialAdditionMissingMethodCommitWork => {
+                write!(
+                    f,
+                    "auth core: credential addition is missing method commit work"
+                )
+            }
+            Self::CredentialAdditionMethodCommitWorkTargetMismatch => {
+                write!(
+                    f,
+                    "auth core: credential addition method commit work does not match the new credential"
+                )
+            }
+            Self::CredentialAdditionRecoveryAuthorityTargetMismatch => {
+                write!(
+                    f,
+                    "auth core: credential addition recovery authority does not target the new credential"
+                )
+            }
+            Self::CredentialReplacementExecutionMissingSuccessorCredential => {
+                write!(
+                    f,
+                    "auth core: credential replacement execution is missing successor credential state"
+                )
+            }
+            Self::CredentialReplacementSuccessorCredentialIdMatchesTarget => {
+                write!(
+                    f,
+                    "auth core: credential replacement successor id matches the target credential"
+                )
+            }
+            Self::CredentialReplacementSuccessorSubjectMismatch => {
+                write!(
+                    f,
+                    "auth core: credential replacement successor belongs to a different subject"
+                )
+            }
+            Self::CredentialReplacementSuccessorMethodMismatch => {
+                write!(
+                    f,
+                    "auth core: credential replacement successor does not preserve the target method contract"
+                )
+            }
+            Self::CredentialReplacementRecoveryAuthorityTargetMismatch => {
+                write!(
+                    f,
+                    "auth core: credential replacement recovery authority does not target the successor credential"
+                )
+            }
+            Self::CredentialLifecycleExecutionUnexpectedReplacementSuccessorCredential => {
+                write!(
+                    f,
+                    "auth core: credential lifecycle execution has unexpected replacement successor state"
                 )
             }
             Self::CredentialLifecycleExecutionMissingMethodCommitWork => {
@@ -760,6 +959,9 @@ impl fmt::Display for Error {
             }
             Self::EmptyCredentialLifecycleMethodPayload => {
                 write!(f, "auth core: credential lifecycle method payload is empty")
+            }
+            Self::EmptyCredentialCreationMethodPayload => {
+                write!(f, "auth core: credential creation method payload is empty")
             }
             Self::InvalidActiveProofChallengeFastFailNonceLength { actual } => {
                 write!(
@@ -894,6 +1096,18 @@ impl fmt::Display for Error {
                 write!(
                     f,
                     "auth core: challenge-issue preflight gate does not match config"
+                )
+            }
+            Self::NonEmptyMountedNoSessionCredentialRecoveryScheduleResetRouteBody => {
+                write!(
+                    f,
+                    "auth core: mounted no-session recovery schedule-reset route body must be empty"
+                )
+            }
+            Self::NonEmptyMountedSubjectAuthStateDeletionScheduleRouteBody => {
+                write!(
+                    f,
+                    "auth core: mounted subject auth-state deletion schedule route body must be empty"
                 )
             }
             Self::ActiveProofAttemptNotOpen => {

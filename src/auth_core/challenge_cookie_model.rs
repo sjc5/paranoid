@@ -4,7 +4,7 @@ use crate::crypto::{
     Keyset, MAC_OVER_SECRET_SIZE, MacOverSecret, SecretBytes, random_public_bytes,
 };
 
-use super::*;
+use super::prelude::*;
 
 /// Number of random bytes bound into an active-proof challenge fast-fail MAC.
 pub const ACTIVE_PROOF_CHALLENGE_FAST_FAIL_NONCE_BYTES: usize = 32;
@@ -551,6 +551,7 @@ pub(crate) fn proof_use_wire_id(proof_use: ProofUse) -> u8 {
         ProofUse::SilentlyReviveTrustedDeviceSession => 5,
         ProofUse::ReduceAuthenticationRequirement => 6,
         ProofUse::RecoverOrReplaceCredential => 7,
+        ProofUse::ProveOutOfBandIdentifierChangeCandidate => 8,
     }
 }
 
@@ -563,6 +564,28 @@ pub(crate) fn proof_use_from_wire_id(id: u8) -> Result<ProofUse, Error> {
         5 => Ok(ProofUse::SilentlyReviveTrustedDeviceSession),
         6 => Ok(ProofUse::ReduceAuthenticationRequirement),
         7 => Ok(ProofUse::RecoverOrReplaceCredential),
+        8 => Ok(ProofUse::ProveOutOfBandIdentifierChangeCandidate),
+        _ => Err(Error::InvalidActiveProofContinuationCookiePayload),
+    }
+}
+
+pub(crate) fn active_proof_continuation_subject_binding_wire_id(
+    binding: ActiveProofContinuationSubjectBinding,
+) -> u8 {
+    match binding {
+        ActiveProofContinuationSubjectBinding::NoSubject => 1,
+        ActiveProofContinuationSubjectBinding::RuntimeBoundSubject => 2,
+        ActiveProofContinuationSubjectBinding::VerifiedProofBoundSubject => 3,
+    }
+}
+
+pub(crate) fn active_proof_continuation_subject_binding_from_wire_id(
+    id: u8,
+) -> Result<ActiveProofContinuationSubjectBinding, Error> {
+    match id {
+        1 => Ok(ActiveProofContinuationSubjectBinding::NoSubject),
+        2 => Ok(ActiveProofContinuationSubjectBinding::RuntimeBoundSubject),
+        3 => Ok(ActiveProofContinuationSubjectBinding::VerifiedProofBoundSubject),
         _ => Err(Error::InvalidActiveProofContinuationCookiePayload),
     }
 }

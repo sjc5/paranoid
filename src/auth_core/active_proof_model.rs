@@ -1,4 +1,4 @@
-use super::*;
+use super::prelude::*;
 use crate::crypto::{Keyset, MacOverSecret, SecretBytes};
 
 /// Active-proof attempt creation command.
@@ -54,6 +54,15 @@ pub struct StartCurrentTrustedDeviceActiveProofAttemptInput {
     pub proof_use: ProofUse,
 }
 
+/// Runtime-facing unauthenticated recovery active-proof attempt start input.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StartUnauthenticatedRecoveryActiveProofAttemptInput {
+    /// Server time for this transition.
+    pub now: UnixSeconds,
+    /// Recovery proof method that will complete the attempt.
+    pub method: ProofMethodDeclaration,
+}
+
 /// Out-of-band challenge issue command.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct IssueOutOfBandChallengeRequest {
@@ -67,6 +76,8 @@ pub struct IssueOutOfBandChallengeRequest {
     pub method: ProofMethodDeclaration,
     /// Generic dedupe key for the challenge target and proof method.
     pub challenge_dedupe_key: OutOfBandChallengeDedupeKey,
+    /// Live challenges created at or before this timestamp may be replaced.
+    pub(crate) replaceable_created_at_or_before: Option<UnixSeconds>,
     /// Opaque recipient handle understood by the adapter.
     pub recipient_handle: String,
     /// Delivery idempotency key the adapter must use.
@@ -93,6 +104,7 @@ impl IssueOutOfBandChallengeInput {
         self,
         attempt_id: ActiveProofAttemptId,
         challenge_id: ActiveProofChallengeId,
+        replaceable_created_at_or_before: Option<UnixSeconds>,
     ) -> IssueOutOfBandChallengeRequest {
         IssueOutOfBandChallengeRequest {
             now: self.now,
@@ -100,6 +112,7 @@ impl IssueOutOfBandChallengeInput {
             challenge_id,
             method: self.method,
             challenge_dedupe_key: self.challenge_dedupe_key,
+            replaceable_created_at_or_before,
             recipient_handle: self.recipient_handle,
             idempotency_key: self.idempotency_key,
         }
@@ -123,11 +136,25 @@ pub struct StartAndIssueOutOfBandChallengeInput {
     pub idempotency_key: String,
 }
 
+/// Runtime-facing fused unbound active-proof start whose out-of-band delivery facts are method-derived.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StartAndIssueMethodDerivedOutOfBandChallengeInput {
+    /// Server time for this transition.
+    pub now: UnixSeconds,
+    /// Transition the attempt is trying to satisfy.
+    pub proof_use: ProofUse,
+    /// Out-of-band proof method that owns this challenge.
+    pub method: ProofMethodDeclaration,
+    /// Method-specific payload used by the method plugin to derive delivery facts.
+    pub method_payload: Vec<u8>,
+}
+
 impl StartAndIssueOutOfBandChallengeInput {
     pub(crate) fn into_request(
         self,
         attempt_id: ActiveProofAttemptId,
         challenge_id: ActiveProofChallengeId,
+        replaceable_created_at_or_before: Option<UnixSeconds>,
     ) -> IssueOutOfBandChallengeRequest {
         IssueOutOfBandChallengeRequest {
             now: self.now,
@@ -135,6 +162,7 @@ impl StartAndIssueOutOfBandChallengeInput {
             challenge_id,
             method: self.method,
             challenge_dedupe_key: self.challenge_dedupe_key,
+            replaceable_created_at_or_before,
             recipient_handle: self.recipient_handle,
             idempotency_key: self.idempotency_key,
         }
@@ -751,6 +779,17 @@ pub struct CompleteKnownSubjectActiveProofMethodResponse {
     pub secret_response: KnownSubjectActiveProofSecretResponse,
     /// Submitted weak-proof gate response material, when this method requires one.
     pub weak_proof_gate_response: Option<WeakProofGateResponse>,
+}
+
+/// User response to a one-time recovery credential proof.
+#[derive(Debug)]
+pub struct CompleteRecoveryCredentialActiveProofMethodResponse {
+    /// Server time for this transition.
+    pub now: UnixSeconds,
+    /// Recovery credential proof method to verify.
+    pub method: ProofMethodDeclaration,
+    /// Submitted one-time recovery credential.
+    pub secret_response: KnownSubjectActiveProofSecretResponse,
 }
 
 /// User response to a challenge-bound known-subject configured-secret method.

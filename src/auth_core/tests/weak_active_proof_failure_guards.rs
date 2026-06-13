@@ -124,6 +124,14 @@ fn weak_active_proof_failures_hard_delete_attempt_at_budget() {
             [Mutation::DeleteActiveProofAttempt { attempt_id }]
                 if *attempt_id == id("attempt")
         ));
+        assert!(transition.commit_plan.method_commit_work.is_empty());
+        assert!(transition.commit_plan.fresh_credential_secrets.is_empty());
+        assert!(transition.commit_plan.durable_effects.is_empty());
+        assert_eq!(
+            transition.commit_plan.response_effects,
+            vec![ResponseEffect::DeleteActiveProofContinuationCookie],
+            "budget exhaustion must delete only the current continuation cookie, not emit account-level effects",
+        );
         assert!(
             transition
                 .commit_plan

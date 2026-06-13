@@ -28,6 +28,13 @@ fn proof_families_express_core_security_semantics() {
         ProofFamily::FederatedIdentityAssertion
             .supports_use(ProofUse::BindSubjectToActiveProofAttempt)
     );
+    assert!(
+        ProofFamily::OutOfBandCode.supports_use(ProofUse::ProveOutOfBandIdentifierChangeCandidate)
+    );
+    assert!(
+        !ProofFamily::MessageSignature
+            .supports_use(ProofUse::ProveOutOfBandIdentifierChangeCandidate)
+    );
     assert!(!ProofFamily::SharedSecretOtp.supports_use(ProofUse::BindSubjectToActiveProofAttempt));
     assert!(ProofFamily::TrustedDevice.supports_use(ProofUse::SilentlyReviveTrustedDeviceSession));
     assert!(!ProofFamily::TrustedDevice.supports_use(ProofUse::SatisfyStepUp));

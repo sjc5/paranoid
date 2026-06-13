@@ -2,7 +2,7 @@ use std::fmt;
 
 use crate::crypto::{Keyset, MacOverSecret, SecretBytes};
 
-use super::*;
+use super::prelude::*;
 
 /// Secret bytes for a session or trusted-device credential.
 pub struct AuthCredentialSecret(SecretBytes<AuthCredentialSecretKind>);

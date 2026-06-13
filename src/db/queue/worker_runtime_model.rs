@@ -62,6 +62,11 @@ impl JobExecutionContext {
         self.max_retries
     }
 
+    #[cfg(feature = "__auth_wip")]
+    pub(crate) fn pool(&self) -> &WritePool {
+        &self.pool
+    }
+
     /// Returns true when the owning long-running worker has been asked to stop.
     pub fn worker_shutdown_has_been_requested(&self) -> bool {
         self.worker_shutdown_signal.is_cancellation_requested()

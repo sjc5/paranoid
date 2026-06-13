@@ -222,6 +222,46 @@ fn state_dependent_mutations_have_commit_time_guards() {
             "pending credential reset execution",
             pending_credential_reset_execution_plan(),
         ),
+        (
+            "immediate credential replacement",
+            immediate_credential_replacement_plan(),
+        ),
+        (
+            "delayed credential replacement",
+            delayed_credential_replacement_plan(),
+        ),
+        (
+            "immediate credential replacement execution",
+            immediate_credential_replacement_execution_plan(),
+        ),
+        (
+            "immediate credential removal",
+            immediate_credential_removal_plan(),
+        ),
+        (
+            "delayed credential removal",
+            delayed_credential_removal_plan(),
+        ),
+        (
+            "immediate credential removal execution",
+            immediate_credential_removal_execution_plan(),
+        ),
+        (
+            "immediate credential rotation execution",
+            immediate_credential_rotation_execution_plan(),
+        ),
+        (
+            "immediate admin support credential lifecycle intervention",
+            immediate_admin_support_credential_lifecycle_intervention_plan(),
+        ),
+        (
+            "delayed admin support credential lifecycle intervention",
+            delayed_admin_support_credential_lifecycle_intervention_plan(),
+        ),
+        (
+            "immediate out-of-band identifier change",
+            immediate_out_of_band_identifier_change_plan(),
+        ),
     ];
 
     for (plan_name, plan) in plans {
@@ -503,6 +543,74 @@ fn command_commit_guard_matrix_is_stable() {
                 "pending_credential_lifecycle_action_still_cancellable_for_target",
             ],
         ),
+        (
+            "immediate credential replacement",
+            immediate_credential_replacement_plan(),
+            vec!["credential_instance_still_active"],
+        ),
+        (
+            "delayed credential replacement",
+            delayed_credential_replacement_plan(),
+            vec![
+                "credential_instance_still_active",
+                "no_open_pending_credential_lifecycle_action_for_target",
+            ],
+        ),
+        (
+            "immediate credential replacement execution",
+            immediate_credential_replacement_execution_plan(),
+            vec![
+                "subject_retains_required_credential_posture_after_replacement",
+                "credential_instance_still_active",
+            ],
+        ),
+        (
+            "immediate credential removal",
+            immediate_credential_removal_plan(),
+            vec!["credential_instance_still_active"],
+        ),
+        (
+            "delayed credential removal",
+            delayed_credential_removal_plan(),
+            vec![
+                "credential_instance_still_active",
+                "no_open_pending_credential_lifecycle_action_for_target",
+            ],
+        ),
+        (
+            "immediate credential removal execution",
+            immediate_credential_removal_execution_plan(),
+            vec![
+                "subject_retains_required_credential_posture_after_removal",
+                "credential_instance_still_active",
+            ],
+        ),
+        (
+            "immediate credential rotation execution",
+            immediate_credential_rotation_execution_plan(),
+            vec!["credential_instance_still_active"],
+        ),
+        (
+            "immediate admin support credential lifecycle intervention",
+            immediate_admin_support_credential_lifecycle_intervention_plan(),
+            vec!["credential_instance_still_active"],
+        ),
+        (
+            "delayed admin support credential lifecycle intervention",
+            delayed_admin_support_credential_lifecycle_intervention_plan(),
+            vec![
+                "credential_instance_still_active",
+                "no_open_pending_credential_lifecycle_action_for_target",
+            ],
+        ),
+        (
+            "immediate out-of-band identifier change",
+            immediate_out_of_band_identifier_change_plan(),
+            vec![
+                "out_of_band_identifier_binding_still_active",
+                "out_of_band_identifier_binding_still_pending_activation",
+            ],
+        ),
     ];
 
     for (case_name, plan, expected_precondition_kinds) in cases {
@@ -538,8 +646,6 @@ fn immediate_credential_reset_plan() -> CommitPlan {
             independent_evidence_required:
                 CredentialLifecycleIndependentEvidenceRequirement::Required,
             pending_action: None,
-            immediate_subject_auth_revocation:
-                CredentialResetSubjectAuthRevocation::RevokeSubjectAuthState,
         }),
         &LoadedState::default(),
     )
@@ -572,8 +678,6 @@ fn delayed_credential_reset_plan() -> CommitPlan {
                 earliest_execute_at: at(200),
                 expires_at: at(300),
             }),
-            immediate_subject_auth_revocation:
-                CredentialResetSubjectAuthRevocation::RevokeSubjectAuthState,
         }),
         &LoadedState::default(),
     )
@@ -609,8 +713,8 @@ fn immediate_credential_reset_execution_plan() -> CommitPlan {
                 independent_evidence_required:
                     CredentialLifecycleIndependentEvidenceRequirement::Required,
             },
+            active_proof_attempt_to_close: None,
             method_commit_work: vec![password_reset_method_commit_work(b"new-password-verifier")],
-            subject_auth_revocation: CredentialResetSubjectAuthRevocation::RevokeSubjectAuthState,
         }),
         &LoadedState::default(),
     )
@@ -634,8 +738,8 @@ fn pending_credential_reset_execution_plan() -> CommitPlan {
                 )
                 .expect("pending action"),
             },
+            active_proof_attempt_to_close: None,
             method_commit_work: vec![password_reset_method_commit_work(b"new-password-verifier")],
-            subject_auth_revocation: CredentialResetSubjectAuthRevocation::RevokeSubjectAuthState,
         }),
         &LoadedState::default(),
     )
@@ -657,6 +761,324 @@ fn pending_credential_reset_cancellation_plan() -> CommitPlan {
                 at(300),
             )
             .expect("pending action"),
+        }),
+        &LoadedState::default(),
+    )
+}
+
+fn immediate_credential_replacement_plan() -> CommitPlan {
+    let target_credential_id: VerifiedProofSourceId = id("password-credential");
+    let device_authority: RecoveryAuthorityId = id("trusted-device-authority");
+    reduced_plan(
+        Command::PlanCredentialReplacement(PlanCredentialReplacement {
+            now: at(100),
+            lifecycle_context: credential_lifecycle_context(
+                message_signature_credential_metadata("password-credential"),
+                [CredentialRecoveryAuthority::new(
+                    target_credential_id,
+                    CredentialLifecycleAction::Replace,
+                    device_authority.clone(),
+                    RecoveryAuthorityTiming::Immediate,
+                )],
+                [credential_instance_lifecycle_evidence(
+                    "trusted-device",
+                    [device_authority],
+                )],
+            ),
+            independent_evidence_required:
+                CredentialLifecycleIndependentEvidenceRequirement::NotRequired,
+            pending_action: None,
+        }),
+        &LoadedState::default(),
+    )
+}
+
+fn delayed_credential_replacement_plan() -> CommitPlan {
+    let target_credential_id: VerifiedProofSourceId = id("password-credential");
+    let email_authority: RecoveryAuthorityId = id("primary-email-authority");
+    reduced_plan(
+        Command::PlanCredentialReplacement(PlanCredentialReplacement {
+            now: at(100),
+            lifecycle_context: credential_lifecycle_context(
+                message_signature_credential_metadata("password-credential"),
+                [CredentialRecoveryAuthority::new(
+                    target_credential_id,
+                    CredentialLifecycleAction::Replace,
+                    email_authority.clone(),
+                    RecoveryAuthorityTiming::Immediate,
+                )],
+                [out_of_band_identifier_lifecycle_evidence(
+                    "primary-email",
+                    [email_authority],
+                )],
+            ),
+            independent_evidence_required:
+                CredentialLifecycleIndependentEvidenceRequirement::Required,
+            pending_action: Some(PendingCredentialLifecycleActionSchedule {
+                pending_action_id: id("pending-replacement"),
+                earliest_execute_at: at(200),
+                expires_at: at(300),
+            }),
+        }),
+        &LoadedState::default(),
+    )
+}
+
+fn immediate_credential_replacement_execution_plan() -> CommitPlan {
+    let target_credential_id: VerifiedProofSourceId = id("password-credential");
+    let device_authority: RecoveryAuthorityId = id("trusted-device-authority");
+    let target_credential = message_signature_credential_metadata("password-credential");
+    let replacement_authority = CredentialRecoveryAuthority::new(
+        target_credential_id,
+        CredentialLifecycleAction::Replace,
+        device_authority.clone(),
+        RecoveryAuthorityTiming::Immediate,
+    );
+    let successor = replacement_successor_inheriting_target_policy(
+        "replacement-password-credential",
+        &target_credential,
+        [replacement_authority.clone()],
+        [id("replacement-password-authority")],
+    );
+    reduced_plan(
+        Command::ExecuteCredentialReplacement(ExecuteCredentialReplacement {
+            now: at(250),
+            execution_authority: CredentialReplacementExecutionAuthority {
+                lifecycle_context: credential_lifecycle_context(
+                    target_credential,
+                    [replacement_authority],
+                    [credential_instance_lifecycle_evidence(
+                        "trusted-device",
+                        [device_authority],
+                    )],
+                ),
+                independent_evidence_required:
+                    CredentialLifecycleIndependentEvidenceRequirement::NotRequired,
+            },
+            successor,
+            method_commit_work: vec![password_reset_method_commit_work(
+                b"replacement-password-verifier",
+            )],
+        }),
+        &LoadedState::default(),
+    )
+}
+
+fn immediate_credential_removal_plan() -> CommitPlan {
+    let target_credential_id: VerifiedProofSourceId = id("totp-credential");
+    let device_authority: RecoveryAuthorityId = id("trusted-device-authority");
+    reduced_plan(
+        Command::PlanCredentialRemoval(PlanCredentialRemoval {
+            now: at(100),
+            lifecycle_context: credential_lifecycle_context(
+                message_signature_credential_metadata("totp-credential"),
+                [CredentialRecoveryAuthority::new(
+                    target_credential_id,
+                    CredentialLifecycleAction::Remove,
+                    device_authority.clone(),
+                    RecoveryAuthorityTiming::Immediate,
+                )],
+                [credential_instance_lifecycle_evidence(
+                    "trusted-device",
+                    [device_authority],
+                )],
+            ),
+            independent_evidence_required:
+                CredentialLifecycleIndependentEvidenceRequirement::NotRequired,
+            pending_action: None,
+        }),
+        &LoadedState::default(),
+    )
+}
+
+fn delayed_credential_removal_plan() -> CommitPlan {
+    let target_credential_id: VerifiedProofSourceId = id("totp-credential");
+    let email_authority: RecoveryAuthorityId = id("primary-email-authority");
+    reduced_plan(
+        Command::PlanCredentialRemoval(PlanCredentialRemoval {
+            now: at(100),
+            lifecycle_context: credential_lifecycle_context(
+                message_signature_credential_metadata("totp-credential"),
+                [CredentialRecoveryAuthority::new(
+                    target_credential_id,
+                    CredentialLifecycleAction::Remove,
+                    email_authority.clone(),
+                    RecoveryAuthorityTiming::Immediate,
+                )],
+                [out_of_band_identifier_lifecycle_evidence(
+                    "primary-email",
+                    [email_authority],
+                )],
+            ),
+            independent_evidence_required:
+                CredentialLifecycleIndependentEvidenceRequirement::Required,
+            pending_action: Some(PendingCredentialLifecycleActionSchedule {
+                pending_action_id: id("pending-removal"),
+                earliest_execute_at: at(200),
+                expires_at: at(300),
+            }),
+        }),
+        &LoadedState::default(),
+    )
+}
+
+fn immediate_credential_removal_execution_plan() -> CommitPlan {
+    let target_credential_id: VerifiedProofSourceId = id("totp-credential");
+    let device_authority: RecoveryAuthorityId = id("trusted-device-authority");
+    reduced_plan(
+        Command::ExecuteCredentialRemoval(ExecuteCredentialRemoval {
+            now: at(250),
+            execution_authority: CredentialRemovalExecutionAuthority {
+                lifecycle_context: credential_lifecycle_context(
+                    message_signature_credential_metadata("totp-credential"),
+                    [CredentialRecoveryAuthority::new(
+                        target_credential_id,
+                        CredentialLifecycleAction::Remove,
+                        device_authority.clone(),
+                        RecoveryAuthorityTiming::Immediate,
+                    )],
+                    [credential_instance_lifecycle_evidence(
+                        "trusted-device",
+                        [device_authority],
+                    )],
+                ),
+                independent_evidence_required:
+                    CredentialLifecycleIndependentEvidenceRequirement::NotRequired,
+            },
+        }),
+        &LoadedState::default(),
+    )
+}
+
+fn immediate_credential_rotation_execution_plan() -> CommitPlan {
+    let target_credential_id: VerifiedProofSourceId = id("password-credential");
+    let device_authority: RecoveryAuthorityId = id("trusted-device-authority");
+    reduced_plan(
+        Command::ExecuteCredentialRotation(ExecuteCredentialRotation {
+            now: at(250),
+            execution_authority: CredentialRotationExecutionAuthority {
+                lifecycle_context: credential_lifecycle_context(
+                    message_signature_credential_metadata("password-credential"),
+                    [CredentialRecoveryAuthority::new(
+                        target_credential_id,
+                        CredentialLifecycleAction::Rotate,
+                        device_authority.clone(),
+                        RecoveryAuthorityTiming::Immediate,
+                    )],
+                    [credential_instance_lifecycle_evidence(
+                        "trusted-device",
+                        [device_authority],
+                    )],
+                ),
+                independent_evidence_required:
+                    CredentialLifecycleIndependentEvidenceRequirement::NotRequired,
+            },
+            method_commit_work: vec![password_reset_method_commit_work(
+                b"rotated-password-verifier",
+            )],
+        }),
+        &LoadedState::default(),
+    )
+}
+
+fn immediate_admin_support_credential_lifecycle_intervention_plan() -> CommitPlan {
+    admin_support_credential_lifecycle_intervention_plan(RecoveryAuthorityTiming::Immediate, None)
+}
+
+fn delayed_admin_support_credential_lifecycle_intervention_plan() -> CommitPlan {
+    admin_support_credential_lifecycle_intervention_plan(
+        RecoveryAuthorityTiming::Delayed,
+        Some(PendingCredentialLifecycleActionSchedule {
+            pending_action_id: id("pending-support-action"),
+            earliest_execute_at: at(200),
+            expires_at: at(300),
+        }),
+    )
+}
+
+fn admin_support_credential_lifecycle_intervention_plan(
+    timing: RecoveryAuthorityTiming,
+    pending_action: Option<PendingCredentialLifecycleActionSchedule>,
+) -> CommitPlan {
+    let target_credential_id: VerifiedProofSourceId = id("password-credential");
+    let support_authority: RecoveryAuthorityId = id("support-authority");
+    let intervention = VerifiedAdminSupportCredentialLifecycleIntervention::new(
+        id("support-intervention"),
+        id("subject"),
+        target_credential_id.clone(),
+        CredentialLifecycleAction::Replace,
+        at(90),
+        at(150),
+    )
+    .expect("support intervention");
+    reduced_plan(
+        Command::PlanAdminSupportCredentialLifecycleIntervention(
+            PlanAdminSupportCredentialLifecycleIntervention {
+                now: at(100),
+                intervention: intervention.clone(),
+                lifecycle_context: credential_lifecycle_context(
+                    message_signature_credential_metadata("password-credential"),
+                    [CredentialRecoveryAuthority::new(
+                        target_credential_id,
+                        CredentialLifecycleAction::Replace,
+                        support_authority.clone(),
+                        timing,
+                    )],
+                    [LifecycleAuthorityEvidence::admin_support_intervention(
+                        intervention,
+                        [support_authority],
+                    )
+                    .expect("support evidence")],
+                ),
+                independent_evidence_required:
+                    CredentialLifecycleIndependentEvidenceRequirement::NotRequired,
+                pending_action,
+            },
+        ),
+        &LoadedState::default(),
+    )
+}
+
+fn immediate_out_of_band_identifier_change_plan() -> CommitPlan {
+    let current_authority: RecoveryAuthorityId = id("current-email-authority");
+    let candidate_authority: RecoveryAuthorityId = id("candidate-email-authority");
+    let device_authority: RecoveryAuthorityId = id("trusted-device-authority");
+    reduced_plan(
+        Command::ExecuteOutOfBandIdentifierChange(ExecuteOutOfBandIdentifierChange {
+            now: at(100),
+            change_context: OutOfBandIdentifierChangeContext::new(
+                SubjectLifecycleActionContext::new(
+                    id("subject"),
+                    SubjectLifecycleAuthorityGraph::new([SubjectLifecycleAuthority::new(
+                        id("subject"),
+                        SubjectLifecycleAction::ChangeOutOfBandIdentifier,
+                        current_authority.clone(),
+                        RecoveryAuthorityTiming::Immediate,
+                    )])
+                    .expect("subject lifecycle graph"),
+                    [
+                        out_of_band_identifier_lifecycle_evidence(
+                            "current-email-source",
+                            [current_authority],
+                        ),
+                        credential_instance_lifecycle_evidence(
+                            "trusted-device",
+                            [device_authority],
+                        ),
+                    ],
+                ),
+                VerifiedProofSource::new(
+                    VerifiedProofSourceKind::OutOfBandIdentifier,
+                    id("current-email-source"),
+                ),
+                VerifiedProofSource::new(
+                    VerifiedProofSourceKind::OutOfBandIdentifier,
+                    id("candidate-email-source"),
+                ),
+            )
+            .expect("identifier change context"),
+            independent_evidence_required: SubjectLifecycleIndependentEvidenceRequirement::Required,
+            candidate_authority_ids: vec![candidate_authority],
         }),
         &LoadedState::default(),
     )

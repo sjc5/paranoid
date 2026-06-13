@@ -90,9 +90,109 @@ pub(super) fn config() -> Config {
         stale_secret_grace_lifetime: DurationSeconds::new(5),
         active_proof_attempt_lifetime: DurationSeconds::new(120),
         out_of_band_challenge_lifetime: DurationSeconds::new(40),
+        out_of_band_challenge_replacement_cooldown: DurationSeconds::new(20),
         max_out_of_band_challenge_resends_per_challenge: 1,
         max_weak_proof_failures_per_attempt: 3,
         unauthenticated_challenge_issue_preflight_gate: proof_of_work_gate_summary(),
+        credential_lifecycle_policy: CredentialLifecyclePolicy {
+            credential_addition: CredentialAdditionLifecyclePolicy {
+                independent_evidence_requirement:
+                    CredentialLifecycleIndependentEvidenceRequirement::NotRequired,
+                authenticated_execution_step_up_freshness: StepUpFreshnessRequirement::Required,
+            },
+            credential_reset: CredentialResetLifecyclePolicies {
+                ordinary_credential: CredentialResetLifecyclePolicy {
+                    independent_evidence_requirement:
+                        CredentialLifecycleIndependentEvidenceRequirement::NotRequired,
+                    delayed_action_timing: Some(DelayedLifecycleActionTimingPolicy {
+                        delay: DurationSeconds::new(120),
+                        expires_after: DurationSeconds::new(220),
+                    }),
+                    authenticated_planning_step_up_freshness: StepUpFreshnessRequirement::Required,
+                    authenticated_execution_step_up_freshness: StepUpFreshnessRequirement::Required,
+                    authenticated_cancellation_step_up_freshness:
+                        StepUpFreshnessRequirement::Required,
+                },
+                second_factor_credential: CredentialResetLifecyclePolicy {
+                    independent_evidence_requirement:
+                        CredentialLifecycleIndependentEvidenceRequirement::NotRequired,
+                    delayed_action_timing: Some(DelayedLifecycleActionTimingPolicy {
+                        delay: DurationSeconds::new(120),
+                        expires_after: DurationSeconds::new(220),
+                    }),
+                    authenticated_planning_step_up_freshness: StepUpFreshnessRequirement::Required,
+                    authenticated_execution_step_up_freshness: StepUpFreshnessRequirement::Required,
+                    authenticated_cancellation_step_up_freshness:
+                        StepUpFreshnessRequirement::Required,
+                },
+            },
+            credential_replacement: CredentialReplacementLifecyclePolicy {
+                independent_evidence_requirement:
+                    CredentialLifecycleIndependentEvidenceRequirement::NotRequired,
+                delayed_action_timing: Some(DelayedLifecycleActionTimingPolicy {
+                    delay: DurationSeconds::new(120),
+                    expires_after: DurationSeconds::new(220),
+                }),
+                authenticated_planning_step_up_freshness: StepUpFreshnessRequirement::Required,
+                authenticated_execution_step_up_freshness: StepUpFreshnessRequirement::Required,
+            },
+            credential_removal: CredentialRemovalLifecyclePolicy {
+                independent_evidence_requirement:
+                    CredentialLifecycleIndependentEvidenceRequirement::NotRequired,
+                delayed_action_timing: Some(DelayedLifecycleActionTimingPolicy {
+                    delay: DurationSeconds::new(120),
+                    expires_after: DurationSeconds::new(220),
+                }),
+                authenticated_planning_step_up_freshness: StepUpFreshnessRequirement::Required,
+                authenticated_execution_step_up_freshness: StepUpFreshnessRequirement::Required,
+            },
+            credential_regeneration: CredentialRegenerationLifecyclePolicy {
+                independent_evidence_requirement:
+                    CredentialLifecycleIndependentEvidenceRequirement::NotRequired,
+                delayed_action_timing: Some(DelayedLifecycleActionTimingPolicy {
+                    delay: DurationSeconds::new(120),
+                    expires_after: DurationSeconds::new(220),
+                }),
+                authenticated_planning_step_up_freshness: StepUpFreshnessRequirement::Required,
+                authenticated_execution_step_up_freshness: StepUpFreshnessRequirement::Required,
+            },
+            credential_rotation: CredentialRotationLifecyclePolicy {
+                independent_evidence_requirement:
+                    CredentialLifecycleIndependentEvidenceRequirement::NotRequired,
+                authenticated_execution_step_up_freshness: StepUpFreshnessRequirement::Required,
+            },
+            credential_lifecycle_cancellation_step_up_freshness:
+                StepUpFreshnessRequirement::Required,
+            subject_auth_state_deletion: SubjectAuthStateDeletionLifecyclePolicy {
+                delayed_action_timing: DelayedLifecycleActionTimingPolicy {
+                    delay: DurationSeconds::new(1_000),
+                    expires_after: DurationSeconds::new(10_000),
+                },
+                authenticated_scheduling_step_up_freshness: StepUpFreshnessRequirement::Required,
+                authenticated_cancellation_step_up_freshness: StepUpFreshnessRequirement::Required,
+            },
+            out_of_band_identifier_change: OutOfBandIdentifierChangeLifecyclePolicy {
+                independent_evidence_requirement:
+                    SubjectLifecycleIndependentEvidenceRequirement::NotRequired,
+                delayed_action_timing: Some(DelayedLifecycleActionTimingPolicy {
+                    delay: DurationSeconds::new(120),
+                    expires_after: DurationSeconds::new(220),
+                }),
+                authenticated_planning_step_up_freshness: StepUpFreshnessRequirement::Required,
+                authenticated_execution_step_up_freshness: StepUpFreshnessRequirement::Required,
+                authenticated_cancellation_step_up_freshness: StepUpFreshnessRequirement::Required,
+            },
+            admin_support_intervention: AdminSupportInterventionLifecyclePolicy {
+                intervention_lifetime: DurationSeconds::new(600),
+                effective_recovery_authority_ids: vec![id("support-authority")],
+                independent_evidence_requirement:
+                    CredentialLifecycleIndependentEvidenceRequirement::NotRequired,
+                delayed_action_timing: Some(DelayedLifecycleActionTimingPolicy {
+                    delay: DurationSeconds::new(120),
+                    expires_after: DurationSeconds::new(220),
+                }),
+            },
+        },
         proof_policy: default_proof_policy(),
     }
 }
@@ -429,9 +529,28 @@ pub(super) fn message_signature_credential_metadata(
         id("subject"),
         CredentialInstanceKind::MessageSignatureVerifier,
         "password_signature",
+        CredentialResetPolicyRole::OrdinaryCredential,
         CredentialLifecycleState::Active,
     )
     .expect("credential metadata")
+}
+
+pub(super) fn replacement_successor_inheriting_target_policy<
+    const AUTHORITY_COUNT: usize,
+    const SUCCESSOR_AUTHORITY_COUNT: usize,
+>(
+    successor_credential_instance_id: &str,
+    target: &CredentialInstanceMetadata,
+    target_recovery_authorities: [CredentialRecoveryAuthority; AUTHORITY_COUNT],
+    successor_authority_ids: [RecoveryAuthorityId; SUCCESSOR_AUTHORITY_COUNT],
+) -> CredentialReplacementSuccessor {
+    CredentialReplacementSuccessor::inheriting_target_policy(
+        id(successor_credential_instance_id),
+        target,
+        target_recovery_authorities,
+        successor_authority_ids,
+    )
+    .expect("replacement successor")
 }
 
 pub(super) fn credential_lifecycle_context<
@@ -469,6 +588,34 @@ pub(super) fn out_of_band_identifier_lifecycle_evidence<const N: usize>(
         authority_ids,
     )
     .expect("lifecycle evidence")
+}
+
+pub(super) fn identifier_change_context_for_runtime_boundary_test<
+    const AUTHORITY_COUNT: usize,
+    const EVIDENCE_COUNT: usize,
+>(
+    subject_id: SubjectId,
+    current_source_id: VerifiedProofSourceId,
+    candidate_source_id: VerifiedProofSourceId,
+    authorities: [SubjectLifecycleAuthority; AUTHORITY_COUNT],
+    evidence: [LifecycleAuthorityEvidence; EVIDENCE_COUNT],
+) -> OutOfBandIdentifierChangeContext {
+    OutOfBandIdentifierChangeContext::new(
+        SubjectLifecycleActionContext::new(
+            subject_id,
+            SubjectLifecycleAuthorityGraph::new(authorities).expect("subject authority graph"),
+            evidence,
+        ),
+        VerifiedProofSource::new(
+            VerifiedProofSourceKind::OutOfBandIdentifier,
+            current_source_id,
+        ),
+        VerifiedProofSource::new(
+            VerifiedProofSourceKind::OutOfBandIdentifier,
+            candidate_source_id,
+        ),
+    )
+    .expect("identifier change context")
 }
 
 pub(super) fn proof_method(family: ProofFamily) -> ProofMethodDeclaration {
@@ -616,6 +763,22 @@ pub(super) fn password_reset_method_commit_work(payload: &[u8]) -> MethodCommitW
         ],
         vec![
             MethodCommitMutation::new("replace_password_verifier", payload)
+                .expect("method work item"),
+        ],
+        Vec::new(),
+    )
+    .expect("method commit work")
+}
+
+pub(super) fn password_creation_method_commit_work(payload: &[u8]) -> MethodCommitWork {
+    MethodCommitWork::new(
+        proof(ProofFamily::MessageSignature),
+        vec![
+            MethodCommitPrecondition::new("password_verifier_absent", payload)
+                .expect("method work item"),
+        ],
+        vec![
+            MethodCommitMutation::new("create_password_verifier", payload)
                 .expect("method work item"),
         ],
         Vec::new(),
@@ -775,6 +938,54 @@ pub(super) fn plan_has_no_open_pending_lifecycle_action_guard(
     })
 }
 
+pub(super) fn plan_has_no_open_admin_support_intervention_guard(
+    plan: &CommitPlan,
+    target_credential_instance_id: &VerifiedProofSourceId,
+    action: CredentialLifecycleAction,
+) -> bool {
+    plan.preconditions.iter().any(|precondition| {
+        matches!(
+            precondition,
+            Precondition::NoOpenAdminSupportInterventionForTarget {
+                target_credential_instance_id: guarded_target_credential_instance_id,
+                action: guarded_action,
+                ..
+            } if guarded_target_credential_instance_id == target_credential_instance_id
+                && *guarded_action == action
+        )
+    })
+}
+
+pub(super) fn plan_has_admin_support_intervention_still_open_guard(
+    plan: &CommitPlan,
+    intervention_id: &AdminSupportInterventionId,
+) -> bool {
+    plan.preconditions.iter().any(|precondition| {
+        matches!(
+            precondition,
+            Precondition::AdminSupportInterventionStillOpen {
+                intervention_id: guarded_intervention_id,
+                ..
+            } if guarded_intervention_id == intervention_id
+        )
+    })
+}
+
+pub(super) fn plan_has_admin_support_intervention_still_expired_open_guard(
+    plan: &CommitPlan,
+    intervention_id: &AdminSupportInterventionId,
+) -> bool {
+    plan.preconditions.iter().any(|precondition| {
+        matches!(
+            precondition,
+            Precondition::AdminSupportInterventionStillExpiredOpen {
+                intervention_id: guarded_intervention_id,
+                ..
+            } if guarded_intervention_id == intervention_id
+        )
+    })
+}
+
 pub(super) fn plan_has_pending_lifecycle_action_executable_guard(
     plan: &CommitPlan,
     pending_action_id: &PendingCredentialLifecycleActionId,
@@ -805,6 +1016,36 @@ pub(super) fn plan_has_pending_lifecycle_action_cancellable_for_target_guard(
     })
 }
 
+pub(super) fn plan_has_out_of_band_identifier_binding_active_guard(
+    plan: &CommitPlan,
+    source_id: &VerifiedProofSourceId,
+) -> bool {
+    plan.preconditions.iter().any(|precondition| {
+        matches!(
+            precondition,
+            Precondition::OutOfBandIdentifierBindingStillActive {
+                source_id: guarded_source_id,
+                ..
+            } if guarded_source_id == source_id
+        )
+    })
+}
+
+pub(super) fn plan_has_out_of_band_identifier_binding_pending_activation_guard(
+    plan: &CommitPlan,
+    source_id: &VerifiedProofSourceId,
+) -> bool {
+    plan.preconditions.iter().any(|precondition| {
+        matches!(
+            precondition,
+            Precondition::OutOfBandIdentifierBindingStillPendingActivation {
+                source_id: guarded_source_id,
+                ..
+            } if guarded_source_id == source_id
+        )
+    })
+}
+
 pub(super) fn precondition_kind_names(plan: &CommitPlan) -> Vec<&'static str> {
     plan.preconditions
         .iter()
@@ -828,6 +1069,15 @@ pub(super) fn precondition_kind_names(plan: &CommitPlan) -> Vec<&'static str> {
             Precondition::CredentialInstanceStillActive { .. } => {
                 "credential_instance_still_active"
             }
+            Precondition::SubjectRetainsRequiredCredentialPostureAfterRemoval { .. } => {
+                "subject_retains_required_credential_posture_after_removal"
+            }
+            Precondition::SubjectRetainsRequiredCredentialPostureAfterReplacement { .. } => {
+                "subject_retains_required_credential_posture_after_replacement"
+            }
+            Precondition::SubjectRetainsRequiredCredentialPostureAfterAddition { .. } => {
+                "subject_retains_required_credential_posture_after_addition"
+            }
             Precondition::NoOpenPendingCredentialLifecycleActionForTarget { .. } => {
                 "no_open_pending_credential_lifecycle_action_for_target"
             }
@@ -845,6 +1095,21 @@ pub(super) fn precondition_kind_names(plan: &CommitPlan) -> Vec<&'static str> {
             }
             Precondition::PendingSubjectLifecycleActionStillCancellableForSubject { .. } => {
                 "pending_subject_lifecycle_action_still_cancellable_for_subject"
+            }
+            Precondition::OutOfBandIdentifierBindingStillActive { .. } => {
+                "out_of_band_identifier_binding_still_active"
+            }
+            Precondition::OutOfBandIdentifierBindingStillPendingActivation { .. } => {
+                "out_of_band_identifier_binding_still_pending_activation"
+            }
+            Precondition::NoOpenAdminSupportInterventionForTarget { .. } => {
+                "no_open_admin_support_intervention_for_target"
+            }
+            Precondition::AdminSupportInterventionStillOpen { .. } => {
+                "admin_support_intervention_still_open"
+            }
+            Precondition::AdminSupportInterventionStillExpiredOpen { .. } => {
+                "admin_support_intervention_still_expired_open"
             }
         })
         .collect()
@@ -1091,7 +1356,82 @@ pub(super) fn assert_state_dependent_mutations_have_commit_time_guards(
                     "{plan_name}: pending subject lifecycle action closure must guard executable or cancellable state"
                 );
             }
+            Mutation::CreateOutOfBandIdentifierBinding { .. } => {}
+            Mutation::DeleteLifecycleAuthoritySourcesForSource { source } => match source {
+                LifecycleAuthoritySource::VerifiedProofSource(source)
+                    if source.kind() == VerifiedProofSourceKind::OutOfBandIdentifier =>
+                {
+                    assert!(
+                        plan_has_out_of_band_identifier_binding_pending_activation_guard(
+                            plan,
+                            source.source_id()
+                        ),
+                        "{plan_name}: replacing an out-of-band identifier authority mapping must guard pending activation state"
+                    );
+                }
+                _ => panic!(
+                    "{plan_name}: lifecycle authority-source deletion needs an explicit state guard"
+                ),
+            },
+            Mutation::SetOutOfBandIdentifierBindingLifecycleState {
+                source_id,
+                lifecycle_state,
+                ..
+            } => match lifecycle_state {
+                OutOfBandIdentifierBindingLifecycleState::Superseded
+                | OutOfBandIdentifierBindingLifecycleState::Revoked => {
+                    assert!(
+                        plan_has_out_of_band_identifier_binding_active_guard(plan, source_id),
+                        "{plan_name}: retiring an out-of-band identifier binding must guard active state"
+                    );
+                }
+                OutOfBandIdentifierBindingLifecycleState::Active => {
+                    assert!(
+                        plan_has_out_of_band_identifier_binding_pending_activation_guard(
+                            plan, source_id
+                        ),
+                        "{plan_name}: activating an out-of-band identifier binding must guard pending activation state"
+                    );
+                }
+                OutOfBandIdentifierBindingLifecycleState::PendingActivation => {
+                    panic!(
+                        "{plan_name}: reducer must not set an identifier binding back to pending activation"
+                    );
+                }
+            },
+            Mutation::CreateAdminSupportIntervention(intervention) => {
+                assert!(
+                    plan_has_credential_instance_still_active_guard(
+                        plan,
+                        &intervention.target_credential_instance_id,
+                    ),
+                    "{plan_name}: support intervention creation must guard the target credential"
+                );
+                assert!(
+                    plan_has_no_open_admin_support_intervention_guard(
+                        plan,
+                        &intervention.target_credential_instance_id,
+                        intervention.action,
+                    ),
+                    "{plan_name}: support intervention creation must guard open-candidate uniqueness"
+                );
+            }
+            Mutation::CloseAdminSupportIntervention {
+                intervention_id, ..
+            } => {
+                assert!(
+                    plan_has_admin_support_intervention_still_open_guard(plan, intervention_id)
+                        || plan_has_admin_support_intervention_still_expired_open_guard(
+                            plan,
+                            intervention_id,
+                        ),
+                    "{plan_name}: support intervention closure must guard open or expired-open state"
+                );
+            }
             Mutation::CreateActiveProofAttempt(_)
+            | Mutation::CreateCredentialInstanceMetadata { .. }
+            | Mutation::CreateCredentialRecoveryAuthority { .. }
+            | Mutation::CreateLifecycleAuthoritySource { .. }
             | Mutation::RaiseSubjectAuthRevocationCutoff { .. } => {}
         }
     }
@@ -1179,6 +1519,7 @@ pub(super) fn security_notification_kinds(plan: &CommitPlan) -> Vec<SecurityNoti
         .filter_map(|effect| match effect {
             DurableEffectCommand::NotifySecurityEvent(command) => Some(command.kind),
             DurableEffectCommand::SendOutOfBandMessage(_) => None,
+            DurableEffectCommand::ApplyApplicationSubjectDataLifecycle(_) => None,
         })
         .collect()
 }

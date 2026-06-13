@@ -7,11 +7,11 @@
 //! mutations, audit events, and durable effect commands as one unit. Only after
 //! that commit succeeds may response effects, such as issuing cookies, be
 //! applied.
-#![allow(dead_code, unused_imports)]
 
-mod active_proof;
+pub(in crate::auth_core) mod active_proof;
 mod active_proof_model;
-mod active_proof_support;
+pub(in crate::auth_core) mod active_proof_support;
+mod auth_system_model;
 mod challenge_cookie_model;
 mod command_model;
 mod commit_audit;
@@ -31,16 +31,28 @@ mod input_limits;
 mod load_contract_model;
 mod loaded_state_model;
 mod method_adapter_contract_model;
+mod method_response_material_model;
+mod mounted_admin_support_model;
+mod mounted_admin_support_service;
+mod mounted_credential_lifecycle_model;
+mod mounted_credential_lifecycle_service;
+mod mounted_durable_effect_worker_service;
+mod mounted_runtime_model;
+mod mounted_subject_lifecycle_model;
+mod mounted_subject_lifecycle_service;
 mod outcome_model;
 mod postgres_adapter_execution_model;
 mod postgres_bootstrap;
+mod postgres_durable_effect_queue;
 mod postgres_method_runtime;
+mod postgres_method_schema;
 mod postgres_password_derived_signature_method;
 mod postgres_recovery_code_method;
 mod postgres_runtime;
 mod postgres_schema_model;
-mod postgres_store;
+pub(in crate::auth_core) mod postgres_store;
 mod postgres_totp_method;
+mod prelude;
 mod proof_model;
 mod proof_policy;
 mod response_materialization_model;
@@ -55,83 +67,7 @@ mod storage_contract_model;
 mod weak_proof_gate;
 mod web_transport_model;
 
-pub(crate) use active_proof_model::{
-    ActiveProofAttemptRecord, ActiveProofChallengeRecord, ActiveProofMethodChallengeIssueKind,
-    ActiveProofMethodChallengeMaterial, ActiveProofMethodChallengePresentation,
-    ActiveProofMethodChallengeRequestPayload, ActiveProofMethodChallengeSeed,
-    ActiveProofMethodChallengeState, ActiveProofMethodResponsePayload,
-    ChallengeBoundConfiguredSecretFastFailBloomFilter, ChallengeIssuePreflightResponse,
-    ChallengeIssuePreflightVerificationRequest, CompleteActiveProofChallenge,
-    CompleteActiveProofMethodResponse, CompleteChallengeBoundKnownSubjectActiveProofMethodResponse,
-    CompleteKnownSubjectActiveProofMethodResponse, CompleteOutOfBandChallengeResponse,
-    IssueActiveProofMethodChallenge, IssueActiveProofMethodChallengeInput,
-    IssueActiveProofMethodChallengeRequest,
-    IssueChallengeBoundKnownSubjectActiveProofMethodChallengeInput, IssueOutOfBandChallenge,
-    IssueOutOfBandChallengeInput, IssueOutOfBandChallengeRequest,
-    KnownSubjectActiveProofSecretResponse, OutOfBandChallengeDedupeKey, RecordActiveProofFailure,
-    ResendOutOfBandChallenge, ResendOutOfBandChallengeRequest, StartActiveProofAttempt,
-    StartActiveProofAttemptForCurrentSession, StartActiveProofAttemptForCurrentTrustedDevice,
-    StartAndIssueActiveProofMethodChallengeInput, StartAndIssueOutOfBandChallengeInput,
-    StartCurrentSessionActiveProofAttemptInput, StartCurrentTrustedDeviceActiveProofAttemptInput,
-    StatelessFastFailStatus, VerifiedWeakProofGateBeforeStateLoad, WeakProofGateBinding,
-    WeakProofGateKind, WeakProofGateResponse, WeakProofGateStatus, WeakProofGateSummary,
-    WeakProofGateVerificationRequest, WeakProofGateVerifier,
-};
-pub(crate) use challenge_cookie_model::{
-    ACTIVE_PROOF_CHALLENGE_FAST_FAIL_NONCE_BYTES, ActiveProofChallengeCookieContext,
-    ActiveProofChallengeCookieDraft, ActiveProofChallengeFastFailMac,
-    ActiveProofChallengeFastFailNonce, ActiveProofChallengeResponseSecret,
-};
-use challenge_cookie_model::{
-    online_guessing_risk_from_wire_id, online_guessing_risk_wire_id, proof_family_from_wire_id,
-    proof_family_wire_id, proof_use_from_wire_id, proof_use_wire_id,
-};
-pub(crate) use command_model::*;
-pub(crate) use commit_audit::*;
-pub(crate) use commit_effect::*;
-pub(crate) use commit_method::*;
-pub(crate) use commit_mutation::*;
-pub(crate) use commit_plan::*;
-pub(crate) use commit_transaction_model::*;
-pub(crate) use config_model::*;
-pub(crate) use core_error::Error;
-pub(crate) use credential_model::*;
-pub(crate) use execution_model::*;
-pub(crate) use identity::*;
-pub(crate) use input_limits::{
-    ACTIVE_PROOF_METHOD_CHALLENGE_PRESENTATION_MAX_BYTES,
-    ACTIVE_PROOF_METHOD_CHALLENGE_REQUEST_PAYLOAD_MAX_BYTES,
-    ACTIVE_PROOF_METHOD_CHALLENGE_STATE_MAX_BYTES, ACTIVE_PROOF_METHOD_RESPONSE_PAYLOAD_MAX_BYTES,
-    CHALLENGE_BOUND_CONFIGURED_SECRET_FAST_FAIL_BLOOM_FILTER_MAX_BYTES,
-    CHALLENGE_BOUND_CONFIGURED_SECRET_FAST_FAIL_BLOOM_FILTER_MAX_HASH_COUNT,
-    DELIVERY_IDEMPOTENCY_KEY_MAX_BYTES, ID_MAX_BYTES, METHOD_COMMIT_OPERATION_MAX_BYTES,
-    METHOD_COMMIT_PAYLOAD_MAX_BYTES, METHOD_LABEL_MAX_BYTES,
-    OUT_OF_BAND_CHALLENGE_DEDUPE_KEY_MAX_BYTES, OUT_OF_BAND_RECIPIENT_HANDLE_MAX_BYTES,
-    TRUSTED_DEVICE_DISPLAY_LABEL_MAX_BYTES, WEAK_PROOF_GATE_METHOD_LABEL_MAX_BYTES,
-    WEAK_PROOF_GATE_RESPONSE_PAYLOAD_MAX_BYTES,
-};
-use input_limits::{
-    validate_auth_bytes_not_too_long, validate_auth_identifier_string,
-    validate_auth_string_not_too_long,
-};
-pub(crate) use load_contract_model::*;
-pub(crate) use loaded_state_model::*;
-pub(crate) use method_adapter_contract_model::*;
-pub(crate) use outcome_model::*;
-pub(crate) use postgres_adapter_execution_model::*;
-pub(crate) use postgres_schema_model::*;
-pub(crate) use proof_model::*;
-pub(crate) use proof_policy::{
-    ProofPolicy, ProofPolicyExactMethodLabels, ProofRequirement, ProofStackPolicy,
-    ProofStackRequirement, ProofStackSourcePolicy,
-};
-pub(crate) use response_materialization_model::*;
-pub(crate) use runtime_adapter_model::*;
-pub(crate) use runtime_orchestration_model::*;
-pub(crate) use storage_adapter_boundary_model::*;
-pub(crate) use storage_contract_model::*;
-pub(crate) use weak_proof_gate::*;
-pub(crate) use web_transport_model::*;
+use prelude::*;
 
 pub(crate) fn reduce_command(
     config: &Config,
@@ -196,14 +132,51 @@ pub(crate) fn reduce_command(
         Command::ExecuteCredentialReset(command) => {
             credential_lifecycle::execute_credential_reset(command)
         }
+        Command::PlanCredentialReplacement(command) => {
+            credential_lifecycle::plan_credential_replacement(command)
+        }
+        Command::ExecuteCredentialReplacement(command) => {
+            credential_lifecycle::execute_credential_replacement(command)
+        }
+        Command::PlanCredentialRemoval(command) => {
+            credential_lifecycle::plan_credential_removal(command)
+        }
+        Command::ExecuteCredentialRemoval(command) => {
+            credential_lifecycle::execute_credential_removal(command)
+        }
+        Command::PlanCredentialRegeneration(command) => {
+            credential_lifecycle::plan_credential_regeneration(command)
+        }
+        Command::ExecuteCredentialRegeneration(command) => {
+            credential_lifecycle::execute_credential_regeneration(command)
+        }
+        Command::ExecuteCredentialRotation(command) => {
+            credential_lifecycle::execute_credential_rotation(command)
+        }
         Command::CancelPendingCredentialReset(command) => {
             credential_lifecycle::cancel_pending_credential_reset(command)
         }
+        Command::AddCredential(command) => credential_lifecycle::add_credential(command),
         Command::ExecuteNonResetPendingCredentialLifecycleAction(command) => {
             credential_lifecycle::execute_non_reset_pending_credential_lifecycle_action(command)
         }
         Command::CancelNonResetPendingCredentialLifecycleAction(command) => {
             credential_lifecycle::cancel_non_reset_pending_credential_lifecycle_action(command)
+        }
+        Command::RequestAdminSupportIntervention(command) => {
+            credential_lifecycle::request_admin_support_intervention(command)
+        }
+        Command::ApproveAdminSupportIntervention(command) => {
+            credential_lifecycle::approve_admin_support_intervention(command)
+        }
+        Command::DenyAdminSupportIntervention(command) => {
+            credential_lifecycle::deny_admin_support_intervention(command)
+        }
+        Command::ExpireAdminSupportIntervention(command) => {
+            credential_lifecycle::expire_admin_support_intervention(command)
+        }
+        Command::PlanAdminSupportCredentialLifecycleIntervention(command) => {
+            credential_lifecycle::plan_admin_support_credential_lifecycle_intervention(command)
         }
         Command::ScheduleSubjectAuthStateDeletion(command) => {
             credential_lifecycle::schedule_subject_auth_state_deletion(command)
@@ -214,10 +187,25 @@ pub(crate) fn reduce_command(
         Command::CancelPendingSubjectAuthStateDeletion(command) => {
             credential_lifecycle::cancel_pending_subject_auth_state_deletion(command)
         }
+        Command::ExecutePendingOutOfBandIdentifierChange(command) => {
+            credential_lifecycle::execute_pending_out_of_band_identifier_change(command)
+        }
+        Command::CancelPendingOutOfBandIdentifierChange(command) => {
+            credential_lifecycle::cancel_pending_out_of_band_identifier_change(command)
+        }
+        Command::PlanOutOfBandIdentifierChange(command) => {
+            credential_lifecycle::plan_out_of_band_identifier_change(command)
+        }
+        Command::ReserveOutOfBandIdentifierChangeCandidateBinding(command) => {
+            active_proof::reserve_out_of_band_identifier_change_candidate_binding(command, loaded)
+        }
+        Command::ExecuteOutOfBandIdentifierChange(command) => {
+            credential_lifecycle::execute_out_of_band_identifier_change(command)
+        }
     }
 }
 
-fn audit_event(
+pub(in crate::auth_core) fn audit_event(
     kind: AuditEventKind,
     occurred_at: UnixSeconds,
     subject_id: Option<SubjectId>,
@@ -236,7 +224,7 @@ fn audit_event(
     }
 }
 
-struct ActiveProofAuditEventInput {
+pub(in crate::auth_core) struct ActiveProofAuditEventInput {
     kind: AuditEventKind,
     occurred_at: UnixSeconds,
     subject_id: Option<SubjectId>,
@@ -247,7 +235,9 @@ struct ActiveProofAuditEventInput {
     weak_proof_gate: Option<WeakProofGateSummary>,
 }
 
-fn active_proof_audit_event(input: ActiveProofAuditEventInput) -> AuditEvent {
+pub(in crate::auth_core) fn active_proof_audit_event(
+    input: ActiveProofAuditEventInput,
+) -> AuditEvent {
     AuditEvent {
         kind: input.kind,
         subject_id: input.subject_id,
@@ -260,7 +250,7 @@ fn active_proof_audit_event(input: ActiveProofAuditEventInput) -> AuditEvent {
     }
 }
 
-fn transition(outcome: Outcome, commit_plan: CommitPlan) -> Transition {
+pub(in crate::auth_core) fn transition(outcome: Outcome, commit_plan: CommitPlan) -> Transition {
     Transition {
         outcome,
         commit_plan,
