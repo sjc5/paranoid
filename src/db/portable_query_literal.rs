@@ -11,10 +11,13 @@
 //! encoding it in SQLx's binary wire format, so each covered type has a literal encoding
 //! written and tested here deliberately. Covered so far: `bool`, `i16`, `i32`, `i64`, `f64`,
 //! `str`/`String`, `[u8]`/`Vec<u8>`/`[u8; N]`, `Option<T>` (`None` renders as `NULL`),
-//! `time::OffsetDateTime` (rendered as RFC 3339 text cast to `timestamptz`), and `text[]`/
-//! `bytea[]`/`bigint[]` arrays (for `= ANY($n)` clauses). `time::Date`, `time::Time`, and
-//! `time::PrimitiveDateTime` are not yet covered; a caller that needs one of those needs a
-//! new impl added here, not a workaround at the call site.
+//! `time::OffsetDateTime` (rendered as RFC 3339 text cast to `timestamptz`), `time::Date`
+//! (ISO 8601 text cast to `date`), `serde_json::Value` (compact JSON text cast to `jsonb`,
+//! matching SQLx's default binding of that type), `uuid::Uuid` under the `db-uuid` feature
+//! (hyphenated text cast to `uuid`), and `text[]`/`bytea[]`/`bigint[]` arrays (for
+//! `= ANY($n)` clauses). `time::Time` and `time::PrimitiveDateTime` are not yet covered; a
+//! caller that needs one of those needs a new impl added here, not a workaround at the
+//! call site.
 
 use super::Error as DbError;
 use super::simple_query::{
@@ -88,6 +91,46 @@ impl IntoPortableQueryLiteral for time::OffsetDateTime {
             })?;
         encode_text_literal(&formatted, out)?;
         out.push_str("::timestamptz");
+        Ok(())
+    }
+}
+
+impl IntoPortableQueryLiteral for time::Date {
+    fn encode_portable_query_literal(&self, out: &mut String) -> Result<(), DbError> {
+        let formatted = self
+            .format(&time::format_description::well_known::Iso8601::DATE)
+            .map_err(|_| {
+                DbError::query_encoding("time::Date could not be formatted as ISO 8601 text")
+            })?;
+        encode_text_literal(&formatted, out)?;
+        out.push_str("::date");
+        Ok(())
+    }
+}
+
+impl IntoPortableQueryLiteral for serde_json::Value {
+    fn encode_portable_query_literal(&self, out: &mut String) -> Result<(), DbError> {
+        // Compact JSON text cast to `jsonb`, matching SQLx's default binding for
+        // `serde_json::Value`. `serde_json` escapes control characters (including
+        // NUL, as `\u0000`) inside the produced text, so the rendered literal
+        // itself is always NUL-free; Postgres applies its own `jsonb` validation
+        // (e.g. rejecting `\u0000`) server-side, exactly as it does for a bound
+        // parameter.
+        let formatted = serde_json::to_string(self)
+            .map_err(|_| DbError::query_encoding("serde_json::Value could not be serialized"))?;
+        encode_text_literal(&formatted, out)?;
+        out.push_str("::jsonb");
+        Ok(())
+    }
+}
+
+#[cfg(feature = "db-uuid")]
+impl IntoPortableQueryLiteral for uuid::Uuid {
+    fn encode_portable_query_literal(&self, out: &mut String) -> Result<(), DbError> {
+        // Hyphenated lowercase text cast to `uuid`. The hyphenated form is
+        // fixed-charset ASCII, so the text encoding can never require escaping.
+        encode_text_literal(&self.hyphenated().to_string(), out)?;
+        out.push_str("::uuid");
         Ok(())
     }
 }
@@ -232,6 +275,42 @@ mod tests {
             "E'\\\\x6279746573'::bytea"
         );
         assert_eq!(encode(vec![1u8, 2, 3]).unwrap(), "E'\\\\x010203'::bytea");
+    }
+
+    #[test]
+    fn date_encodes_as_iso_8601_text_cast_to_date() {
+        let date = time::Date::from_calendar_date(2026, time::Month::July, 8).unwrap();
+        assert_eq!(encode(date).unwrap(), "E'2026-07-08'::date");
+        assert_eq!(encode(Some(date)).unwrap(), "E'2026-07-08'::date");
+        assert_eq!(encode(None::<time::Date>).unwrap(), "NULL");
+    }
+
+    #[test]
+    fn json_encodes_compact_text_cast_to_jsonb_with_full_escaping() {
+        let value = serde_json::json!({"key": "it's \"quoted\"", "n": 1});
+        let encoded = encode(&value).unwrap();
+        assert!(encoded.starts_with("E'"), "{encoded}");
+        assert!(encoded.ends_with("'::jsonb"), "{encoded}");
+        // The embedded single quote must be literal-escaped (E-string backslash
+        // form, this encoder's convention), never raw.
+        assert!(encoded.contains(r"it\'s"), "{encoded}");
+        assert!(!encoded.contains("it's"), "{encoded}");
+        // A JSON string containing a NUL escapes to \u0000 inside serde_json's
+        // text, so the rendered literal itself never carries a raw NUL byte.
+        let with_nul = serde_json::json!({"k": "a\u{0}b"});
+        let encoded = encode(&with_nul).unwrap();
+        assert!(!encoded.contains('\u{0}'));
+        assert!(encoded.contains("\\u0000"), "{encoded}");
+    }
+
+    #[cfg(feature = "db-uuid")]
+    #[test]
+    fn uuid_encodes_as_hyphenated_text_cast_to_uuid() {
+        let id = uuid::Uuid::parse_str("67e55044-10b1-426f-9247-bb680e5fe0c8").unwrap();
+        assert_eq!(
+            encode(id).unwrap(),
+            "E'67e55044-10b1-426f-9247-bb680e5fe0c8'::uuid"
+        );
     }
 
     #[test]

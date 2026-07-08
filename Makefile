@@ -1,7 +1,7 @@
 FUZZ_RUNS ?= 4096
 XTASK ?= cargo run --manifest-path xtask/Cargo.toml --quiet --
 
-DB_FEATURES := --no-default-features --features db
+DB_FEATURES := --no-default-features --features db,db-uuid
 
 .PHONY: fuzz
 
