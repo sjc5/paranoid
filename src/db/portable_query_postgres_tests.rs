@@ -92,6 +92,55 @@ async fn offset_date_time_binds_and_round_trips_as_timestamptz() {
     assert_eq!(read_back, bound_value);
 }
 
+#[tokio::test]
+async fn date_binds_and_round_trips_as_date() {
+    let pool = connect_pool_under_pooler_backend_contention().await;
+    let sqlx_pool = pool.sqlx_pool().clone();
+
+    let bound_value = time::Date::from_calendar_date(2026, time::Month::July, 8).unwrap();
+    let read_back = portable_query_scalar::<time::Date>("SELECT $1::date")
+        .bind(bound_value)
+        .fetch_one(&sqlx_pool)
+        .await
+        .expect("date portable_query_scalar fetch_one");
+
+    assert_eq!(read_back, bound_value);
+}
+
+#[tokio::test]
+async fn json_value_binds_and_round_trips_as_jsonb() {
+    let pool = connect_pool_under_pooler_backend_contention().await;
+    let sqlx_pool = pool.sqlx_pool().clone();
+
+    let bound_value = serde_json::json!({
+        "text": "it's \"quoted\" — and unicode: ✓",
+        "nested": {"n": 42, "list": [1, 2, 3], "null": null, "flag": true}
+    });
+    let read_back = portable_query_scalar::<serde_json::Value>("SELECT $1::jsonb")
+        .bind(&bound_value)
+        .fetch_one(&sqlx_pool)
+        .await
+        .expect("json portable_query_scalar fetch_one");
+
+    assert_eq!(read_back, bound_value);
+}
+
+#[cfg(feature = "db-uuid")]
+#[tokio::test]
+async fn uuid_binds_and_round_trips_as_uuid() {
+    let pool = connect_pool_under_pooler_backend_contention().await;
+    let sqlx_pool = pool.sqlx_pool().clone();
+
+    let bound_value = uuid::Uuid::parse_str("67e55044-10b1-426f-9247-bb680e5fe0c8").unwrap();
+    let read_back = portable_query_scalar::<uuid::Uuid>("SELECT $1::uuid")
+        .bind(bound_value)
+        .fetch_one(&sqlx_pool)
+        .await
+        .expect("uuid portable_query_scalar fetch_one");
+
+    assert_eq!(read_back, bound_value);
+}
+
 /// Proves, at the wire-protocol level, that a bound [`portable_query`] finishes as a
 /// Postgres simple-protocol `Query` rather than an extended-protocol `Parse`/`Bind`/`Execute`.
 ///

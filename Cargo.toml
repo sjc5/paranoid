@@ -2,7 +2,7 @@
 members = ["fuzz", "playgrounds/local_env_vault", "xtask"]
 
 [workspace.package]
-version = "0.0.0-pre.8"
+version = "0.0.0-pre.9"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 
@@ -70,6 +70,7 @@ serde = { version = "1.0.228", features = ["derive"], optional = true }
 serde_json = { version = "1.0.145", optional = true }
 sha2 = { version = "0.10.9", optional = true }
 sqlx = { version = "0.9.0", default-features = false, features = [
+	"json",
 	"postgres",
 	"runtime-tokio",
 	"tls-rustls",
@@ -90,6 +91,7 @@ tokio-postgres = { version = "0.7.15", optional = true }
 tower-layer = { version = "0.3.3", optional = true }
 tower-service = { version = "0.3.3", optional = true }
 url = { version = "2.5.8", optional = true }
+uuid = { version = "1.19.0", default-features = false, optional = true }
 zeroize = { version = "1.8.2", optional = true }
 
 
@@ -125,6 +127,8 @@ db = [
 	"dep:tokio",
 ]
 db-test-harness = ["db", "dep:pg-embed", "dep:reqwest", "dep:tokio-postgres"]
+# Adds a pooler-safe literal encoding for `uuid::Uuid` bind values.
+db-uuid = ["db", "dep:uuid", "sqlx/uuid"]
 id = ["dep:data-encoding", "dep:getrandom"]
 # Selects getrandom's JS backend for wasm32-unknown-unknown builds (pair with
 # RUSTFLAGS --cfg getrandom_backend="wasm_js"); native builds never need it.
@@ -154,6 +158,7 @@ rand = "0.9.4"
 rand_chacha = "0.9.0"
 secrecy = "0.10.3"
 sqlx = { version = "0.9.0", default-features = false, features = [
+	"json",
 	"postgres",
 	"runtime-tokio",
 	"tls-rustls",
