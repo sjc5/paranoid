@@ -5,18 +5,19 @@ mod operator_transitions;
 mod worker_runtime;
 mod worker_transitions;
 
+#[cfg(test)]
 impl Default for StoreConfig {
     fn default() -> Self {
         Self {
-            table_name: PgQualifiedTableName::unqualified(DEFAULT_QUEUE_TABLE_NAME)
-                .expect("default queue jobs table name must be valid"),
+            table_name: PgQualifiedTableName::unqualified(TEST_QUEUE_JOBS_TABLE_NAME)
+                .expect("test queue jobs table name must be valid"),
             dead_letter_table_name: PgQualifiedTableName::unqualified(
-                DEFAULT_QUEUE_DEAD_LETTER_TABLE_NAME,
+                TEST_QUEUE_DEAD_LETTER_TABLE_NAME,
             )
-            .expect("default queue dead-letter table name must be valid"),
-            pause_table_name: PgQualifiedTableName::unqualified(DEFAULT_QUEUE_PAUSE_TABLE_NAME)
-                .expect("default queue pause table name must be valid"),
-            schema_ledger_table_name: SchemaLedgerConfig::default().table_name,
+            .expect("test queue dead-letter table name must be valid"),
+            pause_table_name: PgQualifiedTableName::unqualified(TEST_QUEUE_PAUSE_TABLE_NAME)
+                .expect("test queue pause table name must be valid"),
+            schema_ledger_table_name: test_schema_ledger_table_name(),
             payload_json_limit_bytes: DEFAULT_QUEUE_PAYLOAD_JSON_LIMIT_BYTES,
         }
     }
@@ -91,7 +92,8 @@ impl<T: Serialize> RegisteredJsonTask<T> {
 
 impl StoreConfig {
     /// Creates a queue config from explicit table names.
-    pub fn new(
+    #[cfg(test)]
+    pub(crate) fn new(
         table_name: PgQualifiedTableName,
         dead_letter_table_name: PgQualifiedTableName,
         pause_table_name: PgQualifiedTableName,
@@ -100,7 +102,7 @@ impl StoreConfig {
             table_name,
             dead_letter_table_name,
             pause_table_name,
-            schema_ledger_table_name: SchemaLedgerConfig::default().table_name,
+            schema_ledger_table_name: test_schema_ledger_table_name(),
             payload_json_limit_bytes: DEFAULT_QUEUE_PAYLOAD_JSON_LIMIT_BYTES,
         };
         validate_store_config(&config)?;
@@ -110,7 +112,13 @@ impl StoreConfig {
 
 impl Store {
     /// Creates a queue using validated configuration.
-    pub fn new(config: StoreConfig) -> Result<Self, Error> {
+    #[cfg(test)]
+    pub(crate) fn new(config: StoreConfig) -> Result<Self, Error> {
+        Self::new_inner(config)
+    }
+
+    /// Creates a queue from a validated [`StoreConfig`].
+    pub(crate) fn new_inner(config: StoreConfig) -> Result<Self, Error> {
         validate_store_config(&config)?;
         Ok(Self {
             sql_catalog: Arc::new(SqlCatalog::new(&config)),
@@ -118,8 +126,26 @@ impl Store {
         })
     }
 
+    /// Creates a queue from a validated [`StoreConfig`].
+    ///
+    /// Unstable test-support / component-authoring surface for component harnesses
+    ///. No stability promise: callers must
+    /// construct their own Queue instance under independently chosen table names within
+    /// an already-migrated Paranoid schema.
+    #[cfg(feature = "component-authoring")]
+    pub fn new_from_store_config_for_component_authoring(
+        config: StoreConfig,
+    ) -> Result<Self, Error> {
+        Self::new_inner(config)
+    }
+
+    pub(crate) fn config_inner(&self) -> &StoreConfig {
+        &self.config
+    }
+
     /// Returns this queue's configuration.
-    pub fn config(&self) -> &StoreConfig {
+    #[cfg(test)]
+    pub(crate) fn config(&self) -> &StoreConfig {
         &self.config
     }
 
@@ -149,12 +175,24 @@ impl Store {
     }
 
     /// Runs idempotent schema migration and validates the result.
+    ///
+    /// Unstable test-support / component-authoring surface for component harnesses
+    ///. No stability promise.
+    #[cfg(any(test, feature = "component-authoring"))]
     pub async fn migrate_schema(&self, pool: &WritePool) -> Result<(), Error> {
         migrate_schema(pool, &self.config).await
     }
 
     /// Runs schema migration inside the caller's active transaction.
-    pub async fn migrate_schema_in_current_transaction(
+    #[cfg(test)]
+    pub(crate) async fn migrate_schema_in_current_transaction(
+        &self,
+        tx: &mut WriteTx<'_>,
+    ) -> Result<(), Error> {
+        self.migrate_schema_in_current_transaction_inner(tx).await
+    }
+
+    pub(crate) async fn migrate_schema_in_current_transaction_inner(
         &self,
         tx: &mut WriteTx<'_>,
     ) -> Result<(), Error> {
@@ -162,12 +200,22 @@ impl Store {
     }
 
     /// Validates that the existing schema matches the queue contract.
-    pub async fn validate_schema(&self, pool: &WritePool) -> Result<(), Error> {
+    #[cfg(test)]
+    pub(crate) async fn validate_schema(&self, pool: &WritePool) -> Result<(), Error> {
         validate_schema(pool, &self.config).await
     }
 
     /// Validates schema inside the caller's active transaction.
-    pub async fn validate_schema_in_current_transaction(
+    #[cfg(test)]
+    pub(crate) async fn validate_schema_in_current_transaction(
+        &self,
+        tx: &mut WriteTx<'_>,
+    ) -> Result<(), Error> {
+        self.validate_schema_in_current_transaction_inner(tx).await
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn validate_schema_in_current_transaction_inner(
         &self,
         tx: &mut WriteTx<'_>,
     ) -> Result<(), Error> {

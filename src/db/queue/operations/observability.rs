@@ -47,12 +47,20 @@ where
         .await
         .map_err(DbError::query)?;
     Ok(StatusCounts {
-        pending_count: row.try_get("pending_count").map_err(Error::decode_row)?,
-        running_count: row.try_get("running_count").map_err(Error::decode_row)?,
-        completed_count: row.try_get("completed_count").map_err(Error::decode_row)?,
-        failed_count: row.try_get("failed_count").map_err(Error::decode_row)?,
+        pending_count: row
+            .try_get(QueueQueryField::PendingCount.name())
+            .map_err(Error::decode_row)?,
+        running_count: row
+            .try_get(QueueQueryField::RunningCount.name())
+            .map_err(Error::decode_row)?,
+        completed_count: row
+            .try_get(QueueQueryField::CompletedCount.name())
+            .map_err(Error::decode_row)?,
+        failed_count: row
+            .try_get(QueueQueryField::FailedCount.name())
+            .map_err(Error::decode_row)?,
         dead_letter_count: row
-            .try_get("dead_letter_count")
+            .try_get(QueueQueryField::DeadLetterCount.name())
             .map_err(Error::decode_row)?,
     })
 }
@@ -106,10 +114,10 @@ where
     .map_err(DbError::query)?;
     Ok(WorkerPressureCounts {
         pending_job_count: row
-            .try_get("pending_job_count")
+            .try_get(QueueQueryField::PendingJobCount.name())
             .map_err(Error::decode_row)?,
         running_job_count: row
-            .try_get("running_job_count")
+            .try_get(QueueQueryField::RunningJobCount.name())
             .map_err(Error::decode_row)?,
     })
 }

@@ -1,4 +1,20 @@
+/// Normalizes a Postgres check constraint expression for byte-stable comparison.
+///
+/// Component authors use this to compare
+/// their own component's expected check constraint expressions against what Postgres
+/// reports back from `pg_get_constraintdef`, independent of incidental whitespace or a
+/// single layer of redundant outer parentheses.
+#[cfg(feature = "component-authoring")]
+pub fn normalize_check_constraint_expression(expression: &str) -> String {
+    normalize_check_constraint_expression_inner(expression)
+}
+
+#[cfg(not(feature = "component-authoring"))]
 pub(crate) fn normalize_check_constraint_expression(expression: &str) -> String {
+    normalize_check_constraint_expression_inner(expression)
+}
+
+fn normalize_check_constraint_expression_inner(expression: &str) -> String {
     let mut normalized = expression
         .chars()
         .filter(|character| !character.is_whitespace())

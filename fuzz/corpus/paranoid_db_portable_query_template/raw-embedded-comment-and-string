@@ -1,0 +1,2 @@
+SELECT $1 -- comment with $2 inside
+ , 'lit$3eral'

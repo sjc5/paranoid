@@ -11,6 +11,8 @@ const DEFAULT_FUZZ_TARGETS: &[&str] = &[
     "paranoid_envelope",
     "paranoid_id",
     "paranoid_db_validators",
+    "paranoid_db_simple_query_literals",
+    "paranoid_db_portable_query_template",
 ];
 const LIBFUZZER_PROGRESS_DONE_MARKER: &str = "\tDONE";
 
@@ -20,23 +22,12 @@ struct Options {
     runs: u64,
 }
 
-#[derive(Debug, Eq, PartialEq)]
-enum ParsedArgs {
-    Help,
-    Run(Options),
-}
-
 pub(crate) fn run_from_args<I>(args: I) -> Result<(), String>
 where
     I: IntoIterator,
     I::Item: Into<String>,
 {
-    let parsed = parse_args(args)?;
-    let ParsedArgs::Run(options) = parsed else {
-        print_usage();
-        return Ok(());
-    };
-
+    let options = parse_args(args)?;
     for target in &options.targets {
         run_fuzz_target(target, options.runs)?;
     }
@@ -44,7 +35,7 @@ where
     Ok(())
 }
 
-fn parse_args<I>(args: I) -> Result<ParsedArgs, String>
+fn parse_args<I>(args: I) -> Result<Options, String>
 where
     I: IntoIterator,
     I::Item: Into<String>,
@@ -55,7 +46,6 @@ where
 
     while let Some(arg) = iter.next() {
         match arg.as_str() {
-            "--help" | "-h" => return Ok(ParsedArgs::Help),
             "--target" => {
                 let value = iter
                     .next()
@@ -82,7 +72,7 @@ where
             .collect();
     }
 
-    Ok(ParsedArgs::Run(Options { targets, runs }))
+    Ok(Options { targets, runs })
 }
 
 fn parse_positive_u64(flag: &str, value: &str) -> Result<u64, String> {
@@ -159,7 +149,10 @@ fn repo_root() -> PathBuf {
 
 fn copy_corpus_files_if_present(source_dir: &Path, destination_dir: &Path) -> Result<(), String> {
     if !source_dir.exists() {
-        return Ok(());
+        return Err(format!(
+            "seed corpus directory is missing for fuzz target: {}",
+            source_dir.display()
+        ));
     }
     for entry in fs::read_dir(source_dir)
         .map_err(|error| format!("read seed corpus {}: {error}", source_dir.display()))?
@@ -168,7 +161,10 @@ fn copy_corpus_files_if_present(source_dir: &Path, destination_dir: &Path) -> Re
             .map_err(|error| format!("read seed corpus entry {}: {error}", source_dir.display()))?;
         let source_path = entry.path();
         if !source_path.is_file() {
-            continue;
+            return Err(format!(
+                "seed corpus entry is not a file: {}",
+                source_path.display()
+            ));
         }
         let destination_path = destination_dir.join(entry.file_name());
         fs::copy(&source_path, &destination_path).map_err(|error| {
@@ -242,10 +238,6 @@ fn libfuzzer_completion_line_has_positive_run_count(line: &str) -> bool {
     runs > 0 && rest[digit_count..].starts_with(" runs in ")
 }
 
-fn print_usage() {
-    eprintln!("usage: xtask fuzz-gate [--target <cargo-fuzz-target>]... [--runs <positive-int>]");
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -300,10 +292,7 @@ Done 0 runs in 0 second(s)
 
     #[test]
     fn default_args_run_all_paranoid_fuzz_targets() {
-        let parsed = parse_args(std::iter::empty::<String>()).expect("parse args");
-        let ParsedArgs::Run(options) = parsed else {
-            panic!("expected run options");
-        };
+        let options = parse_args(std::iter::empty::<String>()).expect("parse args");
 
         assert_eq!(
             options,
@@ -313,6 +302,8 @@ Done 0 runs in 0 second(s)
                     "paranoid_envelope".to_owned(),
                     "paranoid_id".to_owned(),
                     "paranoid_db_validators".to_owned(),
+                    "paranoid_db_simple_query_literals".to_owned(),
+                    "paranoid_db_portable_query_template".to_owned(),
                 ],
                 runs: DEFAULT_FUZZ_RUNS
             }
@@ -334,7 +325,7 @@ Done 0 runs in 0 second(s)
 
     #[test]
     fn explicit_args_can_select_targets_and_run_count() {
-        let parsed = parse_args([
+        let options = parse_args([
             "--target",
             "paranoid_codecs",
             "--target",
@@ -343,9 +334,6 @@ Done 0 runs in 0 second(s)
             "17",
         ])
         .expect("parse args");
-        let ParsedArgs::Run(options) = parsed else {
-            panic!("expected run options");
-        };
 
         assert_eq!(
             options,
@@ -368,6 +356,37 @@ Done 0 runs in 0 second(s)
             sanitized_target_name("paranoid/codecs:weird"),
             "paranoid_codecs_weird",
         );
+    }
+
+    #[test]
+    fn missing_seed_corpus_directory_is_rejected() {
+        let test_dir = unique_test_dir("missing-seed-corpus");
+        let source_dir = test_dir.join("missing");
+        let destination_dir = test_dir.join("destination");
+        fs::create_dir_all(&destination_dir).expect("create destination");
+
+        let err = copy_corpus_files_if_present(&source_dir, &destination_dir)
+            .expect_err("missing corpus directory should fail loudly");
+
+        assert!(err.contains("seed corpus directory is missing"));
+
+        fs::remove_dir_all(&test_dir).expect("remove test dir");
+    }
+
+    #[test]
+    fn non_file_seed_corpus_entry_is_rejected() {
+        let test_dir = unique_test_dir("non-file-seed-corpus");
+        let source_dir = test_dir.join("source");
+        let destination_dir = test_dir.join("destination");
+        fs::create_dir_all(source_dir.join("nested")).expect("create nested source entry");
+        fs::create_dir_all(&destination_dir).expect("create destination");
+
+        let err = copy_corpus_files_if_present(&source_dir, &destination_dir)
+            .expect_err("non-file corpus entry should fail loudly");
+
+        assert!(err.contains("seed corpus entry is not a file"));
+
+        fs::remove_dir_all(&test_dir).expect("remove test dir");
     }
 
     fn fuzz_target_names_from_manifest(manifest: &str) -> Vec<&str> {
@@ -403,5 +422,16 @@ Done 0 runs in 0 second(s)
             "fuzz manifest should define fuzz targets"
         );
         names
+    }
+
+    fn unique_test_dir(label: &str) -> PathBuf {
+        env::temp_dir().join(format!(
+            "paranoid_xtask_fuzz_gate_{label}_{}_{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("system clock")
+                .as_nanos()
+        ))
     }
 }

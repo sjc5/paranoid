@@ -164,8 +164,14 @@ impl Pool {
         })
     }
 
-    #[cfg(test)]
-    pub(crate) fn clone_with_database_operation_observer(
+    /// Returns a clone of this pool that also records every Postgres wire
+    /// operation performed through it to `operation_observer`.
+    ///
+    /// This is a supported test-only integration point for Paranoid's own
+    /// Postgres-backed test suites, and for component authors writing their own Postgres-backed
+    /// test suites under the `component-authoring` feature.
+    #[cfg(any(test, feature = "component-authoring"))]
+    pub fn clone_with_database_operation_observer(
         &self,
         operation_observer: DatabaseOperationObserver,
     ) -> Self {
@@ -175,7 +181,7 @@ impl Pool {
         }
     }
 
-    pub(crate) fn record_database_operation(
+    pub(crate) fn record_database_operation_inner(
         &self,
         kind: DatabaseOperationKind,
         label: &'static str,
@@ -184,6 +190,32 @@ impl Pool {
         if let Some(operation_observer) = &self.operation_observer {
             operation_observer.record(kind, label, statement);
         }
+    }
+
+    /// Records one Postgres wire operation performed through this pool, if a
+    /// [`DatabaseOperationObserver`] is attached.
+    ///
+    /// Unstable component-authoring surface for component harnesses. No stability promise. Component authors
+    /// implement their own Paranoid-style Postgres queries with the same
+    /// operation-count instrumentation Paranoid uses internally.
+    #[cfg(feature = "component-authoring")]
+    pub fn record_database_operation(
+        &self,
+        kind: DatabaseOperationKind,
+        label: &'static str,
+        statement: Option<&str>,
+    ) {
+        self.record_database_operation_inner(kind, label, statement)
+    }
+
+    #[cfg(not(feature = "component-authoring"))]
+    pub(crate) fn record_database_operation(
+        &self,
+        kind: DatabaseOperationKind,
+        label: &'static str,
+        statement: Option<&str>,
+    ) {
+        self.record_database_operation_inner(kind, label, statement)
     }
 }
 
@@ -207,8 +239,14 @@ impl WritePool {
         })
     }
 
-    #[cfg(test)]
-    pub(crate) fn clone_with_database_operation_observer(
+    /// Returns a clone of this pool that also records every Postgres wire
+    /// operation performed through it to `operation_observer`.
+    ///
+    /// This is a supported test-only integration point for Paranoid's own
+    /// Postgres-backed test suites, and for component authors writing their own Postgres-backed
+    /// test suites under the `component-authoring` feature.
+    #[cfg(any(test, feature = "component-authoring"))]
+    pub fn clone_with_database_operation_observer(
         &self,
         operation_observer: DatabaseOperationObserver,
     ) -> Self {
@@ -217,6 +255,17 @@ impl WritePool {
                 .pool
                 .clone_with_database_operation_observer(operation_observer),
         }
+    }
+
+    #[cfg(feature = "component-authoring")]
+    /// Returns a neutral, non-write-marked handle to this pool's underlying connection pool.
+    ///
+    /// Component authors sometimes need to hand
+    /// a plain `Pool` to a lower runtime that is generic over both write and read-only
+    /// callers. This does not widen what the returned pool can do; it only drops the
+    /// write-path marker type.
+    pub fn clone_as_neutral_pool(&self) -> Pool {
+        self.pool.clone()
     }
 }
 
@@ -241,7 +290,7 @@ impl<'tx> Tx<'tx> {
         self.operation_observer.as_ref()
     }
 
-    pub(crate) fn record_database_operation(
+    pub(crate) fn record_database_operation_inner(
         &self,
         kind: DatabaseOperationKind,
         label: &'static str,
@@ -250,6 +299,32 @@ impl<'tx> Tx<'tx> {
         if let Some(operation_observer) = &self.operation_observer {
             operation_observer.record(kind, label, statement);
         }
+    }
+
+    /// Records one Postgres wire operation performed through this transaction,
+    /// if a [`DatabaseOperationObserver`] is attached.
+    ///
+    /// Unstable component-authoring surface for component harnesses. No stability promise. Component authors
+    /// implement their own Paranoid-style Postgres queries with the same
+    /// operation-count instrumentation Paranoid uses internally.
+    #[cfg(feature = "component-authoring")]
+    pub fn record_database_operation(
+        &self,
+        kind: DatabaseOperationKind,
+        label: &'static str,
+        statement: Option<&str>,
+    ) {
+        self.record_database_operation_inner(kind, label, statement)
+    }
+
+    #[cfg(not(feature = "component-authoring"))]
+    pub(crate) fn record_database_operation(
+        &self,
+        kind: DatabaseOperationKind,
+        label: &'static str,
+        statement: Option<&str>,
+    ) {
+        self.record_database_operation_inner(kind, label, statement)
     }
 
     /// Commits this transaction.
@@ -286,6 +361,24 @@ impl<'tx> WriteTx<'tx> {
         self.tx.database_operation_observer()
     }
 
+    /// Records one Postgres wire operation performed through this
+    /// write-requiring transaction, if a [`DatabaseOperationObserver`] is
+    /// attached.
+    ///
+    /// Unstable component-authoring surface for component harnesses. No stability promise. Component authors
+    /// implement their own Paranoid-style Postgres queries with the same
+    /// operation-count instrumentation Paranoid uses internally.
+    #[cfg(feature = "component-authoring")]
+    pub fn record_database_operation(
+        &self,
+        kind: DatabaseOperationKind,
+        label: &'static str,
+        statement: Option<&str>,
+    ) {
+        self.tx.record_database_operation(kind, label, statement);
+    }
+
+    #[cfg(not(feature = "component-authoring"))]
     pub(crate) fn record_database_operation(
         &self,
         kind: DatabaseOperationKind,

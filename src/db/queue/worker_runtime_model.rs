@@ -62,6 +62,13 @@ impl JobExecutionContext {
         self.max_retries
     }
 
+    #[cfg(feature = "component-authoring")]
+    /// Returns the write pool backing this job's queue, for component authors that must commit application state changes
+    /// atomically alongside durable-effect task completion.
+    pub fn pool(&self) -> &WritePool {
+        &self.pool
+    }
+
     /// Returns true when the owning long-running worker has been asked to stop.
     pub fn worker_shutdown_has_been_requested(&self) -> bool {
         self.worker_shutdown_signal.is_cancellation_requested()

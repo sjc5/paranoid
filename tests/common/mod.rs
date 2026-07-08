@@ -1,11 +1,10 @@
-#![allow(dead_code)]
-
 use paranoid::db::{PgIdentifier, PgQualifiedTableName, unparameterized_simple_query};
 use sqlx::PgPool;
+use sqlx::Row;
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use std::str::FromStr;
 
-pub fn test_database_url_from_env(env_names: &[&str]) -> Option<String> {
+fn test_database_url_from_env(env_names: &[&str]) -> Option<String> {
     env_names.iter().find_map(|env_name| {
         let value = std::env::var(env_name).ok()?;
         let trimmed = value.trim();
@@ -17,29 +16,17 @@ pub fn test_database_url_from_env(env_names: &[&str]) -> Option<String> {
     })
 }
 
-fn required_test_database_url_from_env(env_names: &[&str]) -> String {
+fn required_test_env_value(env_names: &[&str]) -> String {
     test_database_url_from_env(env_names).unwrap_or_else(|| {
         panic!(
-            "required Postgres test database URL missing; set one of: {}",
+            "required Postgres test environment value missing; set one of: {}",
             env_names.join(", ")
         )
     })
 }
 
 pub fn standard_test_database_url() -> String {
-    required_test_database_url_from_env(&["TEST_DSN", "PARANOID_TEST_DATABASE_URL"])
-}
-
-pub fn queue_test_database_url() -> String {
-    required_test_database_url_from_env(&[
-        "TEST_DATABASE_URL",
-        "TEST_DSN",
-        "PARANOID_TEST_DATABASE_URL",
-    ])
-}
-
-pub fn direct_test_database_url() -> String {
-    required_test_database_url_from_env(&["TEST_DSN_DIRECT", "PARANOID_TEST_DATABASE_DIRECT_URL"])
+    required_test_env_value(&["TEST_DSN", "PARANOID_TEST_DATABASE_URL"])
 }
 
 pub async fn connect_sqlx_pool_for_harness(
@@ -58,26 +45,6 @@ pub async fn connect_sqlx_pool_for_harness(
         .expect("connect SQLx harness pool")
 }
 
-pub async fn drop_test_table(pool: &PgPool, table_name: &PgQualifiedTableName) {
-    unparameterized_simple_query(sqlx::AssertSqlSafe(format!(
-        "DROP TABLE IF EXISTS {} CASCADE",
-        table_name.quoted()
-    )))
-    .execute(pool)
-    .await
-    .expect("drop test table");
-}
-
-pub async fn create_test_schema(pool: &PgPool, schema_name: &PgIdentifier) {
-    unparameterized_simple_query(sqlx::AssertSqlSafe(format!(
-        "CREATE SCHEMA {}",
-        schema_name.quoted()
-    )))
-    .execute(pool)
-    .await
-    .expect("create test schema");
-}
-
 pub async fn drop_test_schema(pool: &PgPool, schema_name: &PgIdentifier) {
     unparameterized_simple_query(sqlx::AssertSqlSafe(format!(
         "DROP SCHEMA IF EXISTS {} CASCADE",
@@ -89,21 +56,29 @@ pub async fn drop_test_schema(pool: &PgPool, schema_name: &PgIdentifier) {
 }
 
 pub async fn fetch_table_exists(pool: &PgPool, table_name: &PgQualifiedTableName) -> bool {
-    sqlx::query_scalar::<_, bool>(
+    let schema_expression = table_name
+        .schema()
+        .map(|schema| postgres_string_literal(schema.as_str()))
+        .unwrap_or_else(|| "current_schema()".to_owned());
+    let table_expression = postgres_string_literal(table_name.table().as_str());
+    let row = unparameterized_simple_query(sqlx::AssertSqlSafe(format!(
         r#"
         SELECT EXISTS (
             SELECT 1
             FROM pg_class AS c
             JOIN pg_namespace AS n ON n.oid = c.relnamespace
-            WHERE n.nspname = COALESCE($1, current_schema())
-              AND c.relname = $2
+            WHERE n.nspname = {schema_expression}
+              AND c.relname = {table_expression}
               AND c.relkind IN ('r', 'p')
         )
         "#,
-    )
-    .bind(table_name.schema().map(|schema| schema.as_str()))
-    .bind(table_name.table().as_str())
+    )))
     .fetch_one(pool)
     .await
-    .expect("fetch table existence")
+    .expect("fetch table existence");
+    row.try_get(0).expect("decode table existence")
+}
+
+fn postgres_string_literal(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "''"))
 }

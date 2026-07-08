@@ -1,18 +1,25 @@
+#[cfg(test)]
+use super::finish_pool_owned_write_rollback_only_transaction_and_preserve_rollback_error;
 use super::fleet::{
     Cron, CronConfig, CronKey, CronRunError, CronTaskErrorAction, Error as FleetPrimitiveError,
     MIN_FLEET_CRON_INTERVAL,
 };
+#[cfg(test)]
+use super::test_schema_ledger_table_name;
+#[cfg(test)]
+use super::validate_component_schema_version_in_current_transaction;
 use super::{
-    ComponentSchemaVersion, DatabaseOperationKind, DatabaseOperationObserver, DbError,
-    PgIdentifier, PgQualifiedTableName, PgSqlState, Pool, SchemaLedgerConfig, Tx, WritePool,
-    WriteTx, duration_from_nonnegative_f64_seconds,
+    ComponentSchemaMigrationPlan, ComponentSchemaMigrationStep, ComponentSchemaVersion,
+    DatabaseOperationKind, DatabaseOperationObserver, DbError, PgIdentifier, PgQualifiedTableName,
+    PgSqlState, Pool, RecordedComponentSchemaVersion, Tx, WritePool, WriteTx,
+    duration_from_nonnegative_f64_seconds,
     finish_pool_owned_rollback_only_transaction_and_preserve_rollback_error,
-    finish_pool_owned_write_rollback_only_transaction_and_preserve_rollback_error,
     finish_pool_owned_write_transaction_and_preserve_rollback_error,
     normalize_check_constraint_expression, pg_table_name_set_could_contain_same_relation,
-    pooler_safe_query, pooler_safe_query_scalar, random_unit_f64_from_system,
-    record_component_schema_version_in_current_transaction, record_database_operation,
-    schema_instance_key_for_parts, validate_component_schema_version_in_current_transaction,
+    plan_component_schema_migration_in_current_transaction, pooler_safe_query,
+    pooler_safe_query_scalar, random_unit_f64_from_system,
+    record_component_schema_migration_completion_in_current_transaction, record_database_operation,
+    schema_instance_key_for_parts,
 };
 use crate::id;
 use serde::Serialize;
@@ -40,6 +47,12 @@ mod preparation;
 mod rows;
 mod runtime_helpers;
 mod schema;
+// Negative-DML constraint probes are test-only. Production migration/boot validates the
+// physical schema through catalog inspection (columns, named CHECK constraints, indexes);
+// it must not issue intentionally-failing INSERTs, which managed-Postgres monitoring
+// records as errors on every healthy startup. The probes remain the deep-validation tool
+// that proves constraints actually reject bad rows.
+#[cfg(test)]
 mod schema_constraint_probes;
 mod schema_migration;
 mod schema_model;
@@ -60,10 +73,13 @@ use pause::*;
 use preparation::*;
 use rows::*;
 use runtime_helpers::*;
-use schema::{
-    migrate_schema, migrate_schema_in_current_transaction, validate_schema,
-    validate_schema_in_current_transaction,
-};
+#[cfg(any(test, feature = "component-authoring"))]
+use schema::migrate_schema;
+use schema::migrate_schema_in_current_transaction;
+#[cfg(test)]
+use schema::validate_schema;
+#[cfg(test)]
+use schema::validate_schema_in_current_transaction;
 pub(in crate::db::queue) use schema_model::*;
 use sql::*;
 use validation::*;
@@ -105,6 +121,7 @@ async fn finish_queue_pool_transaction<T>(
     .await
 }
 
+#[cfg(test)]
 async fn finish_queue_validation_transaction<T>(
     operation: &'static str,
     tx: WriteTx<'_>,
@@ -144,6 +161,11 @@ async fn finish_queue_read_transaction<T>(
 }
 
 /// Postgres-backed durable queue configuration.
+///
+/// Component authors may construct
+/// this to run their own Queue instance under independently chosen table
+/// names within an already-migrated Paranoid schema.
+#[cfg(feature = "component-authoring")]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct StoreConfig {
     /// Jobs table.
@@ -156,6 +178,21 @@ pub struct StoreConfig {
     pub schema_ledger_table_name: PgQualifiedTableName,
     /// Maximum serialized JSON payload size per queued job.
     pub payload_json_limit_bytes: usize,
+}
+
+#[cfg(not(feature = "component-authoring"))]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct StoreConfig {
+    /// Jobs table.
+    pub(crate) table_name: PgQualifiedTableName,
+    /// Dead-letter jobs table.
+    pub(crate) dead_letter_table_name: PgQualifiedTableName,
+    /// Pause-state table.
+    pub(crate) pause_table_name: PgQualifiedTableName,
+    /// Schema ledger table for this queue.
+    pub(crate) schema_ledger_table_name: PgQualifiedTableName,
+    /// Maximum serialized JSON payload size per queued job.
+    pub(crate) payload_json_limit_bytes: usize,
 }
 
 /// Postgres-backed durable queue primitive.
@@ -234,7 +271,9 @@ pub(in crate::db::queue) const QUEUE_OPERATION_SET_LOCAL_STATEMENT_TIMEOUT: &str
 pub(in crate::db::queue) const QUEUE_OPERATION_TOUCH_JOB_HEARTBEAT: &str =
     "queue.touch_job_heartbeat";
 pub(in crate::db::queue) const QUEUE_OPERATION_UPSERT_PAUSE_KEY: &str = "queue.upsert_pause_key";
+#[cfg(any(test, feature = "component-authoring"))]
 pub(in crate::db::queue) const QUEUE_OPERATION_SCHEMA_MIGRATE: &str = "queue.schema.migrate";
+#[cfg(test)]
 pub(in crate::db::queue) const QUEUE_OPERATION_SCHEMA_VALIDATE: &str = "queue.schema.validate";
 pub(in crate::db::queue) const QUEUE_OPERATION_SCHEMA_MIGRATE_STATEMENT: &str =
     "queue.schema.migrate_statement";
@@ -246,16 +285,24 @@ pub(in crate::db::queue) const QUEUE_OPERATION_SCHEMA_VALIDATE_NAMED_INDEX: &str
     "queue.schema.validate_named_index";
 pub(in crate::db::queue) const QUEUE_OPERATION_SCHEMA_VALIDATE_ACTIVE_DEDUPE_ARBITER: &str =
     "queue.schema.validate_active_dedupe_arbiter";
+// Test-only: the negative-DML constraint probes that emit these operation labels no longer
+// run on the production migration/boot path.
+#[cfg(test)]
 pub(in crate::db::queue) const QUEUE_OPERATION_SCHEMA_PROBE_SAVEPOINT: &str =
     "queue.schema.probe_savepoint";
+#[cfg(test)]
 pub(in crate::db::queue) const QUEUE_OPERATION_SCHEMA_PROBE_INSERT: &str =
     "queue.schema.probe_insert";
+#[cfg(test)]
 pub(in crate::db::queue) const QUEUE_OPERATION_SCHEMA_PROBE_ROLLBACK: &str =
     "queue.schema.probe_rollback";
+#[cfg(test)]
 pub(in crate::db::queue) const QUEUE_OPERATION_SCHEMA_PROBE_RELEASE: &str =
     "queue.schema.probe_release";
 
 #[cfg(test)]
 mod postgres_operation_count_tests;
+#[cfg(test)]
+mod postgres_tests;
 #[cfg(test)]
 mod tests;

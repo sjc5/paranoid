@@ -5,18 +5,11 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 const DEFAULT_FUZZ_RUNS: u64 = 4096;
-const DEFAULT_LOG_DIR: &str = "logs.local";
+const GATE_LOG_DIR: &str = "logs.local";
 
 #[derive(Debug, Eq, PartialEq)]
 struct Options {
     fuzz_runs: u64,
-    log_dir: PathBuf,
-}
-
-#[derive(Debug, Eq, PartialEq)]
-enum ParsedArgs {
-    Help,
-    Run(Options),
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -38,44 +31,30 @@ where
     I: IntoIterator,
     I::Item: Into<OsString>,
 {
-    let parsed = parse_args(args)?;
-    let ParsedArgs::Run(options) = parsed else {
-        print_usage();
-        return Ok(0);
-    };
-
+    let options = parse_args(args)?;
     run_gate(options)
 }
 
-fn parse_args<I>(args: I) -> Result<ParsedArgs, String>
+fn parse_args<I>(args: I) -> Result<Options, String>
 where
     I: IntoIterator,
     I::Item: Into<OsString>,
 {
     let mut fuzz_runs = DEFAULT_FUZZ_RUNS;
-    let mut log_dir = PathBuf::from(DEFAULT_LOG_DIR);
     let mut iter = args.into_iter().map(Into::into);
 
     while let Some(arg) = iter.next() {
         match arg.to_str() {
-            Some("--help" | "-h") => return Ok(ParsedArgs::Help),
             Some("--runs") => {
                 let value = next_utf8_value("--runs", iter.next())?;
                 fuzz_runs = parse_positive_u64("--runs", &value)?;
-            }
-            Some("--log-dir") => {
-                let value = next_utf8_value("--log-dir", iter.next())?;
-                if value.is_empty() {
-                    return Err("--log-dir cannot be empty".to_owned());
-                }
-                log_dir = PathBuf::from(value);
             }
             Some(other) => return Err(format!("unknown argument {other:?}")),
             None => return Err("gate arguments must be valid UTF-8".to_owned()),
         }
     }
 
-    Ok(ParsedArgs::Run(Options { fuzz_runs, log_dir }))
+    Ok(Options { fuzz_runs })
 }
 
 fn next_utf8_value(flag: &str, value: Option<OsString>) -> Result<String, String> {
@@ -96,18 +75,15 @@ fn parse_positive_u64(flag: &str, value: &str) -> Result<u64, String> {
 }
 
 fn run_gate(options: Options) -> Result<i32, String> {
-    fs::create_dir_all(&options.log_dir).map_err(|error| {
-        format!(
-            "create gate log directory {}: {error}",
-            options.log_dir.display()
-        )
-    })?;
+    let log_dir = PathBuf::from(GATE_LOG_DIR);
+    fs::create_dir_all(&log_dir)
+        .map_err(|error| format!("create gate log directory {}: {error}", log_dir.display()))?;
 
     let steps = gate_steps(options.fuzz_runs);
     let mut failures = Vec::new();
 
     for (index, step) in steps.iter().enumerate() {
-        let log_path = step_log_path(&options.log_dir, index, step.name);
+        let log_path = step_log_path(&log_dir, index, step.name);
         println!("Running {}...", step.name);
         match run_step(step, &log_path) {
             Ok(()) => println!("{} passed ({})", step.name, log_path.display()),
@@ -147,9 +123,14 @@ fn run_gate(options: Options) -> Result<i32, String> {
 fn gate_steps(fuzz_runs: u64) -> Vec<GateStep> {
     vec![
         make_step("feature-gate"),
+        make_step("clippy-gate"),
         make_step("tool-gate"),
         make_step("bench-gate"),
+        make_step("test"),
         make_step("test-db"),
+        // Proves the advertised wasm-clean promise (crypto/id compile for
+        // wasm32-unknown-unknown) on every gate run rather than manually.
+        make_step("wasm-check"),
         GateStep {
             name: "fuzz",
             command: make_command("fuzz"),
@@ -242,29 +223,21 @@ fn format_log_write_error(error: io::Error) -> String {
     format!("write gate log: {error}")
 }
 
-fn print_usage() {
-    eprintln!("usage: xtask gate [--runs <positive-int>] [--log-dir <path>]");
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn parser_accepts_defaults_and_custom_values() {
+    fn parser_accepts_defaults_and_custom_run_count() {
         assert_eq!(
             parse_args(Vec::<OsString>::new()).unwrap(),
-            ParsedArgs::Run(Options {
+            Options {
                 fuzz_runs: DEFAULT_FUZZ_RUNS,
-                log_dir: PathBuf::from(DEFAULT_LOG_DIR),
-            })
+            }
         );
         assert_eq!(
-            parse_args(["--runs", "17", "--log-dir", "tmp.logs"]).unwrap(),
-            ParsedArgs::Run(Options {
-                fuzz_runs: 17,
-                log_dir: PathBuf::from("tmp.logs"),
-            })
+            parse_args(["--runs", "17"]).unwrap(),
+            Options { fuzz_runs: 17 }
         );
     }
 
@@ -281,9 +254,18 @@ mod tests {
         let names = steps.iter().map(|step| step.name).collect::<Vec<_>>();
         assert_eq!(
             names,
-            vec!["feature-gate", "tool-gate", "bench-gate", "test-db", "fuzz"]
+            vec![
+                "feature-gate",
+                "clippy-gate",
+                "tool-gate",
+                "bench-gate",
+                "test",
+                "test-db",
+                "wasm-check",
+                "fuzz"
+            ]
         );
-        assert_eq!(steps[4].env, vec![("FUZZ_RUNS", OsString::from("9"))]);
+        assert_eq!(steps[7].env, vec![("FUZZ_RUNS", OsString::from("9"))]);
     }
 
     #[test]

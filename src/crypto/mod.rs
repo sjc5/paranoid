@@ -3,9 +3,13 @@
 pub(crate) mod bip39_english_words;
 pub(crate) mod bytes;
 pub(crate) mod codecs;
+pub(crate) mod ed25519;
 pub(crate) mod envelope;
 pub(crate) mod error;
 pub(crate) mod keyset;
+pub(crate) mod ml_kem768;
+pub(crate) mod object_record;
+pub(crate) mod password_sealed_key;
 pub(crate) mod token;
 
 use std::error::Error as StdError;
@@ -16,7 +20,7 @@ use aes_gcm_siv::{Aes256GcmSiv, Nonce as AesGcmSivNonce};
 use argon2::{Algorithm, Argon2, Params as Argon2Params, Version as Argon2Version};
 use chacha20poly1305::aead::{Aead, KeyInit, Payload};
 use chacha20poly1305::{XChaCha20Poly1305, XNonce};
-use ring::{hkdf, hmac};
+
 use secrecy::{ExposeSecret, ExposeSecretMut, SecretBox};
 use subtle::ConstantTimeEq;
 use zeroize::Zeroize;
@@ -26,12 +30,39 @@ pub use bytes::{
     random_public_bytes, random_secret_bytes,
 };
 pub use codecs::{Base58, Base64Url, CrockfordBase32, EdgeByteContainer, Mnemonic};
+pub use ed25519::{
+    ED25519_PUBLIC_KEY_SIZE, ED25519_SIGNATURE_SIZE, Ed25519KeyPair, Ed25519PublicKey,
+    Ed25519Signature,
+};
 pub use envelope::{
     Encrypted, MAX_ASSOCIATED_DATA_SIZE, MAX_ENVELOPE_SIZE, MAX_PLAINTEXT_SIZE,
-    OpaqueEncryptedKind, Plaintext, decrypt, encrypt,
+    OpaqueEncryptedKind, Plaintext, decrypt, encrypt, encrypt_with_random_fill,
+};
+#[cfg(feature = "component-authoring")]
+pub use envelope::{
+    decrypt_bytes_with_associated_data_for_component_authoring,
+    encrypt_plaintext_bytes_as_for_component_authoring,
 };
 pub use error::{Error, RandomError};
 pub use keyset::{Keyset, MAX_KEYSET_KEYS, derive_keyset_from_latest_first_keys};
+pub use ml_kem768::{
+    ML_KEM_768_CIPHERTEXT_SIZE, ML_KEM_768_ENCAPSULATION_KEY_SIZE, ML_KEM_768_SEED_SIZE,
+    MlKem768Ciphertext, MlKem768DecapsulationKey, MlKem768EncapsulationKey, MlKem768Seed,
+};
+pub use object_record::{
+    MAX_OBJECT_RECORD_ASSOCIATED_DATA_SUFFIX_SIZE, MAX_OBJECT_RECORD_PLAINTEXT_SIZE,
+    MAX_OBJECT_RECORD_SIZE, OBJECT_RECORD_HEADER_SIZE, OBJECT_RECORD_OVERHEAD,
+    OBJECT_RECORD_VERSION, ObjectRecordHeader, open_object_record, pad_bucket_len,
+    parse_object_record_header, seal_object_record,
+};
+pub use password_sealed_key::{
+    PASSWORD_SEALED_KEY32_CALLER_SALT_RECORD_SIZE, PASSWORD_SEALED_KEY32_CALLER_SALT_VERSION,
+    PASSWORD_SEALED_KEY32_MAX_ITERATIONS, PASSWORD_SEALED_KEY32_MAX_MEMORY_COST_KIB,
+    PASSWORD_SEALED_KEY32_RECORD_SIZE, PASSWORD_SEALED_KEY32_VERSION, open_key32_with_password,
+    open_key32_with_password_and_caller_salt, read_password_sealed_key32_caller_salt_params,
+    read_password_sealed_key32_params, seal_key32_with_password,
+    seal_key32_with_password_and_caller_salt,
+};
 pub use token::{MAC_OVER_SECRET_SIZE, MacOverSecret};
 
 use bytes::validate_byte_container_len;
@@ -301,13 +332,27 @@ pub fn derive_argon2id_key32_from_password<K>(
     salt: &PasswordKdfSalt,
     params: PasswordKdfParams,
 ) -> Result<Key32, Error> {
+    derive_argon2id_key32_from_password_bytes(password, salt.as_bytes(), params)
+}
+
+/// Derives a 32-byte key from a password using Argon2id, over caller-chosen salt bytes.
+///
+/// Shared by [`derive_argon2id_key32_from_password`] (public, [`PasswordKdfSalt`]-typed)
+/// and the password-sealed-key caller-supplied-salt codec, which derives over secret
+/// [`Key32`] material that must never be widened into the public, non-zeroizing
+/// [`PasswordKdfSalt`] type.
+pub(crate) fn derive_argon2id_key32_from_password_bytes<K>(
+    password: &SecretBytes<K>,
+    salt: &[u8],
+    params: PasswordKdfParams,
+) -> Result<Key32, Error> {
     let argon2 = Argon2::new(
         Algorithm::Argon2id,
         Argon2Version::V0x13,
         params.to_argon2_params()?,
     );
     let mut output = [0_u8; KEY_SIZE];
-    let result = argon2.hash_password_into(password.expose_secret(), salt.as_bytes(), &mut output);
+    let result = argon2.hash_password_into(password.expose_secret(), salt, &mut output);
     if result.is_err() {
         output.zeroize();
         return Err(Error::KeyDerivationFailed);
@@ -381,7 +426,24 @@ impl<K> SecretBytes<K> {
         Ok(Self::from_vec(buffer))
     }
 
+    /// Generates a random secret byte buffer of exactly `len` bytes, typed by
+    /// marker `K`.
+    ///
+    /// Component authors use this
+    /// to generate their own domain-typed secret material (such as a
+    /// component-specific credential secret) with the same allocation and
+    /// randomness discipline Paranoid uses internally.
+    #[cfg(feature = "component-authoring")]
+    pub fn random(len: usize) -> Result<Self, Error> {
+        Self::random_inner(len)
+    }
+
+    #[cfg(not(feature = "component-authoring"))]
     pub(crate) fn random(len: usize) -> Result<Self, Error> {
+        Self::random_inner(len)
+    }
+
+    fn random_inner(len: usize) -> Result<Self, Error> {
         let mut bytes = Self::new_zeroed(len)?;
         fill_random(bytes.expose_secret_mut()).map_err(Error::from)?;
         Ok(bytes)
@@ -480,26 +542,46 @@ pub(crate) fn blake3_hash_parts(parts: &[&[u8]]) -> Hash32 {
     Hash32(*hasher.finalize().as_bytes())
 }
 
-/// Derives a 32-byte key using HKDF-SHA256.
+/// Derives a 32-byte key using HKDF-SHA256 (RFC 5869; pure-Rust backend;
+/// output pinned by the envelope conformance vectors).
 pub(crate) fn derive_hkdf_sha256(
     secret_key: &Key32,
     salt: &[u8],
     info: &[u8],
 ) -> Result<Key32, CryptoError> {
-    let salt = hkdf::Salt::new(hkdf::HKDF_SHA256, salt);
-    let pseudo_random_key = salt.extract(secret_key.as_bytes());
-    let info_parts = [info];
-    let output_key_material = pseudo_random_key
-        .expand(&info_parts, hkdf::HKDF_SHA256)
-        .map_err(|_| CryptoError::HkdfExpand)?;
-
+    let kdf = hkdf::Hkdf::<sha2::Sha256>::new(Some(salt), secret_key.as_bytes());
     let mut derived = [0_u8; KEY_SIZE];
-    output_key_material
-        .fill(&mut derived)
+    kdf.expand(info, &mut derived)
         .map_err(|_| CryptoError::HkdfExpand)?;
     let key = Key32::from_array(derived);
     derived.zeroize();
     Ok(key)
+}
+
+/// Derives a 32-byte key from a 32-byte key using BLAKE3 derive-key mode.
+///
+/// `context` must be a hard-coded, globally unique domain-separation string;
+/// never pass user-controlled context strings. This is the standard BLAKE3 KDF
+/// mode with `key_material` as the input material.
+pub fn derive_blake3_key32(context: &'static str, key_material: &Key32) -> Key32 {
+    derive_blake3_key(context, key_material.as_bytes())
+}
+
+/// Computes keyed BLAKE3 over `input`, read to exactly 32 bytes.
+pub fn blake3_keyed_hash32(key: &Key32, input: &[u8]) -> [u8; KEY32_SIZE] {
+    blake3_keyed_hash_parts(key, &[input])
+}
+
+/// Computes keyed BLAKE3 over `input` and fills `output` from a single
+/// extended-output (XOF) read.
+///
+/// The output is one contiguous XOF stream read to `output.len()` bytes — NOT a
+/// concatenation of independent fixed-length keyed hashes; the two produce
+/// different bytes for outputs longer than 32.
+pub fn blake3_keyed_hash_xof_into(key: &Key32, input: &[u8], output: &mut [u8]) {
+    let mut hasher = blake3::Hasher::new_keyed(key.as_bytes());
+    hasher.update(input);
+    hasher.finalize_xof().fill(output);
 }
 
 /// Derives a 32-byte key using BLAKE3 derive-key mode.
@@ -513,16 +595,17 @@ pub(crate) fn derive_blake3_key(context: &'static str, key_material: &[u8]) -> K
     key
 }
 
-/// Computes HMAC-SHA256 over ordered byte slices.
+/// Computes HMAC-SHA256 over ordered byte slices (pure-Rust backend;
+/// output pinned by the MAC-over-secret conformance vectors).
 pub(crate) fn hmac_sha256_parts(key: &Key32, parts: &[&[u8]]) -> [u8; KEY_SIZE] {
-    let key = hmac::Key::new(hmac::HMAC_SHA256, key.as_bytes());
-    let mut context = hmac::Context::with_key(&key);
+    use hmac::Mac;
+    let mut mac = <hmac::Hmac<sha2::Sha256> as Mac>::new_from_slice(key.as_bytes())
+        .expect("HMAC accepts any key length");
     for part in parts {
-        context.update(part);
+        mac.update(part);
     }
-    let tag = context.sign();
     let mut output = [0_u8; KEY_SIZE];
-    output.copy_from_slice(tag.as_ref());
+    output.copy_from_slice(&mac.finalize().into_bytes());
     output
 }
 

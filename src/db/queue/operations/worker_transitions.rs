@@ -166,10 +166,13 @@ where
     .fetch_one(executor)
     .await
     .map_err(DbError::query)?;
-    let outcome: String = row.try_get("outcome").map_err(Error::decode_row)?;
+    let outcome: String = row
+        .try_get(QueueQueryField::Outcome.name())
+        .map_err(Error::decode_row)?;
     schedule_owned_running_job_retry_result_from_outcome(
         outcome.as_str(),
-        row.try_get("next_run_at").map_err(Error::decode_row)?,
+        row.try_get(QueueQueryField::NextRunAt.name())
+            .map_err(Error::decode_row)?,
     )
 }
 
@@ -209,10 +212,13 @@ where
     .fetch_one(executor)
     .await
     .map_err(DbError::query)?;
-    let outcome: String = row.try_get("outcome").map_err(Error::decode_row)?;
+    let outcome: String = row
+        .try_get(QueueQueryField::Outcome.name())
+        .map_err(Error::decode_row)?;
     move_owned_running_job_to_dead_letter_result_from_outcome(
         &outcome,
-        row.try_get("inserted_id").map_err(Error::decode_row)?,
+        row.try_get(QueueQueryField::InsertedId.name())
+            .map_err(Error::decode_row)?,
     )
 }
 

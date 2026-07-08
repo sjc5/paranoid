@@ -120,13 +120,21 @@ where
         Ok(row) => row,
         Err(error) => return Err(map_retry_query_error(error, sql_catalog.config())),
     };
-    let inserted_id: Option<Vec<u8>> = row.try_get("inserted_id").map_err(Error::decode_row)?;
-    let source_exists: bool = row.try_get("source_exists").map_err(Error::decode_row)?;
-    let visible_exists: bool = row.try_get("visible_exists").map_err(Error::decode_row)?;
-    let conflict_exists: bool = row
-        .try_get("dedupe_conflict_exists")
+    let inserted_id: Option<Vec<u8>> = row
+        .try_get(QueueQueryField::InsertedId.name())
         .map_err(Error::decode_row)?;
-    let deleted_source: bool = row.try_get("deleted_source").map_err(Error::decode_row)?;
+    let source_exists: bool = row
+        .try_get(QueueQueryField::SourceExists.name())
+        .map_err(Error::decode_row)?;
+    let visible_exists: bool = row
+        .try_get(QueueQueryField::VisibleExists.name())
+        .map_err(Error::decode_row)?;
+    let conflict_exists: bool = row
+        .try_get(QueueQueryField::DedupeConflictExists.name())
+        .map_err(Error::decode_row)?;
+    let deleted_source: bool = row
+        .try_get(QueueQueryField::DeletedSource.name())
+        .map_err(Error::decode_row)?;
     requeue_dead_letter_job_result_from_row_state(
         inserted_id,
         source_exists,

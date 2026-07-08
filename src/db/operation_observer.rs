@@ -1,28 +1,50 @@
 use std::fmt;
 use std::sync::{Arc, Mutex};
 
+/// Kind of Postgres wire operation observed by a [`DatabaseOperationObserver`].
+///
+/// This instrumentation exists to let Paranoid (and, under the
+/// `component-authoring` feature, component authors) assert exact minimum-query behavior in their own
+/// Postgres-backed test suites.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum DatabaseOperationKind {
+pub enum DatabaseOperationKind {
+    /// A transaction was begun.
     BeginTransaction,
+    /// A transaction was committed.
     CommitTransaction,
+    /// A transaction was rolled back.
     RollbackTransaction,
+    /// A statement was executed for its side effect.
     Execute,
+    /// A query fetched all matching rows.
     FetchAll,
+    /// A query fetched exactly one row.
     FetchOne,
+    /// A query fetched at most one row.
     FetchOptional,
 }
 
+/// One observed Postgres wire operation, as recorded by a [`DatabaseOperationObserver`].
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct DatabaseOperationRecord {
-    pub(crate) kind: DatabaseOperationKind,
-    pub(crate) label: &'static str,
-    pub(crate) statement: Option<String>,
+pub struct DatabaseOperationRecord {
+    /// The kind of operation observed.
+    pub kind: DatabaseOperationKind,
+    /// The call-site label attached to the operation.
+    pub label: &'static str,
+    /// The rendered SQL statement, when the operation carried one.
+    pub statement: Option<String>,
 }
 
 type BeforeDatabaseOperationHook = Arc<dyn Fn(DatabaseOperationRecord) + Send + Sync + 'static>;
 
+/// Records every Postgres wire operation performed through a cloned pool or
+/// transaction, for exact minimum-query assertions in Postgres-backed test
+/// suites.
+///
+/// Attach one to a pool via `clone_with_database_operation_observer`, then
+/// inspect the accumulated `records()` after driving the operation under test.
 #[derive(Clone, Default)]
-pub(crate) struct DatabaseOperationObserver {
+pub struct DatabaseOperationObserver {
     records: Arc<Mutex<Vec<DatabaseOperationRecord>>>,
     before_operation_hook: Option<BeforeDatabaseOperationHook>,
 }
@@ -40,8 +62,12 @@ impl fmt::Debug for DatabaseOperationObserver {
 }
 
 impl DatabaseOperationObserver {
-    #[cfg(test)]
-    pub(crate) fn with_before_operation_hook(
+    /// Creates an observer that invokes `hook` synchronously as each operation is recorded.
+    ///
+    /// This lets a test inject a side effect (such as a concurrent racing write) at an
+    /// exact point in a multi-step database operation.
+    #[cfg(any(test, feature = "component-authoring"))]
+    pub fn with_before_operation_hook(
         hook: impl Fn(DatabaseOperationRecord) + Send + Sync + 'static,
     ) -> Self {
         Self {
@@ -70,16 +96,18 @@ impl DatabaseOperationObserver {
         }
     }
 
-    #[cfg(test)]
-    pub(crate) fn records(&self) -> Vec<DatabaseOperationRecord> {
+    /// Returns every operation recorded so far, in recorded order.
+    #[cfg(any(test, feature = "component-authoring"))]
+    pub fn records(&self) -> Vec<DatabaseOperationRecord> {
         self.records
             .lock()
             .expect("database operation observer lock poisoned")
             .clone()
     }
 
-    #[cfg(test)]
-    pub(crate) fn clear(&self) {
+    /// Discards every operation recorded so far.
+    #[cfg(any(test, feature = "component-authoring"))]
+    pub fn clear(&self) {
         self.records
             .lock()
             .expect("database operation observer lock poisoned")

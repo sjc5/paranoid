@@ -1,6 +1,11 @@
 use super::*;
 
 /// Schema configuration for Fleet coordination primitives.
+///
+/// Component authors may
+/// construct this to run their own Fleet instance under independently chosen
+/// table names within an already-migrated Paranoid schema.
+#[cfg(feature = "component-authoring")]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct StoreConfig {
     /// Root key prefix for Fleet-owned records.
@@ -17,6 +22,23 @@ pub struct StoreConfig {
     pub create_state_updated_at_index: bool,
 }
 
+#[cfg(not(feature = "component-authoring"))]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct StoreConfig {
+    /// Root key prefix for Fleet-owned records.
+    pub(crate) root_key: RootKey,
+    /// Backing table for Fleet-owned durable keyed state.
+    pub(crate) state_table_name: PgQualifiedTableName,
+    /// Backing table for Fleet-owned coordination claims.
+    pub(crate) coordination_table_name: PgQualifiedTableName,
+    /// Backing table for Fleet-owned fencing counters.
+    pub(crate) fencing_counter_table_name: PgQualifiedTableName,
+    /// Schema ledger table for this Fleet store.
+    pub(crate) schema_ledger_table_name: PgQualifiedTableName,
+    /// Whether migration should create and validation should require the Fleet state `updated_at` index.
+    pub(crate) create_state_updated_at_index: bool,
+}
+
 /// Postgres-backed Fleet coordination store.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Store {
@@ -27,7 +49,8 @@ pub struct Store {
 
 impl StoreConfig {
     /// Creates a Fleet store config from validated table names.
-    pub fn new(
+    #[cfg(test)]
+    pub(crate) fn new(
         root_key: RootKey,
         state_table_name: PgQualifiedTableName,
         coordination_table_name: PgQualifiedTableName,
@@ -38,7 +61,7 @@ impl StoreConfig {
             state_table_name,
             coordination_table_name: raw_coordination_config.table_name,
             fencing_counter_table_name: raw_coordination_config.fencing_counter_table_name,
-            schema_ledger_table_name: SchemaLedgerConfig::default().table_name,
+            schema_ledger_table_name: test_schema_ledger_table_name(),
             create_state_updated_at_index: true,
         };
         validate_distinct_table_names(&config)?;
@@ -46,7 +69,8 @@ impl StoreConfig {
     }
 
     /// Creates a Fleet store config from explicit validated table names.
-    pub fn new_with_explicit_fencing_counter_table(
+    #[cfg(test)]
+    pub(crate) fn new_with_explicit_fencing_counter_table(
         root_key: RootKey,
         state_table_name: PgQualifiedTableName,
         coordination_table_name: PgQualifiedTableName,
@@ -57,7 +81,7 @@ impl StoreConfig {
             state_table_name,
             coordination_table_name,
             fencing_counter_table_name,
-            schema_ledger_table_name: SchemaLedgerConfig::default().table_name,
+            schema_ledger_table_name: test_schema_ledger_table_name(),
             create_state_updated_at_index: true,
         };
         validate_distinct_table_names(&config)?;
@@ -80,21 +104,22 @@ impl StoreConfig {
     }
 }
 
+#[cfg(test)]
 impl Default for StoreConfig {
     fn default() -> Self {
         Self {
             root_key: RootKey::default(),
-            state_table_name: PgQualifiedTableName::unqualified(DEFAULT_FLEET_STATE_TABLE_NAME)
-                .expect("default Fleet state table name must be a valid Postgres identifier"),
+            state_table_name: PgQualifiedTableName::unqualified(TEST_FLEET_STATE_TABLE_NAME)
+                .expect("test Fleet state table name must be a valid Postgres identifier"),
             coordination_table_name: PgQualifiedTableName::unqualified(
-                DEFAULT_FLEET_COORDINATION_TABLE_NAME,
+                TEST_FLEET_COORDINATION_TABLE_NAME,
             )
-            .expect("default Fleet coordination table name must be a valid Postgres identifier"),
+            .expect("test Fleet coordination table name must be a valid Postgres identifier"),
             fencing_counter_table_name: PgQualifiedTableName::unqualified(
-                DEFAULT_FLEET_FENCING_COUNTER_TABLE_NAME,
+                TEST_FLEET_FENCING_COUNTER_TABLE_NAME,
             )
-            .expect("default Fleet fencing counter table name must be a valid Postgres identifier"),
-            schema_ledger_table_name: SchemaLedgerConfig::default().table_name,
+            .expect("test Fleet fencing counter table name must be a valid Postgres identifier"),
+            schema_ledger_table_name: test_schema_ledger_table_name(),
             create_state_updated_at_index: true,
         }
     }
@@ -102,9 +127,15 @@ impl Default for StoreConfig {
 
 impl Store {
     /// Creates a Fleet store handle with precomputed backing stores.
-    pub fn new(config: StoreConfig) -> Result<Self, Error> {
+    #[cfg(test)]
+    pub(crate) fn new(config: StoreConfig) -> Result<Self, Error> {
+        Self::new_inner(config)
+    }
+
+    /// Creates a Fleet store handle with precomputed backing stores.
+    pub(crate) fn new_inner(config: StoreConfig) -> Result<Self, Error> {
         validate_distinct_table_names(&config)?;
-        let kv_store = KvStore::new(config.kv_store_config())?;
+        let kv_store = KvStore::new_inner(config.kv_store_config())?;
         let lease_store = LeaseStore::new(config.lease_store_config());
         Ok(Self {
             config,
@@ -113,18 +144,44 @@ impl Store {
         })
     }
 
+    /// Creates a Fleet store handle with precomputed backing stores.
+    ///
+    /// Unstable test-support / component-authoring surface for component harnesses
+    ///. No stability promise: callers must
+    /// construct their own Fleet instance under independently chosen table names within
+    /// an already-migrated Paranoid schema.
+    #[cfg(feature = "component-authoring")]
+    pub fn new_from_store_config_for_component_authoring(
+        config: StoreConfig,
+    ) -> Result<Self, Error> {
+        Self::new_inner(config)
+    }
+
     /// Returns this store's config.
-    pub fn config(&self) -> &StoreConfig {
+    #[cfg(test)]
+    pub(crate) fn config(&self) -> &StoreConfig {
         &self.config
     }
 
     /// Creates and validates this store's schema inside one transaction.
+    ///
+    /// Unstable test-support / component-authoring surface for component harnesses
+    ///. No stability promise.
+    #[cfg(any(test, feature = "component-authoring"))]
     pub async fn migrate_schema(&self, pool: &WritePool) -> Result<(), crate::db::Error> {
         migrate_schema(pool, &self.config).await
     }
 
     /// Runs schema migration inside the caller's active transaction.
-    pub async fn migrate_schema_in_current_transaction(
+    #[cfg(test)]
+    pub(crate) async fn migrate_schema_in_current_transaction(
+        &self,
+        tx: &mut WriteTx<'_>,
+    ) -> Result<(), crate::db::Error> {
+        self.migrate_schema_in_current_transaction_inner(tx).await
+    }
+
+    pub(crate) async fn migrate_schema_in_current_transaction_inner(
         &self,
         tx: &mut WriteTx<'_>,
     ) -> Result<(), crate::db::Error> {
@@ -132,12 +189,22 @@ impl Store {
     }
 
     /// Validates that this store's schema already exists and is compatible.
-    pub async fn validate_schema(&self, pool: &Pool) -> Result<(), crate::db::Error> {
+    #[cfg(test)]
+    pub(crate) async fn validate_schema(&self, pool: &Pool) -> Result<(), crate::db::Error> {
         validate_schema(pool, &self.config).await
     }
 
     /// Validates schema inside the caller's active transaction.
-    pub async fn validate_schema_in_current_transaction(
+    #[cfg(test)]
+    pub(crate) async fn validate_schema_in_current_transaction(
+        &self,
+        tx: &mut Tx<'_>,
+    ) -> Result<(), crate::db::Error> {
+        self.validate_schema_in_current_transaction_inner(tx).await
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn validate_schema_in_current_transaction_inner(
         &self,
         tx: &mut Tx<'_>,
     ) -> Result<(), crate::db::Error> {
@@ -422,6 +489,7 @@ fn validate_distinct_table_names(config: &StoreConfig) -> Result<(), Error> {
 }
 
 /// Creates and validates the configured Fleet schema inside one transaction.
+#[cfg(any(test, feature = "component-authoring"))]
 pub(crate) async fn migrate_schema(
     pool: &WritePool,
     config: &StoreConfig,
@@ -440,13 +508,52 @@ pub(crate) async fn migrate_schema_in_current_transaction(
 ) -> Result<(), crate::db::Error> {
     validate_distinct_table_names(config)
         .map_err(|error| DbError::schema_mismatch(error.to_string()))?;
-    migrate_kv_schema_in_current_transaction(tx, &config.kv_store_config()).await?;
-    migrate_lease_schema_in_current_transaction(tx, &config.lease_store_config()).await?;
-    record_fleet_schema_version_in_current_transaction(tx, config).await?;
-    validate_schema_in_current_transaction(tx, config).await
+
+    let instance_key = fleet_schema_instance_key(config);
+    let component_schema_version = fleet_component_schema_version(&instance_key);
+    let migration_plan = plan_component_schema_migration_in_current_transaction(
+        tx,
+        &config.schema_ledger_table_name,
+        component_schema_version,
+        FLEET_SCHEMA_MIGRATION_STEPS,
+    )
+    .await?;
+
+    match migration_plan {
+        ComponentSchemaMigrationPlan::FreshInstall => {
+            migrate_kv_schema_in_current_transaction(tx, &config.kv_store_config()).await?;
+            migrate_lease_schema_in_current_transaction(tx, &config.lease_store_config()).await?;
+            record_fleet_schema_migration_completion_in_current_transaction(
+                tx,
+                config,
+                component_schema_version,
+                None,
+            )
+            .await?;
+            validate_schema_in_current_transaction(tx, config).await
+        }
+        ComponentSchemaMigrationPlan::AlreadyCurrent => {
+            migrate_kv_schema_in_current_transaction(tx, &config.kv_store_config()).await?;
+            migrate_lease_schema_in_current_transaction(tx, &config.lease_store_config()).await?;
+            validate_schema_in_current_transaction(tx, config).await
+        }
+        ComponentSchemaMigrationPlan::Upgrade { from, steps } => {
+            execute_fleet_schema_upgrade_steps_in_current_transaction(tx, config, &steps).await?;
+            validate_fleet_backing_schemas_in_current_transaction(tx, config).await?;
+            record_fleet_schema_migration_completion_in_current_transaction(
+                tx,
+                config,
+                component_schema_version,
+                Some(&from),
+            )
+            .await?;
+            validate_schema_in_current_transaction(tx, config).await
+        }
+    }
 }
 
 /// Validates that the configured Fleet schema already exists and is compatible.
+#[cfg(test)]
 pub(crate) async fn validate_schema(
     pool: &Pool,
     config: &StoreConfig,
@@ -465,30 +572,34 @@ async fn validate_schema_in_current_transaction(
 ) -> Result<(), DbError> {
     validate_distinct_table_names(config)
         .map_err(|error| DbError::schema_mismatch(error.to_string()))?;
-    KvStore::new(config.kv_store_config())
-        .map_err(|error| DbError::schema_mismatch(error.to_string()))?
-        .validate_schema_in_current_transaction(tx)
-        .await?;
-    LeaseStore::new(config.lease_store_config())
-        .validate_schema_in_current_transaction(tx)
-        .await?;
+    validate_fleet_backing_schemas_in_current_transaction(tx, config).await?;
     validate_fleet_schema_version_in_current_transaction(tx, config).await
 }
 
-async fn record_fleet_schema_version_in_current_transaction(
+async fn validate_fleet_backing_schemas_in_current_transaction(
     tx: &mut Tx<'_>,
     config: &StoreConfig,
 ) -> Result<(), DbError> {
-    let instance_key = fleet_schema_instance_key(config);
-    record_component_schema_version_in_current_transaction(
+    KvStore::new_inner(config.kv_store_config())
+        .map_err(|error| DbError::schema_mismatch(error.to_string()))?
+        .validate_schema_in_current_transaction_inner(tx)
+        .await?;
+    LeaseStore::new(config.lease_store_config())
+        .validate_schema_in_current_transaction(tx)
+        .await
+}
+
+async fn record_fleet_schema_migration_completion_in_current_transaction(
+    tx: &mut Tx<'_>,
+    config: &StoreConfig,
+    component_schema_version: ComponentSchemaVersion<'_>,
+    prior_recorded_version: Option<&RecordedComponentSchemaVersion>,
+) -> Result<(), DbError> {
+    record_component_schema_migration_completion_in_current_transaction(
         tx,
         &config.schema_ledger_table_name,
-        ComponentSchemaVersion {
-            component: FLEET_SCHEMA_COMPONENT,
-            instance_key: &instance_key,
-            version: FLEET_SCHEMA_VERSION,
-            fingerprint: FLEET_SCHEMA_FINGERPRINT,
-        },
+        component_schema_version,
+        prior_recorded_version,
     )
     .await
 }
@@ -501,12 +612,7 @@ async fn validate_fleet_schema_version_in_current_transaction(
     validate_component_schema_version_in_current_transaction(
         tx,
         &config.schema_ledger_table_name,
-        ComponentSchemaVersion {
-            component: FLEET_SCHEMA_COMPONENT,
-            instance_key: &instance_key,
-            version: FLEET_SCHEMA_VERSION,
-            fingerprint: FLEET_SCHEMA_FINGERPRINT,
-        },
+        fleet_component_schema_version(&instance_key),
     )
     .await
 }
@@ -521,4 +627,30 @@ fn fleet_schema_instance_key(config: &StoreConfig) -> String {
             ("fencing_counter_table", &config.fencing_counter_table_name),
         ])
     )
+}
+
+fn fleet_component_schema_version(instance_key: &str) -> ComponentSchemaVersion<'_> {
+    ComponentSchemaVersion {
+        component: FLEET_SCHEMA_COMPONENT,
+        instance_key,
+        version: FLEET_SCHEMA_VERSION,
+        fingerprint: FLEET_SCHEMA_FINGERPRINT,
+    }
+}
+
+async fn execute_fleet_schema_upgrade_steps_in_current_transaction(
+    _tx: &mut Tx<'_>,
+    _config: &StoreConfig,
+    steps: &[ComponentSchemaMigrationStep<'_>],
+) -> Result<(), DbError> {
+    debug_assert!(
+        steps.is_empty(),
+        "Fleet has no executable schema upgrade steps yet"
+    );
+    if steps.is_empty() {
+        return Ok(());
+    }
+    Err(DbError::schema_mismatch(
+        "Fleet schema upgrade steps were planned but no Fleet upgrade executor exists",
+    ))
 }

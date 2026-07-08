@@ -3,10 +3,12 @@ use crate::db::fleet::{
     RootKey as FleetRootKey, Store as FleetStore, StoreConfig as FleetStoreConfig,
 };
 use crate::db::lease::{LEASE_OPERATION_CLAIM, LEASE_OPERATION_RELEASE};
+use crate::db::postgres_test_support::{connect_sqlx_pool_for_harness, standard_test_database_url};
 use crate::db::{
     DatabaseOperationKind, DatabaseOperationObserver, DatabaseOperationRecord, PoolConfig,
-    SCHEMA_LEDGER_OPERATION_CREATE_SAVEPOINT, SCHEMA_LEDGER_OPERATION_CREATE_TABLE,
-    SCHEMA_LEDGER_OPERATION_FETCH_COMPONENT_VERSION,
+    SCHEMA_LEDGER_OPERATION_CLAIM_COMPONENT_VERSION, SCHEMA_LEDGER_OPERATION_CREATE_SAVEPOINT,
+    SCHEMA_LEDGER_OPERATION_CREATE_TABLE, SCHEMA_LEDGER_OPERATION_FETCH_COMPONENT_VERSION,
+    SCHEMA_LEDGER_OPERATION_LOCK_COMPONENT_VERSION,
     SCHEMA_LEDGER_OPERATION_RECORD_COMPONENT_VERSION, SCHEMA_LEDGER_OPERATION_RELEASE_SAVEPOINT,
     SCHEMA_LEDGER_OPERATION_VALIDATE_CHECK_CONSTRAINTS, SCHEMA_LEDGER_OPERATION_VALIDATE_COLUMNS,
     SCHEMA_LEDGER_OPERATION_VALIDATE_PRIMARY_KEY,
@@ -14,9 +16,7 @@ use crate::db::{
 use crate::id::SortableId as UniqueTestId;
 use secrecy::SecretString;
 use serde::{Deserialize, Serialize};
-use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use sqlx::{PgPool, Row};
-use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Notify;
@@ -159,6 +159,7 @@ fn worker_database_operation_shapes(inner: Vec<OperationShape>) -> Vec<Operation
 
 fn queue_migrate_schema_in_current_transaction_shapes() -> Vec<OperationShape> {
     [
+        schema_ledger_claim_component_migration_shapes(),
         vec![
             (
                 DatabaseOperationKind::Execute,
@@ -167,8 +168,22 @@ fn queue_migrate_schema_in_current_transaction_shapes() -> Vec<OperationShape> {
             14
         ],
         queue_physical_schema_validation_shapes(),
-        schema_ledger_record_component_version_shapes(),
-        schema_ledger_validate_component_version_shapes(),
+        schema_ledger_record_component_migration_completion_shapes(),
+    ]
+    .concat()
+}
+
+fn queue_migrate_already_current_schema_in_current_transaction_shapes() -> Vec<OperationShape> {
+    [
+        schema_ledger_lock_component_migration_shapes(),
+        vec![
+            (
+                DatabaseOperationKind::Execute,
+                QUEUE_OPERATION_SCHEMA_MIGRATE_STATEMENT,
+            );
+            14
+        ],
+        queue_physical_schema_validation_shapes(),
     ]
     .concat()
 }
@@ -197,7 +212,8 @@ fn queue_physical_schema_validation_shapes() -> Vec<OperationShape> {
             );
             9
         ],
-        queue_constraint_probe_shapes(21),
+        // Negative-DML constraint probes no longer run on the migration/boot path
+        // only catalog validation does.
         vec![
             (
                 DatabaseOperationKind::FetchOptional,
@@ -213,65 +229,74 @@ fn queue_physical_schema_validation_shapes() -> Vec<OperationShape> {
     .concat()
 }
 
-fn queue_constraint_probe_shapes(count: usize) -> Vec<OperationShape> {
-    let mut shapes = Vec::with_capacity(count * 4);
-    for _ in 0..count {
-        shapes.extend([
-            (
-                DatabaseOperationKind::Execute,
-                QUEUE_OPERATION_SCHEMA_PROBE_SAVEPOINT,
-            ),
-            (
-                DatabaseOperationKind::Execute,
-                QUEUE_OPERATION_SCHEMA_PROBE_INSERT,
-            ),
-            (
-                DatabaseOperationKind::Execute,
-                QUEUE_OPERATION_SCHEMA_PROBE_ROLLBACK,
-            ),
-            (
-                DatabaseOperationKind::Execute,
-                QUEUE_OPERATION_SCHEMA_PROBE_RELEASE,
-            ),
-        ]);
-    }
-    shapes
+fn schema_ledger_claim_component_migration_shapes() -> Vec<OperationShape> {
+    [
+        schema_ledger_ensure_and_validate_shapes(),
+        vec![(
+            DatabaseOperationKind::Execute,
+            SCHEMA_LEDGER_OPERATION_CLAIM_COMPONENT_VERSION,
+        )],
+    ]
+    .concat()
 }
 
-fn schema_ledger_record_component_version_shapes() -> Vec<OperationShape> {
+fn schema_ledger_lock_component_migration_shapes() -> Vec<OperationShape> {
+    [
+        schema_ledger_claim_component_migration_shapes(),
+        vec![(
+            DatabaseOperationKind::FetchOptional,
+            SCHEMA_LEDGER_OPERATION_LOCK_COMPONENT_VERSION,
+        )],
+    ]
+    .concat()
+}
+
+fn schema_ledger_record_component_migration_completion_shapes() -> Vec<OperationShape> {
     vec![
         (
             DatabaseOperationKind::Execute,
-            SCHEMA_LEDGER_OPERATION_CREATE_SAVEPOINT,
-        ),
-        (
-            DatabaseOperationKind::Execute,
-            SCHEMA_LEDGER_OPERATION_CREATE_TABLE,
-        ),
-        (
-            DatabaseOperationKind::Execute,
-            SCHEMA_LEDGER_OPERATION_RELEASE_SAVEPOINT,
-        ),
-        (
-            DatabaseOperationKind::FetchAll,
-            SCHEMA_LEDGER_OPERATION_VALIDATE_COLUMNS,
-        ),
-        (
-            DatabaseOperationKind::FetchOne,
-            SCHEMA_LEDGER_OPERATION_VALIDATE_PRIMARY_KEY,
-        ),
-        (
-            DatabaseOperationKind::FetchAll,
-            SCHEMA_LEDGER_OPERATION_VALIDATE_CHECK_CONSTRAINTS,
-        ),
-        (
-            DatabaseOperationKind::Execute,
             SCHEMA_LEDGER_OPERATION_RECORD_COMPONENT_VERSION,
+        ),
+        (
+            DatabaseOperationKind::FetchOptional,
+            SCHEMA_LEDGER_OPERATION_FETCH_COMPONENT_VERSION,
         ),
     ]
 }
 
 fn schema_ledger_validate_component_version_shapes() -> Vec<OperationShape> {
+    [
+        schema_ledger_validate_physical_shapes(),
+        vec![(
+            DatabaseOperationKind::FetchOptional,
+            SCHEMA_LEDGER_OPERATION_FETCH_COMPONENT_VERSION,
+        )],
+    ]
+    .concat()
+}
+
+fn schema_ledger_ensure_and_validate_shapes() -> Vec<OperationShape> {
+    [
+        vec![
+            (
+                DatabaseOperationKind::Execute,
+                SCHEMA_LEDGER_OPERATION_CREATE_SAVEPOINT,
+            ),
+            (
+                DatabaseOperationKind::Execute,
+                SCHEMA_LEDGER_OPERATION_CREATE_TABLE,
+            ),
+            (
+                DatabaseOperationKind::Execute,
+                SCHEMA_LEDGER_OPERATION_RELEASE_SAVEPOINT,
+            ),
+        ],
+        schema_ledger_validate_physical_shapes(),
+    ]
+    .concat()
+}
+
+fn schema_ledger_validate_physical_shapes() -> Vec<OperationShape> {
     vec![
         (
             DatabaseOperationKind::FetchAll,
@@ -284,10 +309,6 @@ fn schema_ledger_validate_component_version_shapes() -> Vec<OperationShape> {
         (
             DatabaseOperationKind::FetchAll,
             SCHEMA_LEDGER_OPERATION_VALIDATE_CHECK_CONSTRAINTS,
-        ),
-        (
-            DatabaseOperationKind::FetchOptional,
-            SCHEMA_LEDGER_OPERATION_FETCH_COMPONENT_VERSION,
         ),
     ]
 }
@@ -497,21 +518,6 @@ async fn queue_dead_letter_job_exists(
         .is_some()
 }
 
-fn test_database_url() -> String {
-    ["TEST_DSN", "PARANOID_TEST_DATABASE_URL"]
-        .into_iter()
-        .find_map(|env_name| {
-            let value = std::env::var(env_name).ok()?;
-            let trimmed = value.trim();
-            if trimmed.is_empty() {
-                None
-            } else {
-                Some(trimmed.to_owned())
-            }
-        })
-        .expect("required Postgres test database URL missing; set TEST_DSN or PARANOID_TEST_DATABASE_URL")
-}
-
 async fn connect_paranoid_pool(database_url: &str) -> WritePool {
     let mut config = PoolConfig::new(SecretString::from(database_url.to_owned()));
     config.max_connections = 2;
@@ -522,14 +528,7 @@ async fn connect_paranoid_pool(database_url: &str) -> WritePool {
 }
 
 async fn connect_sqlx_pool(database_url: &str) -> PgPool {
-    let connect_options = PgConnectOptions::from_str(database_url)
-        .expect("parse test database URL")
-        .statement_cache_capacity(0);
-    PgPoolOptions::new()
-        .max_connections(2)
-        .connect_with(connect_options)
-        .await
-        .expect("connect sqlx pool")
+    connect_sqlx_pool_for_harness(database_url, 2, "paranoid_queue_operation_count_test").await
 }
 
 fn unique_test_config() -> StoreConfig {

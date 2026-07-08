@@ -1,17 +1,17 @@
 use super::*;
+use crate::db::postgres_test_support::{connect_sqlx_pool_for_harness, standard_test_database_url};
 use crate::db::{
     DatabaseOperationKind, DatabaseOperationObserver, DatabaseOperationRecord, PoolConfig,
-    SCHEMA_LEDGER_OPERATION_CREATE_SAVEPOINT, SCHEMA_LEDGER_OPERATION_CREATE_TABLE,
-    SCHEMA_LEDGER_OPERATION_FETCH_COMPONENT_VERSION,
+    SCHEMA_LEDGER_OPERATION_CLAIM_COMPONENT_VERSION, SCHEMA_LEDGER_OPERATION_CREATE_SAVEPOINT,
+    SCHEMA_LEDGER_OPERATION_CREATE_TABLE, SCHEMA_LEDGER_OPERATION_FETCH_COMPONENT_VERSION,
+    SCHEMA_LEDGER_OPERATION_LOCK_COMPONENT_VERSION,
     SCHEMA_LEDGER_OPERATION_RECORD_COMPONENT_VERSION, SCHEMA_LEDGER_OPERATION_RELEASE_SAVEPOINT,
     SCHEMA_LEDGER_OPERATION_VALIDATE_CHECK_CONSTRAINTS, SCHEMA_LEDGER_OPERATION_VALIDATE_COLUMNS,
     SCHEMA_LEDGER_OPERATION_VALIDATE_PRIMARY_KEY,
 };
 use crate::id::SortableId as UniqueTestId;
 use secrecy::SecretString;
-use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use sqlx::{PgPool, Row};
-use std::str::FromStr;
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 use std::time::Instant;
@@ -76,6 +76,7 @@ pub(crate) fn kv_physical_schema_validation_shapes() -> Vec<OperationShape> {
 
 pub(crate) fn kv_migrate_schema_in_current_transaction_shapes() -> Vec<OperationShape> {
     [
+        schema_ledger_claim_component_migration_shapes(),
         vec![
             (
                 DatabaseOperationKind::Execute,
@@ -98,8 +99,37 @@ pub(crate) fn kv_migrate_schema_in_current_transaction_shapes() -> Vec<Operation
             3
         ],
         kv_physical_schema_validation_shapes(),
-        schema_ledger_record_component_version_shapes(),
-        kv_validate_schema_in_current_transaction_shapes(),
+        schema_ledger_record_component_migration_completion_shapes(),
+    ]
+    .concat()
+}
+
+pub(crate) fn kv_migrate_already_current_schema_in_current_transaction_shapes()
+-> Vec<OperationShape> {
+    [
+        schema_ledger_lock_component_migration_shapes(),
+        vec![
+            (
+                DatabaseOperationKind::Execute,
+                KV_OPERATION_SCHEMA_CREATE_TABLE,
+            ),
+            (
+                DatabaseOperationKind::FetchAll,
+                KV_OPERATION_SCHEMA_VALIDATE_COLUMNS,
+            ),
+            (
+                DatabaseOperationKind::FetchOne,
+                KV_OPERATION_SCHEMA_VALIDATE_KEY_CONFLICT_ARBITER,
+            ),
+        ],
+        vec![
+            (
+                DatabaseOperationKind::Execute,
+                KV_OPERATION_SCHEMA_CREATE_INDEX,
+            );
+            3
+        ],
+        kv_physical_schema_validation_shapes(),
     ]
     .concat()
 }
@@ -112,40 +142,74 @@ pub(crate) fn kv_validate_schema_in_current_transaction_shapes() -> Vec<Operatio
     .concat()
 }
 
-pub(crate) fn schema_ledger_record_component_version_shapes() -> Vec<OperationShape> {
+pub(crate) fn schema_ledger_claim_component_migration_shapes() -> Vec<OperationShape> {
+    [
+        schema_ledger_ensure_and_validate_shapes(),
+        vec![(
+            DatabaseOperationKind::Execute,
+            SCHEMA_LEDGER_OPERATION_CLAIM_COMPONENT_VERSION,
+        )],
+    ]
+    .concat()
+}
+
+pub(crate) fn schema_ledger_lock_component_migration_shapes() -> Vec<OperationShape> {
+    [
+        schema_ledger_claim_component_migration_shapes(),
+        vec![(
+            DatabaseOperationKind::FetchOptional,
+            SCHEMA_LEDGER_OPERATION_LOCK_COMPONENT_VERSION,
+        )],
+    ]
+    .concat()
+}
+
+pub(crate) fn schema_ledger_record_component_migration_completion_shapes() -> Vec<OperationShape> {
     vec![
         (
             DatabaseOperationKind::Execute,
-            SCHEMA_LEDGER_OPERATION_CREATE_SAVEPOINT,
-        ),
-        (
-            DatabaseOperationKind::Execute,
-            SCHEMA_LEDGER_OPERATION_CREATE_TABLE,
-        ),
-        (
-            DatabaseOperationKind::Execute,
-            SCHEMA_LEDGER_OPERATION_RELEASE_SAVEPOINT,
-        ),
-        (
-            DatabaseOperationKind::FetchAll,
-            SCHEMA_LEDGER_OPERATION_VALIDATE_COLUMNS,
-        ),
-        (
-            DatabaseOperationKind::FetchOne,
-            SCHEMA_LEDGER_OPERATION_VALIDATE_PRIMARY_KEY,
-        ),
-        (
-            DatabaseOperationKind::FetchAll,
-            SCHEMA_LEDGER_OPERATION_VALIDATE_CHECK_CONSTRAINTS,
-        ),
-        (
-            DatabaseOperationKind::Execute,
             SCHEMA_LEDGER_OPERATION_RECORD_COMPONENT_VERSION,
+        ),
+        (
+            DatabaseOperationKind::FetchOptional,
+            SCHEMA_LEDGER_OPERATION_FETCH_COMPONENT_VERSION,
         ),
     ]
 }
 
 pub(crate) fn schema_ledger_validate_component_version_shapes() -> Vec<OperationShape> {
+    [
+        schema_ledger_validate_physical_shapes(),
+        vec![(
+            DatabaseOperationKind::FetchOptional,
+            SCHEMA_LEDGER_OPERATION_FETCH_COMPONENT_VERSION,
+        )],
+    ]
+    .concat()
+}
+
+fn schema_ledger_ensure_and_validate_shapes() -> Vec<OperationShape> {
+    [
+        vec![
+            (
+                DatabaseOperationKind::Execute,
+                SCHEMA_LEDGER_OPERATION_CREATE_SAVEPOINT,
+            ),
+            (
+                DatabaseOperationKind::Execute,
+                SCHEMA_LEDGER_OPERATION_CREATE_TABLE,
+            ),
+            (
+                DatabaseOperationKind::Execute,
+                SCHEMA_LEDGER_OPERATION_RELEASE_SAVEPOINT,
+            ),
+        ],
+        schema_ledger_validate_physical_shapes(),
+    ]
+    .concat()
+}
+
+fn schema_ledger_validate_physical_shapes() -> Vec<OperationShape> {
     vec![
         (
             DatabaseOperationKind::FetchAll,
@@ -158,10 +222,6 @@ pub(crate) fn schema_ledger_validate_component_version_shapes() -> Vec<Operation
         (
             DatabaseOperationKind::FetchAll,
             SCHEMA_LEDGER_OPERATION_VALIDATE_CHECK_CONSTRAINTS,
-        ),
-        (
-            DatabaseOperationKind::FetchOptional,
-            SCHEMA_LEDGER_OPERATION_FETCH_COMPONENT_VERSION,
         ),
     ]
 }
@@ -294,21 +354,6 @@ fn transaction_records_many<const N: usize>(
     operation_records
 }
 
-fn test_database_url() -> String {
-    ["TEST_DSN", "PARANOID_TEST_DATABASE_URL"]
-        .into_iter()
-        .find_map(|env_name| {
-            let value = std::env::var(env_name).ok()?;
-            let trimmed = value.trim();
-            if trimmed.is_empty() {
-                None
-            } else {
-                Some(trimmed.to_owned())
-            }
-        })
-        .expect("required Postgres test database URL missing; set TEST_DSN or PARANOID_TEST_DATABASE_URL")
-}
-
 async fn connect_paranoid_pool(database_url: &str) -> WritePool {
     let mut config = PoolConfig::new(SecretString::from(database_url.to_owned()));
     config.max_connections = 2;
@@ -319,14 +364,7 @@ async fn connect_paranoid_pool(database_url: &str) -> WritePool {
 }
 
 async fn connect_sqlx_pool(database_url: &str) -> PgPool {
-    let connect_options = PgConnectOptions::from_str(database_url)
-        .expect("parse test database URL")
-        .statement_cache_capacity(0);
-    PgPoolOptions::new()
-        .max_connections(2)
-        .connect_with(connect_options)
-        .await
-        .expect("connect sqlx pool")
+    connect_sqlx_pool_for_harness(database_url, 2, "paranoid_kv_operation_count_test").await
 }
 
 fn unique_test_table_name() -> PgQualifiedTableName {

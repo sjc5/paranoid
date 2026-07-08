@@ -106,6 +106,8 @@ pub enum Error {
         /// Underlying random-source error.
         source: RandomError,
     },
+    /// Caller-supplied random fill reported failure.
+    InjectedRandomFillFailed,
 }
 
 impl fmt::Display for Error {
@@ -133,6 +135,9 @@ impl fmt::Display for Error {
                 write!(f, "id: invalid base32 byte 0x{byte:02x} at index {index}")
             }
             Self::Random { source } => write!(f, "id: random bytes: {source}"),
+            Self::InjectedRandomFillFailed => {
+                write!(f, "id: caller-supplied random fill failed")
+            }
         }
     }
 }
@@ -145,7 +150,8 @@ impl StdError for Error {
             | Self::InvalidRandomIdOutputLength { .. }
             | Self::InvalidIdLength { .. }
             | Self::InvalidTextLength { .. }
-            | Self::InvalidTextByte { .. } => None,
+            | Self::InvalidTextByte { .. }
+            | Self::InjectedRandomFillFailed => None,
             Self::Random { source } => Some(source),
         }
     }
@@ -164,12 +170,19 @@ fn new_id() -> Result<SortableId, Error> {
 }
 
 fn new_with_random_fill(
+    fill_random: impl FnMut(&mut [u8]) -> Result<(), Error>,
+) -> Result<SortableId, Error> {
+    new_at_unix_micros_with_random_fill_internal(now_unix_micros(), fill_random)
+}
+
+fn new_at_unix_micros_with_random_fill_internal(
+    unix_micros: i64,
     mut fill_random: impl FnMut(&mut [u8]) -> Result<(), Error>,
 ) -> Result<SortableId, Error> {
     let mut id = SortableId([0_u8; SORTABLE_ID_SIZE]);
     fill_random(&mut id.0[6..])?;
     id.0[6] &= 0x0f;
-    put_timestamp_ticks(&mut id.0, unix_micro_to_timestamp_ticks(now_unix_micros()));
+    put_timestamp_ticks(&mut id.0, unix_micro_to_timestamp_ticks(unix_micros));
 
     Ok(id)
 }
@@ -269,6 +282,22 @@ impl SortableId {
         new_id()
     }
 
+    /// Generates a new sortable ID at an explicit Unix-microsecond timestamp with
+    /// caller-supplied randomness.
+    ///
+    /// This is the sans-IO entry point: neither the system clock nor an ambient
+    /// random source is consulted. `fill_random` must fill its argument with
+    /// cryptographically secure random bytes and may report failure with
+    /// [`Error::InjectedRandomFillFailed`]. The timestamp is truncated to the
+    /// ID's 100-microsecond tick resolution exactly as [`SortableId::new`]
+    /// truncates the system clock.
+    pub fn new_at_unix_micros_with_random_fill(
+        unix_micros: i64,
+        fill_random: impl FnMut(&mut [u8]) -> Result<(), Error>,
+    ) -> Result<Self, Error> {
+        new_at_unix_micros_with_random_fill_internal(unix_micros, fill_random)
+    }
+
     /// Generates `count` IDs that share one timestamp tick.
     pub fn new_multi(count: usize) -> Result<Vec<Self>, Error> {
         new_multi_ids(count)
@@ -333,18 +362,18 @@ impl SortableId {
 impl RandomId {
     /// Generates a random lowercase ASCII alphanumeric ID.
     ///
-    /// The returned text contains exactly `output_len` bytes from
+    /// The returned text contains exactly `output_str_len` ASCII bytes from
     /// `0-9a-z`. Each output byte is sampled without modulo bias.
-    pub fn alphanumeric_lowercase(output_len: usize) -> Result<Self, Error> {
-        random_id_from_alphabet(output_len, ALPHANUMERIC_LOWERCASE)
+    pub fn alphanumeric_lowercase(output_str_len: usize) -> Result<Self, Error> {
+        random_id_from_alphabet(output_str_len, ALPHANUMERIC_LOWERCASE)
     }
 
     /// Generates a random ASCII alphanumeric ID using both letter cases.
     ///
-    /// The returned text contains exactly `output_len` bytes from
+    /// The returned text contains exactly `output_str_len` ASCII bytes from
     /// `0-9A-Za-z`. Each output byte is sampled without modulo bias.
-    pub fn alphanumeric_anycase(output_len: usize) -> Result<Self, Error> {
-        random_id_from_alphabet(output_len, ALPHANUMERIC_ANYCASE)
+    pub fn alphanumeric_anycase(output_str_len: usize) -> Result<Self, Error> {
+        random_id_from_alphabet(output_str_len, ALPHANUMERIC_ANYCASE)
     }
 
     /// Returns the ID text as a string slice.
@@ -376,29 +405,32 @@ impl fmt::Display for RandomId {
     }
 }
 
-fn random_id_from_alphabet(output_len: usize, alphabet: &'static [u8]) -> Result<RandomId, Error> {
-    random_id_from_alphabet_with_random_fill(output_len, alphabet, fill_with_system_random)
+fn random_id_from_alphabet(
+    output_str_len: usize,
+    alphabet: &'static [u8],
+) -> Result<RandomId, Error> {
+    random_id_from_alphabet_with_random_fill(output_str_len, alphabet, fill_with_system_random)
 }
 
 fn random_id_from_alphabet_with_random_fill(
-    output_len: usize,
+    output_str_len: usize,
     alphabet: &'static [u8],
     mut fill_random: impl FnMut(&mut [u8]) -> Result<(), Error>,
 ) -> Result<RandomId, Error> {
-    if output_len == 0 {
+    if output_str_len == 0 {
         return Err(Error::EmptyRandomIdOutputLength);
     }
-    if output_len > MAX_RANDOM_ID_OUTPUT_LEN {
+    if output_str_len > MAX_RANDOM_ID_OUTPUT_LEN {
         return Err(Error::InvalidRandomIdOutputLength {
-            actual: output_len,
+            actual: output_str_len,
             max: MAX_RANDOM_ID_OUTPUT_LEN,
         });
     }
 
     let usable_values = (256 / alphabet.len()) * alphabet.len();
-    let mut output = Vec::with_capacity(output_len);
+    let mut output = Vec::with_capacity(output_str_len);
     let mut random_buffer = [0_u8; RANDOM_BUFFER_SIZE];
-    while output.len() < output_len {
+    while output.len() < output_str_len {
         fill_random(&mut random_buffer)?;
         for random_byte in random_buffer {
             let random_value = usize::from(random_byte);
@@ -406,7 +438,7 @@ fn random_id_from_alphabet_with_random_fill(
                 continue;
             }
             output.push(alphabet[random_value % alphabet.len()]);
-            if output.len() == output_len {
+            if output.len() == output_str_len {
                 break;
             }
         }
@@ -908,5 +940,37 @@ mod tests {
         let id = SortableId::min_at_unix_micros(1_738_838_400_123_400);
         let text = id.to_string();
         assert_eq!(SortableId::from_str(&text).expect("parse"), id);
+    }
+
+    #[test]
+    fn new_at_unix_micros_with_random_fill_is_deterministic_and_encodes_the_timestamp() {
+        let unix_micros = 1_738_838_400_123_456;
+        let fill = |bytes: &mut [u8]| {
+            bytes.fill(0xff);
+            Ok(())
+        };
+
+        let id_a =
+            SortableId::new_at_unix_micros_with_random_fill(unix_micros, fill).expect("id a");
+        let id_b =
+            SortableId::new_at_unix_micros_with_random_fill(unix_micros, fill).expect("id b");
+        assert_eq!(id_a, id_b);
+
+        assert_eq!(
+            id_a.to_unix_micros(),
+            (unix_micros / TIMESTAMP_RESOLUTION_MICROS) * TIMESTAMP_RESOLUTION_MICROS
+        );
+        assert_eq!(id_a.as_bytes()[6] & 0x0f, 0x0f);
+        assert_eq!(&id_a.as_bytes()[7..], &[0xff_u8; 9]);
+        assert_eq!(
+            id_a,
+            SortableId::max_at_unix_micros(unix_micros),
+            "all-ones random bits at a fixed tick are the tick's maximum ID"
+        );
+
+        let failed = SortableId::new_at_unix_micros_with_random_fill(unix_micros, |_| {
+            Err(Error::InjectedRandomFillFailed)
+        });
+        assert!(matches!(failed, Err(Error::InjectedRandomFillFailed)));
     }
 }

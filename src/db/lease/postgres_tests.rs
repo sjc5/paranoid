@@ -7,6 +7,7 @@ use super::{
     StoreConfig as LeaseStoreConfig, migrate_schema as migrate_lease_schema,
     validate_schema as validate_lease_schema,
 };
+use crate::db::postgres_test_support::{connect_sqlx_pool_for_harness, standard_test_database_url};
 use crate::db::{
     DatabaseOperationKind, DatabaseOperationObserver, DbError, PgIdentifier, PgQualifiedTableName,
     PoolConfig, WritePool, unparameterized_simple_query as db_unparameterized_simple_query,
@@ -14,30 +15,37 @@ use crate::db::{
 use crate::id::SortableId as UniqueTestId;
 use secrecy::SecretString;
 use sqlx::PgPool;
-use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
-use std::str::FromStr;
+use sqlx::Row;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::oneshot;
 
 async fn fetch_table_exists(pool: &PgPool, table_name: &PgQualifiedTableName) -> bool {
-    sqlx::query_scalar::<_, bool>(
+    let schema_expression = table_name
+        .schema()
+        .map(|schema| postgres_string_literal(schema.as_str()))
+        .unwrap_or_else(|| "current_schema()".to_owned());
+    let table_expression = postgres_string_literal(table_name.table().as_str());
+    let row = db_unparameterized_simple_query(sqlx::AssertSqlSafe(format!(
         r#"
         SELECT EXISTS (
             SELECT 1
             FROM pg_class AS c
             JOIN pg_namespace AS n ON n.oid = c.relnamespace
-            WHERE n.nspname = COALESCE($1, current_schema())
-              AND c.relname = $2
+            WHERE n.nspname = {schema_expression}
+              AND c.relname = {table_expression}
               AND c.relkind IN ('r', 'p')
         )
         "#,
-    )
-    .bind(table_name.schema().map(|schema| schema.as_str()))
-    .bind(table_name.table().as_str())
+    )))
     .fetch_one(pool)
     .await
-    .expect("fetch table existence")
+    .expect("fetch table existence");
+    row.try_get(0).expect("decode table existence")
+}
+
+fn postgres_string_literal(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "''"))
 }
 
 const COMPATIBLE_KEY_PRIMARY_KEY_COLUMN_DEFINITION: &str =
@@ -53,14 +61,14 @@ const COMPATIBLE_LAST_FENCING_TOKEN_COLUMN_DEFINITION: &str =
 const COMPATIBLE_LEASE_TOKEN_COLUMN_DEFINITION: &str =
     "BYTEA NOT NULL CHECK (octet_length(lease_token) = 32)";
 
-#[path = "../../../tests/db_lease_postgres/support.rs"]
+#[path = "postgres_tests/support.rs"]
 mod support;
 
 use support::*;
 
-#[path = "../../../tests/db_lease_postgres/lifecycle.rs"]
+#[path = "postgres_tests/lifecycle.rs"]
 mod lifecycle;
-#[path = "../../../tests/db_lease_postgres/schema.rs"]
+#[path = "postgres_tests/schema.rs"]
 mod schema;
-#[path = "../../../tests/db_lease_postgres/transactions_and_concurrency.rs"]
+#[path = "postgres_tests/transactions_and_concurrency.rs"]
 mod transactions_and_concurrency;

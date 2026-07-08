@@ -8,13 +8,18 @@ publish = false
 [package.metadata]
 cargo-fuzz = true
 
+# `fuzzing` is set by cargo-fuzz; the db target gates its body on it so it also
+# compiles as a no-op in a normal workspace build. Declare it so lint-clean builds stay clean.
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(fuzzing)'] }
+
 [dependencies]
 libfuzzer-sys = "0.4"
 
 [dependencies.paranoid]
 path = ".."
 default-features = false
-features = ["db"]
+features = ["crypto", "id", "db"]
 
 [[bin]]
 name = "paranoid_envelope"
@@ -40,6 +45,20 @@ bench = false
 [[bin]]
 name = "paranoid_db_validators"
 path = "fuzz_targets/paranoid_db_validators.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "paranoid_db_simple_query_literals"
+path = "fuzz_targets/paranoid_db_simple_query_literals.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "paranoid_db_portable_query_template"
+path = "fuzz_targets/paranoid_db_portable_query_template.rs"
 test = false
 doc = false
 bench = false

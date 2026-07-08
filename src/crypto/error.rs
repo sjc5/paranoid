@@ -1,7 +1,10 @@
 use std::error::Error as StdError;
 use std::fmt;
 
-use crate::crypto::{CryptoError, KEY32_SIZE, MAC_OVER_SECRET_SIZE};
+use crate::crypto::{
+    CryptoError, KEY32_SIZE, MAC_OVER_SECRET_SIZE, ML_KEM_768_CIPHERTEXT_SIZE,
+    ML_KEM_768_ENCAPSULATION_KEY_SIZE,
+};
 
 /// Error returned by the operating system random source.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -237,6 +240,72 @@ pub enum Error {
     AllocationFailed,
     /// Decryption failed.
     DecryptionFailed,
+    /// Object record used an unsupported record version.
+    UnsupportedObjectRecordVersion {
+        /// Version byte found in the object record.
+        version: u8,
+    },
+    /// Object record was shorter than the fixed record overhead.
+    ObjectRecordTooShort {
+        /// Length of the rejected record.
+        actual: usize,
+        /// Minimum accepted record length.
+        min: usize,
+    },
+    /// Object record exceeded the maximum record size.
+    ObjectRecordTooLarge {
+        /// Length of the rejected record.
+        actual: usize,
+        /// Maximum accepted record length.
+        max: usize,
+    },
+    /// Caller-supplied random fill reported failure.
+    InjectedRandomFillFailed,
+    /// Password-sealed key record has the wrong length.
+    InvalidPasswordSealedKeyLength {
+        /// Length of the rejected record.
+        actual: usize,
+        /// The exact required record length.
+        want: usize,
+    },
+    /// Password-sealed key record used an unsupported version.
+    UnsupportedPasswordSealedKeyVersion {
+        /// Version byte found in the record.
+        version: u8,
+    },
+    /// Password-sealed key record carries Argon2id parameters outside the
+    /// accepted floor/ceiling range (rejected before any KDF work).
+    PasswordSealedKeyParamsOutOfRange,
+    /// An Ed25519 public key was not exactly 32 bytes long.
+    InvalidEd25519PublicKeyLength {
+        /// Actual public key byte length.
+        actual: usize,
+    },
+    /// An Ed25519 signature was not exactly 64 bytes long.
+    InvalidEd25519SignatureLength {
+        /// Actual signature byte length.
+        actual: usize,
+    },
+    /// Ed25519 signature verification failed.
+    Ed25519SignatureVerificationFailed,
+    /// An ML-KEM-768 seed was not exactly 64 bytes long.
+    InvalidMlKem768SeedLength {
+        /// Actual seed byte length.
+        actual: usize,
+    },
+    /// An ML-KEM-768 encapsulation key was not exactly the expected length.
+    InvalidMlKem768EncapsulationKeyLength {
+        /// Actual encapsulation key byte length.
+        actual: usize,
+    },
+    /// An ML-KEM-768 encapsulation key had the expected length but failed
+    /// FIPS 203 structural validation on decode.
+    InvalidMlKem768EncapsulationKeyEncoding,
+    /// An ML-KEM-768 ciphertext was not exactly the expected length.
+    InvalidMlKem768CiphertextLength {
+        /// Actual ciphertext byte length.
+        actual: usize,
+    },
 }
 
 impl fmt::Display for Error {
@@ -374,6 +443,66 @@ impl fmt::Display for Error {
             Self::EncryptionFailed => write!(f, "paranoid: encryption failed"),
             Self::AllocationFailed => write!(f, "paranoid: output allocation failed"),
             Self::DecryptionFailed => write!(f, "paranoid: decryption failed"),
+            Self::UnsupportedObjectRecordVersion { version } => {
+                write!(f, "paranoid: unsupported object record version {version}")
+            }
+            Self::ObjectRecordTooShort { actual, min } => {
+                write!(f, "paranoid: object record length {actual}, min {min}")
+            }
+            Self::ObjectRecordTooLarge { actual, max } => {
+                write!(f, "paranoid: object record length {actual}, max {max}")
+            }
+            Self::InjectedRandomFillFailed => {
+                write!(f, "paranoid: caller-supplied random fill failed")
+            }
+            Self::InvalidPasswordSealedKeyLength { actual, want } => {
+                write!(
+                    f,
+                    "paranoid: password-sealed key record length {actual}, want {want}"
+                )
+            }
+            Self::UnsupportedPasswordSealedKeyVersion { version } => {
+                write!(
+                    f,
+                    "paranoid: unsupported password-sealed key record version {version}"
+                )
+            }
+            Self::PasswordSealedKeyParamsOutOfRange => {
+                write!(
+                    f,
+                    "paranoid: password-sealed key record parameters out of range"
+                )
+            }
+            Self::InvalidEd25519PublicKeyLength { actual } => {
+                write!(f, "paranoid: ed25519 public key length {actual}, want 32")
+            }
+            Self::InvalidEd25519SignatureLength { actual } => {
+                write!(f, "paranoid: ed25519 signature length {actual}, want 64")
+            }
+            Self::Ed25519SignatureVerificationFailed => {
+                write!(f, "paranoid: ed25519 signature verification failed")
+            }
+            Self::InvalidMlKem768SeedLength { actual } => {
+                write!(f, "paranoid: ml-kem-768 seed length {actual}, want 64")
+            }
+            Self::InvalidMlKem768EncapsulationKeyLength { actual } => {
+                write!(
+                    f,
+                    "paranoid: ml-kem-768 encapsulation key length {actual}, want {ML_KEM_768_ENCAPSULATION_KEY_SIZE}"
+                )
+            }
+            Self::InvalidMlKem768EncapsulationKeyEncoding => {
+                write!(
+                    f,
+                    "paranoid: ml-kem-768 encapsulation key failed structural validation"
+                )
+            }
+            Self::InvalidMlKem768CiphertextLength { actual } => {
+                write!(
+                    f,
+                    "paranoid: ml-kem-768 ciphertext length {actual}, want {ML_KEM_768_CIPHERTEXT_SIZE}"
+                )
+            }
         }
     }
 }
