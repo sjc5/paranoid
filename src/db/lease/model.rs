@@ -183,6 +183,7 @@ impl Claim {
 
 impl HolderSnapshot {
     /// Returns the coordination key.
+    #[cfg(test)]
     pub fn key(&self) -> &Key {
         &self.key
     }

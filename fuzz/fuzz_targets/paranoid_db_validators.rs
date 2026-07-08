@@ -12,6 +12,7 @@ fuzz_target!(|data: &[u8]| {
     };
 
     exercise_postgres_identifier_validators(text);
+    exercise_bootstrap_validators(text);
     exercise_kv_validators(text);
     exercise_fleet_key_validators(text);
     exercise_queue_validators(text);
@@ -38,6 +39,16 @@ fn exercise_postgres_identifier_validators(text: &str) {
     }
 }
 
+fn exercise_bootstrap_validators(text: &str) {
+    let config = db::BootstrapConfig::from_schema_name_text(text);
+
+    if let Ok(config) = config {
+        let _ = config.schema_name();
+        let _ = config.table_names();
+        let _ = config.stores_for_already_migrated_schema();
+    }
+}
+
 fn exercise_kv_validators(text: &str) {
     let parts = split_text_parts(text);
     let key = kv::Key::from_parts(parts.iter().copied());
@@ -45,10 +56,6 @@ fn exercise_kv_validators(text: &str) {
 
     if let (Ok(prefix), Some(first_part)) = (prefix, parts.first()) {
         let _ = kv::Key::from_prefix_and_parts(&prefix, [*first_part]);
-    }
-
-    if let Ok(table_name) = db::PgQualifiedTableName::unqualified(text) {
-        let _ = kv::StoreConfig::new(table_name);
     }
 
     if let Ok(key) = key {
@@ -70,20 +77,9 @@ fn exercise_fleet_key_validators(text: &str) {
 }
 
 fn exercise_queue_validators(text: &str) {
-    if let Ok(table_name) = db::PgQualifiedTableName::unqualified(text) {
-        let _ = queue::StoreConfig::new(table_name.clone(), table_name.clone(), table_name.clone());
-    }
-
-    if let Some((jobs, rest)) = text.split_once('.')
-        && let Some((dead_letter, pauses)) = rest.split_once('.')
-        && let (Ok(jobs), Ok(dead_letter), Ok(pauses)) = (
-            db::PgQualifiedTableName::unqualified(jobs),
-            db::PgQualifiedTableName::unqualified(dead_letter),
-            db::PgQualifiedTableName::unqualified(pauses),
-        )
-    {
-        let _ = queue::StoreConfig::new(jobs, dead_letter, pauses);
-    }
+    let _ = queue::WorkerOwnerId::from_manual_worker_lifecycle_owner_id_text(text.to_owned());
+    let _ = queue::WorkerOwnerId::new_unique_for_worker_name(text);
+    let _ = queue::JobTimeout::ExpiresAfter(Duration::from_nanos(first_u64(text.as_bytes())));
 }
 
 fn split_text_parts(text: &str) -> Vec<&str> {

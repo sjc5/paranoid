@@ -6,3 +6,5 @@ license.workspace = true
 publish = false
 
 [dependencies]
+paranoid = { path = "..", default-features = false, features = ["db-test-harness"] }
+tokio = { version = "1.52.3", features = ["rt-multi-thread", "time"] }

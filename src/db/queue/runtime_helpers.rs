@@ -282,7 +282,7 @@ pub(super) async fn count_worker_owned_running_jobs_with_database_operation_time
     let mut tx = begin_worker_database_operation(pool, operation, timeout).await?;
     let statement = format!(
         "SELECT COUNT(*) FROM {} WHERE worker_id = $1 AND status = $2",
-        queue.config().table_name.quoted()
+        queue.config_inner().table_name.quoted()
     );
     record_database_operation(
         tx.database_operation_observer(),

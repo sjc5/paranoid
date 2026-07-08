@@ -3,9 +3,10 @@ use super::sql_state::{
     SQLSTATE_NOT_NULL_VIOLATION, SQLSTATE_SERIALIZATION_FAILURE, SQLSTATE_UNIQUE_VIOLATION,
 };
 use super::*;
+use crate::id::SortableId as UniqueTestId;
 use proptest::prelude::*;
 use secrecy::SecretString;
-use sqlx::{ConnectOptions, Execute};
+use sqlx::{ConnectOptions, Execute, Postgres, Row};
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -153,7 +154,7 @@ fn pg_identifier_text_matches_public_contract(input: &str) -> bool {
 
 #[test]
 fn schema_ledger_migration_sql_uses_c_collation_and_no_session_level_postgres_features() {
-    let config = SchemaLedgerConfig::default();
+    let config = test_schema_ledger_config();
     let statement = build_migrate_schema_ledger_statement_for_test(&config);
     let statement_lowercase = statement.to_lowercase();
 
@@ -167,6 +168,95 @@ fn schema_ledger_migration_sql_uses_c_collation_and_no_session_level_postgres_fe
             "schema ledger SQL must not contain {forbidden:?}"
         );
     }
+}
+
+#[test]
+fn component_schema_public_constructors_reject_missing_physical_validation() {
+    let version = ComponentSchemaVersion {
+        component: "test_component",
+        instance_key: "state=\"app\".\"component_state\"",
+        version: 1,
+        fingerprint: "schema-v1",
+    };
+
+    let err = ComponentSchema::new(version, &[], &[], &[]).expect_err("missing validation");
+
+    assert!(
+        err.to_string().contains("validation checks"),
+        "error = {err:?}"
+    );
+}
+
+#[test]
+fn component_schema_statement_rejects_empty_null_and_multi_statement_sql() {
+    let empty = ComponentSchemaStatement::from_static_sql(" \n\t").expect_err("empty SQL");
+    assert!(
+        empty.to_string().contains("must not be empty"),
+        "error = {empty:?}"
+    );
+
+    let null_byte = ComponentSchemaStatement::from_audited_dynamic_sql(AuditedSql::new(
+        "SELECT '\0'".to_owned(),
+    ))
+    .expect_err("null byte SQL");
+    assert!(
+        null_byte.to_string().contains("null bytes"),
+        "error = {null_byte:?}"
+    );
+
+    let multi_statement =
+        ComponentSchemaStatement::from_static_sql("CREATE TABLE t (id integer); SELECT 1")
+            .expect_err("multi-statement SQL");
+    assert!(
+        multi_statement.to_string().contains("semicolons"),
+        "error = {multi_statement:?}"
+    );
+}
+
+#[test]
+fn component_schema_validation_check_rejects_empty_null_and_multi_statement_sql() {
+    let empty = ComponentSchemaValidationCheck::from_static_boolean_expression(" \n\t")
+        .expect_err("empty validation check");
+    assert!(
+        empty.to_string().contains("must not be empty"),
+        "error = {empty:?}"
+    );
+
+    let null_byte = ComponentSchemaValidationCheck::from_audited_dynamic_boolean_expression(
+        AuditedSql::new("true /* \0 */".to_owned()),
+    )
+    .expect_err("null byte validation check");
+    assert!(
+        null_byte.to_string().contains("null bytes"),
+        "error = {null_byte:?}"
+    );
+
+    let multi_statement = ComponentSchemaValidationCheck::from_audited_dynamic_boolean_expression(
+        AuditedSql::new("true; SELECT true".to_owned()),
+    )
+    .expect_err("multi-statement validation check");
+    assert!(
+        multi_statement.to_string().contains("semicolons"),
+        "error = {multi_statement:?}"
+    );
+}
+
+#[test]
+fn component_schema_instance_key_includes_validated_labels_and_qualified_tables() {
+    let state_label = PgIdentifier::new("state").expect("state label");
+    let audit_label = PgIdentifier::new("audit").expect("audit label");
+    let state_table = PgQualifiedTableName::with_schema("app_auth", "state").expect("state table");
+    let audit_table = PgQualifiedTableName::with_schema("app_audit", "state").expect("audit table");
+
+    let instance_key = component_schema_instance_key_for_tables([
+        (&state_label, &state_table),
+        (&audit_label, &audit_table),
+    ]);
+
+    assert_eq!(
+        instance_key,
+        "state=\"app_auth\".\"state\";audit=\"app_audit\".\"state\""
+    );
 }
 
 #[test]
@@ -274,1255 +364,34 @@ fn pooler_safe_connect_options_override_url_statement_cache_capacity() {
 }
 
 #[test]
-fn portable_query_constructors_disable_persistent_prepared_statements() {
-    let untyped_query = portable_query("SELECT 1");
-    let row_query = portable_query_as::<(i64,)>("SELECT 1");
-    let scalar_query = portable_query_scalar::<i64>("SELECT 1");
+fn portable_query_constructors_finish_as_unparameterized_simple_protocol_queries() {
+    let untyped_query = portable_query("SELECT 1")
+        .into_raw_sql()
+        .expect("portable_query into_raw_sql");
+    let audited_untyped_query = portable_query(AuditedSql::new("SELECT 1".to_owned()))
+        .into_raw_sql()
+        .expect("audited portable_query into_raw_sql");
+    let row_query = portable_query_as::<(i64,)>("SELECT 1")
+        .into_raw_sql()
+        .expect("portable_query_as into_raw_sql");
+    let scalar_query = portable_query_scalar::<i64>("SELECT 1")
+        .into_raw_sql()
+        .expect("portable_query_scalar into_raw_sql");
     let unparameterized_query = unparameterized_simple_query("SELECT 1");
 
-    assert!(!Execute::persistent(&untyped_query));
-    assert!(!Execute::persistent(&row_query));
-    assert!(!Execute::persistent(&scalar_query));
-    assert!(!<sqlx::RawSql as Execute<'_, sqlx::Postgres>>::persistent(
-        &unparameterized_query
-    ));
+    // Every `portable_query`/`portable_query_as`/`portable_query_scalar` constructor
+    // finishes as the same unparameterized `RawSql` that `unparameterized_simple_query`
+    // returns directly: a single simple-protocol `Query` with no bind parameters and no
+    // eligibility for a persistent server-side prepared statement, regardless of pooler
+    // mode.
+    assert!(!Execute::<'_, Postgres>::persistent(&untyped_query));
+    assert!(!Execute::<'_, Postgres>::persistent(&audited_untyped_query));
+    assert!(!Execute::<'_, Postgres>::persistent(&row_query));
+    assert!(!Execute::<'_, Postgres>::persistent(&scalar_query));
+    assert!(!Execute::<'_, Postgres>::persistent(&unparameterized_query));
 }
 
-#[test]
-fn production_db_code_uses_portable_query_constructors() {
-    let db_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/db");
-    let mut source_files = Vec::new();
-    collect_db_source_files(&db_root, &mut source_files);
-
-    let forbidden_needles = [
-        "sqlx::query(",
-        "sqlx::query_as",
-        "sqlx::query_scalar",
-        "sqlx::raw_sql",
-    ];
-    let mut violations = Vec::new();
-    for path in source_files {
-        if path_is_db_test_or_pooler_safe_query_helper(&path) {
-            continue;
-        }
-        let source = fs::read_to_string(&path)
-            .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
-        for needle in forbidden_needles {
-            if source.contains(needle) {
-                let relative = path
-                    .strip_prefix(env!("CARGO_MANIFEST_DIR"))
-                    .unwrap_or(&path);
-                violations.push(format!("{} contains {needle}", relative.display()));
-            }
-        }
-    }
-
-    violations.sort();
-    assert!(
-        violations.is_empty(),
-        "Paranoid-owned DB code must use db::portable_query/db::portable_query_as/db::portable_query_scalar/db::unparameterized_simple_query so SQLx persistent prepared statements stay disabled and unparameterized simple-protocol SQL stays explicit:\n{}",
-        violations.join("\n")
-    );
-}
-
-#[test]
-fn production_db_code_does_not_bypass_internal_pool_wrappers() {
-    let db_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/db");
-    let mut source_files = Vec::new();
-    collect_db_source_files(&db_root, &mut source_files);
-
-    let forbidden_needles = [".sqlx_pool()"];
-    let mut violations = Vec::new();
-    for path in source_files {
-        if path_is_db_test_or_public_pool_definition(&path) {
-            continue;
-        }
-        let source = fs::read_to_string(&path)
-            .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
-        for needle in forbidden_needles {
-            if source.contains(needle) {
-                let relative = path
-                    .strip_prefix(env!("CARGO_MANIFEST_DIR"))
-                    .unwrap_or(&path);
-                violations.push(format!("{} contains {needle}", relative.display()));
-            }
-        }
-    }
-
-    violations.sort();
-    assert!(
-        violations.is_empty(),
-        "Paranoid-owned DB code must not call the public raw SQLx pool accessor internally. Use Pool::begin_transaction plus the DB portable query constructors so transaction boundaries, operation observation, and internal portability stay centralized:\n{}",
-        violations.join("\n")
-    );
-}
-
-#[test]
-fn production_db_sql_does_not_use_session_level_postgres_features() {
-    let db_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/db");
-    let mut source_files = Vec::new();
-    collect_db_source_files(&db_root, &mut source_files);
-
-    let forbidden_needles = [
-        "pg_advisory",
-        "listen ",
-        "notify ",
-        "create temp",
-        "create temporary",
-        "set session",
-        "prepare ",
-        "deallocate ",
-    ];
-    let mut violations = Vec::new();
-    for path in source_files {
-        if path_is_db_test_or_pooler_safe_query_helper(&path) {
-            continue;
-        }
-        let source = fs::read_to_string(&path)
-            .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
-        let source_lowercase = source.to_lowercase();
-        for needle in forbidden_needles {
-            if source_contains_forbidden_sql_phrase(&source_lowercase, needle) {
-                let relative = path
-                    .strip_prefix(env!("CARGO_MANIFEST_DIR"))
-                    .unwrap_or(&path);
-                violations.push(format!("{} contains {needle:?}", relative.display()));
-            }
-        }
-    }
-
-    violations.sort();
-    assert!(
-        violations.is_empty(),
-        "Paranoid-owned DB SQL must avoid session-level Postgres features and connection-pooler-hostile prepared-statement commands:\n{}",
-        violations.join("\n")
-    );
-}
-
-#[test]
-fn production_db_set_config_calls_are_transaction_local() {
-    let db_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/db");
-    let mut source_files = Vec::new();
-    collect_db_source_files(&db_root, &mut source_files);
-
-    let allowed_transaction_local_statement_timeout = "set_config('statement_timeout', $1, true)";
-    let mut violations = Vec::new();
-    for path in source_files {
-        if path_is_db_test_or_pooler_safe_query_helper(&path) {
-            continue;
-        }
-        let source = fs::read_to_string(&path)
-            .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
-        for (line_index, line) in source.lines().enumerate() {
-            let line_lowercase = line.to_lowercase();
-            if line_lowercase.contains("set_config(")
-                && !line_lowercase.contains(allowed_transaction_local_statement_timeout)
-            {
-                let relative = path
-                    .strip_prefix(env!("CARGO_MANIFEST_DIR"))
-                    .unwrap_or(&path);
-                violations.push(format!(
-                    "{}:{} contains a non-approved set_config call",
-                    relative.display(),
-                    line_index + 1
-                ));
-            }
-        }
-    }
-
-    violations.sort();
-    assert!(
-        violations.is_empty(),
-        "Paranoid-owned DB SQL may only use set_config for transaction-local worker statement timeouts; session-scoped set_config would violate transaction-pooler safety:\n{}",
-        violations.join("\n")
-    );
-}
-
-#[test]
-fn production_db_sql_uses_statement_timestamp_for_database_owned_time() {
-    let db_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/db");
-    let mut source_files = Vec::new();
-    collect_db_source_files(&db_root, &mut source_files);
-
-    let forbidden_clock_functions = [
-        "current_timestamp",
-        "transaction_timestamp(",
-        "clock_timestamp(",
-        "now(",
-    ];
-    let mut violations = Vec::new();
-    for path in source_files {
-        if path_is_db_test_or_pooler_safe_query_helper(&path) {
-            continue;
-        }
-        let source = fs::read_to_string(&path)
-            .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
-        let source_lowercase = source.to_lowercase();
-        for needle in forbidden_clock_functions {
-            if source_contains_forbidden_database_clock_call(&source_lowercase, needle) {
-                let relative = path
-                    .strip_prefix(env!("CARGO_MANIFEST_DIR"))
-                    .unwrap_or(&path);
-                violations.push(format!("{} contains {needle:?}", relative.display()));
-            }
-        }
-    }
-
-    violations.sort();
-    assert!(
-        violations.is_empty(),
-        "Paranoid-owned DB SQL must use statement_timestamp() for database-owned lifecycle time instead of transaction, wall-clock, or application-side clock shortcuts:\n{}",
-        violations.join("\n")
-    );
-}
-
-#[test]
-fn in_current_transaction_function_names_require_transaction_parameter() {
-    let db_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/db");
-    let mut source_files = Vec::new();
-    collect_db_source_files(&db_root, &mut source_files);
-
-    let mut violations = Vec::new();
-    for path in source_files {
-        if path_is_db_test_or_pooler_safe_query_helper(&path) {
-            continue;
-        }
-        let source = fs::read_to_string(&path)
-            .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
-        for signature in rust_function_signatures(&source) {
-            if signature.contains("_in_current_transaction(")
-                && !signature_uses_neutral_or_write_tx(signature)
-            {
-                let relative = path
-                    .strip_prefix(env!("CARGO_MANIFEST_DIR"))
-                    .unwrap_or(&path);
-                violations.push(format!(
-                    "{} has transaction-named function without a transaction handle: {}",
-                    relative.display(),
-                    signature.replace('\n', " ")
-                ));
-            }
-        }
-    }
-
-    violations.sort();
-    assert!(
-        violations.is_empty(),
-        "Functions named *_in_current_transaction must encode caller-owned transaction usage in the Rust signature:\n{}",
-        violations.join("\n")
-    );
-}
-
-#[test]
-fn pool_owned_read_wrappers_use_rollback_only_transaction_finishers() {
-    let db_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/db");
-    let mut source_files = Vec::new();
-    collect_db_source_files(&db_root, &mut source_files);
-
-    let mut violations = Vec::new();
-    for path in source_files {
-        if path_is_db_test_or_pooler_safe_query_helper(&path) {
-            continue;
-        }
-        let source = fs::read_to_string(&path)
-            .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
-        for function in rust_function_blocks(&source) {
-            let Some(function_name) = rust_function_name(function.signature) else {
-                continue;
-            };
-            if !is_pool_owned_read_function_name(function_name)
-                || !function.signature.contains("pool: &Pool")
-                || !function.body.contains("pool.begin_transaction()")
-            {
-                continue;
-            }
-
-            let uses_read_finisher = function.body.contains("_read_transaction(")
-                || function
-                    .body
-                    .contains("finish_db_pool_validation_transaction(")
-                || function.body.contains(
-                    "finish_pool_owned_rollback_only_transaction_and_preserve_rollback_error(",
-                );
-            if !uses_read_finisher {
-                let relative = path
-                    .strip_prefix(env!("CARGO_MANIFEST_DIR"))
-                    .unwrap_or(&path);
-                violations.push(format!(
-                    "{} has pool-owned read wrapper using a non-read transaction finisher: {}",
-                    relative.display(),
-                    function.signature.replace('\n', " ")
-                ));
-            }
-        }
-    }
-
-    violations.sort();
-    assert!(
-        violations.is_empty(),
-        "Pool-owned read wrappers that open transactions must roll back on success so accidental writes cannot persist through read-shaped APIs:\n{}",
-        violations.join("\n")
-    );
-}
-
-#[test]
-fn pool_owned_schema_validation_wrappers_use_rollback_only_transaction_finishers() {
-    let violations = pool_owned_schema_wrapper_finisher_violations(
-        "validate_schema",
-        &[
-            "finish_db_pool_validation_transaction(",
-            "finish_queue_validation_transaction(",
-            "finish_pool_owned_rollback_only_transaction_and_preserve_rollback_error(",
-        ],
-        "validation",
-    );
-    assert!(
-        violations.is_empty(),
-        "Pool-owned schema validation wrappers must roll back on success so validation probes cannot persist state:\n{}",
-        violations.join("\n")
-    );
-}
-
-#[test]
-fn pool_owned_schema_migration_wrappers_use_write_transaction_finishers() {
-    let violations = pool_owned_schema_wrapper_finisher_violations(
-        "migrate_schema",
-        &[
-            "finish_db_pool_transaction(",
-            "finish_queue_pool_transaction(",
-            "finish_pool_owned_write_transaction_and_preserve_rollback_error(",
-        ],
-        "write",
-    );
-    assert!(
-        violations.is_empty(),
-        "Pool-owned schema migration wrappers must commit on success and preserve rollback errors on failure through write finishers:\n{}",
-        violations.join("\n")
-    );
-}
-
-fn pool_owned_schema_wrapper_finisher_violations(
-    function_name: &str,
-    accepted_finishers: &[&str],
-    finisher_label: &str,
-) -> Vec<String> {
-    let db_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/db");
-    let mut source_files = Vec::new();
-    collect_db_source_files(&db_root, &mut source_files);
-
-    let mut violations = Vec::new();
-    for path in source_files {
-        if path_is_db_test_or_pooler_safe_query_helper(&path) {
-            continue;
-        }
-        let source = fs::read_to_string(&path)
-            .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
-        for function in rust_function_blocks(&source) {
-            if rust_function_name(function.signature) != Some(function_name)
-                || !function_signature_has_pool_parameter(function.signature)
-                || !function.body.contains("pool.begin_transaction()")
-            {
-                continue;
-            }
-
-            if !accepted_finishers
-                .iter()
-                .any(|finisher| function.body.contains(finisher))
-            {
-                let relative = path
-                    .strip_prefix(env!("CARGO_MANIFEST_DIR"))
-                    .unwrap_or(&path);
-                violations.push(format!(
-                    "{} has pool-owned {function_name} wrapper using a non-{finisher_label} transaction finisher: {}",
-                    relative.display(),
-                    function.signature.replace('\n', " ")
-                ));
-            }
-        }
-    }
-
-    violations.sort();
-    violations
-}
-
-#[test]
-fn schema_migrations_record_versions_only_after_physical_validation() {
-    let kv_schema_source = read_crate_source_file("src/db/kv/schema.rs");
-    let kv_body =
-        rust_function_body_by_name(&kv_schema_source, "migrate_schema_in_current_transaction");
-    assert_source_order(
-        kv_body,
-        "validate_physical_schema_in_current_transaction(tx, config).await?",
-        "record_kv_schema_version_in_current_transaction(tx, config).await?",
-        "KV migration must physically validate the migrated schema before recording its schema version",
-    );
-    assert_source_order(
-        kv_body,
-        "record_kv_schema_version_in_current_transaction(tx, config).await?",
-        "validate_schema_in_current_transaction(tx, config).await",
-        "KV migration must revalidate the recorded schema version before commit",
-    );
-
-    let queue_schema_source = read_crate_source_file("src/db/queue/schema.rs");
-    let queue_body = rust_function_body_by_name(
-        &queue_schema_source,
-        "migrate_schema_in_current_transaction",
-    );
-    assert_source_order(
-        queue_body,
-        "validate_physical_schema_in_current_transaction(tx, queue.config()).await?",
-        "record_queue_schema_version_in_current_transaction(tx, queue.config()).await?",
-        "Queue migration must physically validate the migrated schema before recording its schema version",
-    );
-    assert_source_order(
-        queue_body,
-        "record_queue_schema_version_in_current_transaction(tx, queue.config()).await?",
-        "validate_queue_schema_version_in_current_transaction(tx, queue.config()).await?",
-        "Queue migration must revalidate the recorded schema version before commit",
-    );
-
-    let fleet_store_source = read_crate_source_file("src/db/fleet/store.rs");
-    let fleet_body = rust_function_body_by_name_containing(
-        &fleet_store_source,
-        "migrate_schema_in_current_transaction",
-        "record_fleet_schema_version_in_current_transaction",
-    );
-    assert_source_order(
-        fleet_body,
-        "migrate_kv_schema_in_current_transaction(tx, &config.kv_store_config()).await?",
-        "record_fleet_schema_version_in_current_transaction(tx, config).await?",
-        "Fleet migration must finish migrating and validating its KV backing store before recording Fleet's schema version",
-    );
-    assert_source_order(
-        fleet_body,
-        "migrate_lease_schema_in_current_transaction(tx, &config.lease_store_config()).await?",
-        "record_fleet_schema_version_in_current_transaction(tx, config).await?",
-        "Fleet migration must finish migrating and validating its lease backing store before recording Fleet's schema version",
-    );
-    assert_source_order(
-        fleet_body,
-        "record_fleet_schema_version_in_current_transaction(tx, config).await?",
-        "validate_schema_in_current_transaction(tx, config).await",
-        "Fleet migration must revalidate the recorded schema version before commit",
-    );
-}
-
-#[test]
-fn direct_transaction_finish_calls_are_centralized() {
-    let db_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/db");
-    let mut source_files = Vec::new();
-    collect_db_source_files(&db_root, &mut source_files);
-
-    let mut violations = Vec::new();
-    for path in source_files {
-        if path_is_db_test_or_pooler_safe_query_helper(&path)
-            || path_allows_direct_transaction_finish_calls(&path)
-        {
-            continue;
-        }
-        let source = fs::read_to_string(&path)
-            .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
-        for (line_index, line) in source.lines().enumerate() {
-            if line.contains(".commit().await") || line.contains(".rollback().await") {
-                let relative = path
-                    .strip_prefix(env!("CARGO_MANIFEST_DIR"))
-                    .unwrap_or(&path);
-                violations.push(format!(
-                    "{}:{} directly finishes a transaction",
-                    relative.display(),
-                    line_index + 1
-                ));
-            }
-        }
-    }
-
-    violations.sort();
-    assert!(
-        violations.is_empty(),
-        "Direct transaction commit/rollback calls in production DB code must stay centralized in Tx itself, shared transaction finishers, or the explicitly audited Fleet Once atomic runner:\n{}",
-        violations.join("\n")
-    );
-}
-
-#[test]
-fn pool_owned_transaction_begins_use_centralized_finishers() {
-    let db_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/db");
-    let mut source_files = Vec::new();
-    collect_db_source_files(&db_root, &mut source_files);
-
-    let mut violations = Vec::new();
-    for path in source_files {
-        if path_is_db_test_or_pooler_safe_query_helper(&path)
-            || path_allows_direct_transaction_finish_calls(&path)
-        {
-            continue;
-        }
-        let source = fs::read_to_string(&path)
-            .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
-        for function in rust_function_blocks(&source) {
-            if !function_opens_pool_owned_transaction(function) {
-                continue;
-            }
-            let Some(function_name) = rust_function_name(function.signature) else {
-                continue;
-            };
-            if function_name == "begin_worker_database_operation" {
-                continue;
-            }
-            if !function_uses_centralized_transaction_finisher(function) {
-                let relative = path
-                    .strip_prefix(env!("CARGO_MANIFEST_DIR"))
-                    .unwrap_or(&path);
-                violations.push(format!(
-                    "{} starts a pool-owned transaction without a centralized finisher: {}",
-                    relative.display(),
-                    function.signature.replace('\n', " ")
-                ));
-            }
-        }
-    }
-
-    violations.sort();
-    assert!(
-        violations.is_empty(),
-        "Pool-owned transaction wrappers must use centralized transaction finishers so commit/rollback behavior and rollback-error preservation stay uniform:\n{}",
-        violations.join("\n")
-    );
-}
-
-#[test]
-fn fleet_async_drop_cleanup_uses_captured_runtime_handles() {
-    for (relative_path, guard_type) in [
-        ("src/db/fleet/mutex_guard.rs", "MutexGuard"),
-        ("src/db/fleet/semaphore.rs", "SemaphoreClaimGuard"),
-        ("src/db/fleet/throttler_guard.rs", "ThrottlerPermitGuard"),
-    ] {
-        let source = read_crate_source_file(relative_path);
-        let drop_body = rust_drop_impl_body(&source, guard_type);
-        assert!(
-            drop_body.contains("self.runtime_handle.spawn("),
-            "{relative_path} Drop for {guard_type} must schedule cleanup through the guard's captured runtime handle"
-        );
-    }
-}
-
-#[test]
-fn fleet_live_cleanup_guard_types_are_must_use() {
-    for (relative_path, guard_type) in [
-        ("src/db/fleet/mutex_model.rs", "MutexGuard"),
-        ("src/db/fleet/semaphore_model.rs", "SemaphoreClaimGuard"),
-        ("src/db/fleet/throttler_model.rs", "ThrottlerPermitGuard"),
-        ("src/db/fleet/throttler_model.rs", "RateLimiterPermitGuard"),
-        (
-            "src/db/fleet/throttler_model.rs",
-            "CircuitBreakerPermitGuard",
-        ),
-    ] {
-        let source = read_crate_source_file(relative_path);
-        assert!(
-            rust_struct_declaration_has_attribute(&source, guard_type, "#[must_use"),
-            "{relative_path} {guard_type} owns live cleanup state and must stay #[must_use]"
-        );
-    }
-}
-
-#[test]
-fn queue_worker_cleanup_ordering_preserves_async_boundaries() {
-    let source = read_crate_source_file("src/db/queue/worker_job.rs");
-    let process_body = rust_function_body_by_name(&source, "process_claimed_queue_job");
-    assert_source_order(
-        process_body,
-        "stop_worker_heartbeat_loop(heartbeat_handle).await",
-        "let finalization_result =",
-        "queue worker heartbeat must be stopped before terminal job finalization",
-    );
-
-    let cleanup_body =
-        rust_function_body_by_name(&source, "return_claimed_jobs_after_worker_task_failure");
-    assert_source_order(
-        cleanup_body,
-        "return_available_owned_unstarted_running_jobs_to_pending_with_database_operation_timeout",
-        "return_available_owned_started_running_jobs_to_pending_with_database_operation_timeout",
-        "worker cleanup must return unstarted claims before started claims",
-    );
-    assert_source_order(
-        cleanup_body,
-        "return_available_owned_started_running_jobs_to_pending_with_database_operation_timeout",
-        "count_worker_owned_running_jobs_with_database_operation_timeout",
-        "queue worker cleanup must return unstarted claims, then started claims, then count remaining ownership",
-    );
-}
-
-#[test]
-fn queue_reclaim_maintenance_stays_atomic_and_ordered() {
-    let api_source = read_crate_source_file("src/db/queue/api/listing_and_maintenance.rs");
-    let pool_wrapper_body =
-        rust_function_body_by_name(&api_source, "reclaim_available_stale_running_jobs_once");
-    assert_source_order(
-        pool_wrapper_body,
-        "pool.begin_transaction()",
-        "reclaim_available_stale_running_jobs_once_in_current_transaction(",
-        "queue reclaim pool wrapper must start a transaction before running reclaim stages",
-    );
-    assert_source_order(
-        pool_wrapper_body,
-        "reclaim_available_stale_running_jobs_once_in_current_transaction(",
-        "finish_queue_pool_transaction(\"reclaim stale running jobs once\"",
-        "queue reclaim pool wrapper must finish the transaction through the centralized finisher",
-    );
-
-    let maintenance_source = read_crate_source_file("src/db/queue/operations/maintenance.rs");
-    let reclaim_body = rust_function_body_by_name(
-        &maintenance_source,
-        "reclaim_available_stale_running_jobs_once_in_current_transaction",
-    );
-    assert_source_order(
-        reclaim_body,
-        "let never_started_jobs_returned_to_pending = reclaim_never_started_running_jobs(",
-        "let expired_jobs_moved_to_failed = reclaim_expired_running_jobs_to_failed(",
-        "stale reclaim must return never-started claims before handling expired executions",
-    );
-    assert_source_order(
-        reclaim_body,
-        "let expired_jobs_moved_to_failed = reclaim_expired_running_jobs_to_failed(",
-        "move_failed_jobs_to_dead_letter_batch(",
-        "stale reclaim must dead-letter only jobs already moved to failed in the same transaction",
-    );
-    assert_source_order(
-        reclaim_body,
-        "move_failed_jobs_to_dead_letter_batch(",
-        "let expired_jobs_returned_to_pending_for_retry =",
-        "stale reclaim must finish max-retry dead lettering before retryable jobs return to pending",
-    );
-    assert!(
-        reclaim_body.contains(".map(|job| job.id)"),
-        "stale reclaim dead-letter stage must derive its batch from the failed jobs returned by the previous stage"
-    );
-}
-
-#[test]
-fn queue_cleanup_until_empty_commits_each_batch_before_delay() {
-    let source = read_crate_source_file("src/db/queue/operations/maintenance.rs");
-    let body = rust_function_body_by_name(&source, "cleanup_target_older_than_until_empty");
-    assert_source_order(
-        body,
-        "RuntimeCancellationSignal::is_cancellation_requested",
-        "pool.begin_transaction()",
-        "queue cleanup-until-empty must observe cancellation before opening the next batch transaction",
-    );
-    assert_source_order(
-        body,
-        "pool.begin_transaction()",
-        "finish_queue_pool_transaction(",
-        "queue cleanup-until-empty must finish each batch transaction after opening it",
-    );
-    assert_source_order(
-        body,
-        "finish_queue_pool_transaction(",
-        "checked_add_cleanup_total(",
-        "queue cleanup-until-empty must count only committed batch results",
-    );
-    assert_source_order(
-        body,
-        "if deleted < u64::from(batch_size)",
-        "sleep_before_next_cleanup_batch_or_cancellation(",
-        "queue cleanup-until-empty must decide whether more work remains before the cancellable delay",
-    );
-    assert_source_order(
-        body,
-        "finish_queue_pool_transaction(",
-        "sleep_before_next_cleanup_batch_or_cancellation(",
-        "queue cleanup-until-empty must not sleep between batches until the current batch transaction is closed",
-    );
-}
-
-#[test]
-fn queue_fleet_maintenance_supervisor_cancels_and_awaits_all_components() {
-    let source = read_crate_source_file("src/db/queue/worker_maintenance.rs");
-    let run_body =
-        rust_function_body_by_name(&source, "run_queue_worker_loop_with_fleet_maintenance");
-    for required in [
-        "worker_join_result = &mut worker_join_handle",
-        "reclaim_join_result = &mut reclaim_join_handle",
-        "cleanup_join_result = &mut cleanup_join_handle",
-    ] {
-        assert!(
-            run_body.contains(required),
-            "queue Fleet maintenance supervisor must select on {required}"
-        );
-    }
-
-    let worker_stopped_body =
-        rust_function_body_by_name(&source, "finish_queue_worker_after_worker_stopped");
-    assert_source_order(
-        worker_stopped_body,
-        "runtime.worker_shutdown_signal.request_cancellation();",
-        "reclaim_join_handle.await",
-        "queue maintenance supervisor must request cancellation before awaiting reclaim cron",
-    );
-    assert_source_order(
-        worker_stopped_body,
-        "runtime.worker_shutdown_signal.request_cancellation();",
-        "cleanup_join_handle.await",
-        "queue maintenance supervisor must request cancellation before awaiting cleanup cron",
-    );
-
-    let maintenance_stopped_body = rust_function_body_by_name(
-        &source,
-        "finish_queue_worker_after_maintenance_cron_stopped",
-    );
-    assert_source_order(
-        maintenance_stopped_body,
-        "runtime.worker_shutdown_signal.request_cancellation();",
-        "worker_join_handle.await",
-        "queue maintenance supervisor must request cancellation before awaiting worker loop",
-    );
-    assert_source_order(
-        maintenance_stopped_body,
-        "runtime.worker_shutdown_signal.request_cancellation();",
-        "other_cron_join_handle.await",
-        "queue maintenance supervisor must request cancellation before awaiting the other cron",
-    );
-}
-
-#[test]
-fn fleet_cron_tenure_checks_stop_and_leadership_between_task_runs() {
-    let source = read_crate_source_file("src/db/fleet/cron.rs");
-    let body = rust_function_body_by_name(
-        &source,
-        "run_single_leadership_tenure_until_stopped_with_task_error_policy",
-    );
-    assert_source_order(
-        body,
-        "self.execute_task_while_guarded(&guard, &mut *task).await",
-        "let sleep = tokio::time::sleep(self.interval);",
-        "Fleet cron must run the guarded task before entering the between-run wait",
-    );
-    assert_source_order(
-        body,
-        "() = stop.as_mut() =>",
-        "guard.release().await.map_err(|source| CronRunError::Release { source })?",
-        "Fleet cron must release leadership when stop wins the between-run wait",
-    );
-    assert!(
-        body.contains("() = guard.wait_until_leadership_lost() =>"),
-        "Fleet cron between-run wait must observe leadership loss"
-    );
-    assert!(
-        body.contains("release_cron_guard_after_leadership_lost(guard.release().await)"),
-        "Fleet cron leadership-loss paths must release guard ownership"
-    );
-}
-
-#[test]
-fn db_retry_loops_are_limited_to_acquisition_database_or_explicit_runtime_semantics() {
-    let kv_store_source = read_crate_source_file("src/db/kv/store.rs");
-    assert_source_contains_all(
-        rust_function_body_by_name(
-            &kv_store_source,
-            "delete_expired_keys_until_empty_with_delay_between_batches",
-        ),
-        &[
-            "loop {",
-            "self.delete_expired_keys_once(pool, batch_size).await?",
-            "deleted < u64::from(batch_size)",
-        ],
-        "KV expired cleanup retry loop must stay a database-only batch drain",
-    );
-
-    let kv_item_source = read_crate_source_file("src/db/kv/item_lifecycle.rs");
-    assert_source_contains_all(
-        rust_function_body_by_name(
-            &kv_item_source,
-            "delete_entire_namespace_in_current_transaction",
-        ),
-        &[
-            "loop {",
-            ".delete_namespace_keys_with_prefix_once_in_current_transaction(",
-            "deleted < u64::from(MAX_KV_DELETE_BATCH_SIZE)",
-        ],
-        "KV namespace cleanup retry loop must stay a database-only batch drain",
-    );
-
-    let fleet_mutex_source = read_crate_source_file("src/db/fleet/mutex.rs");
-    assert_source_contains_all(
-        rust_function_body_by_name(&fleet_mutex_source, "claim_guard_for_holder_when_available"),
-        &[
-            "loop {",
-            ".try_claim_manual_renewal_for_holder(pool, holder_id)",
-            "tokio::time::sleep(fleet_mutex_acquire_retry_delay_with_jitter(",
-        ],
-        "Fleet mutex blocking acquire retry loop must stay pre-task acquisition",
-    );
-
-    let fleet_semaphore_source = read_crate_source_file("src/db/fleet/semaphore.rs");
-    assert_source_contains_all(
-        rust_function_body_by_name(&fleet_semaphore_source, "run_task_when_available"),
-        &[
-            "let mut pending_task = Some(task);",
-            "loop {",
-            "if let Some(guard) = self.try_acquire_guard(pool).await?",
-            "let task = pending_task",
-            "return Ok(guard.run_task(task).await);",
-        ],
-        "Fleet semaphore blocking task helper must keep caller task pending until acquisition succeeds",
-    );
-
-    let fleet_throttler_source = read_crate_source_file("src/db/fleet/throttler_acquire.rs");
-    assert_source_contains_all(
-        rust_function_body_by_name(
-            &fleet_throttler_source,
-            "acquire_with_optional_holder_when_ready",
-        ),
-        &[
-            "loop {",
-            ".try_acquire_with_optional_holder(pool, holder_id)",
-            "ThrottlerManualPermitAcquireResult::Acquired(permit) => return Ok(permit)",
-            "tokio::time::sleep(",
-        ],
-        "Fleet throttler blocking acquire retry loop must stay pre-task acquisition",
-    );
-
-    let fleet_cache_source = read_crate_source_file("src/db/fleet/cache.rs");
-    assert_source_contains_all(
-        rust_function_body_by_name(&fleet_cache_source, "acquire_compute_mutex_guard"),
-        &[
-            "loop {",
-            "if let Some(guard) = mutex.try_claim_guard(pool, guard_config).await?",
-            "CoalescingCacheLockWaitTimedOut",
-        ],
-        "Fleet cache lock retry loop must stay pre-compute acquisition",
-    );
-    assert_source_order(
-        rust_function_body_by_name(&fleet_cache_source, "fetch_or_compute"),
-        "let guard = self.acquire_compute_mutex_guard(pool, &mutex).await?;",
-        ".fetch_or_compute_while_holding_mutex(pool, &key_parts, &guard, compute_value)",
-        "Fleet cache compute callback must run only after the compute mutex is acquired",
-    );
-
-    let fleet_topic_source = read_crate_source_file("src/db/fleet/topic.rs");
-    let subscription_loop_body = rust_function_body_by_name(
-        &fleet_topic_source,
-        "run_polling_until_stopped_or_handler_error_with_poll_error_policy_and_success_hook",
-    );
-    assert_source_contains_all(
-        subscription_loop_body,
-        &[
-            "subscription_poll_error_retry_delay_from_policy(error, &mut on_poll_error)",
-            "if let Err(source) = handle_events(events).await",
-            "if let Err(source) = self.advance_cursor_if_needed(pool, new_cursor).await",
-        ],
-        "Fleet subscription retry policy must stay scoped to database polling errors",
-    );
-    assert_source_order(
-        subscription_loop_body,
-        "if let Err(source) = handle_events(events).await",
-        "if let Err(source) = self.advance_cursor_if_needed(pool, new_cursor).await",
-        "Fleet subscription must advance the cursor only after handler success",
-    );
-
-    let queue_enqueue_source = read_crate_source_file("src/db/queue/operations/enqueue.rs");
-    let dedupe_enqueue_body = rust_function_body_by_name(
-        &queue_enqueue_source,
-        "execute_dedupe_enqueue_in_current_transaction",
-    );
-    assert_source_contains_all(
-        dedupe_enqueue_body,
-        &[
-            "for attempt_index in 0..MAX_QUEUE_DEDUPE_INSERT_ATTEMPTS",
-            "DedupeEnqueueAttemptOutcome::RetryAfterInvisibleConflict",
-            "prepared.job_id = JobId::new()?",
-        ],
-        "Queue dedupe enqueue retry loop must stay a database-only invisible-conflict retry",
-    );
-    assert_source_contains_none(
-        dedupe_enqueue_body,
-        &["handler", "TaskHandler", "run_queue_task_handler"],
-        "Queue dedupe enqueue retry loop must not execute caller handlers",
-    );
-
-    let queue_operator_source = read_crate_source_file("src/db/queue/api/operator_transitions.rs");
-    let retry_failed_body = rust_function_body_by_name(
-        &queue_operator_source,
-        "retry_available_failed_jobs_in_current_transaction",
-    );
-    assert_source_contains_all(
-        retry_failed_body,
-        &[
-            "for attempt_index in 0..5",
-            "SAVEPOINT __paranoid_queue_retry_available_failed_jobs",
-            "sqlx_error_is_active_dedupe_unique_violation",
-            "ROLLBACK TO SAVEPOINT __paranoid_queue_retry_available_failed_jobs",
-        ],
-        "Queue retry-available-failed-jobs retry loop must stay a savepoint-scoped database retry",
-    );
-    assert_source_contains_none(
-        retry_failed_body,
-        &["handler", "TaskHandler", "run_queue_task_handler"],
-        "Queue retry-available-failed-jobs retry loop must not execute caller handlers",
-    );
-
-    let queue_runtime_source = read_crate_source_file("src/db/queue/runtime_helpers.rs");
-    let worker_database_retry_body = rust_function_body_by_name(
-        &queue_runtime_source,
-        "retry_worker_database_operation_while_job_locked",
-    );
-    assert!(
-        queue_runtime_source.contains("F: FnMut(Duration) -> Fut"),
-        "Queue worker lock retry helper must stay parameterized over database-operation closures"
-    );
-    assert_source_contains_all(
-        worker_database_retry_body,
-        &[
-            "Err(Error::JobLockedByConcurrentTransaction)",
-            "remaining_worker_database_operation_timeout",
-        ],
-        "Queue worker lock retry helper must stay a database-operation retry with a shrinking timeout budget",
-    );
-    assert_source_contains_none(
-        worker_database_retry_body,
-        &["TaskHandler", "run_queue_task_handler", "handler("],
-        "Queue worker lock retry helper must not execute caller handlers",
-    );
-
-    let queue_worker_source = read_crate_source_file("src/db/queue/worker_job.rs");
-    assert!(
-        !rust_function_body_by_name(&queue_worker_source, "run_queue_task_handler")
-            .contains("retry_worker_database_operation_while_job_locked("),
-        "Queue task handler execution must not be wrapped by the worker database retry helper"
-    );
-    assert_source_contains_none(
-        rust_function_body_by_name(
-            &queue_worker_source,
-            "return_claimed_jobs_after_worker_task_failure",
-        ),
-        &["TaskHandler", "run_queue_task_handler", "handler("],
-        "Queue claimed-job cleanup loop must not execute caller handlers",
-    );
-
-    let queue_maintenance_source = read_crate_source_file("src/db/queue/operations/maintenance.rs");
-    assert_source_contains_all(
-        rust_function_body_by_name(
-            &queue_maintenance_source,
-            "cleanup_target_older_than_until_empty",
-        ),
-        &[
-            "loop {",
-            "finish_queue_pool_transaction(operation, tx, deleted).await?",
-            "deleted < u64::from(batch_size)",
-            "cancellation_signal",
-        ],
-        "Queue cleanup-until-empty loop must stay a committed batch-maintenance loop",
-    );
-}
-
-fn function_opens_pool_owned_transaction(function: RustFunctionBlock<'_>) -> bool {
-    function_signature_has_pool_parameter(function.signature)
-        && function.body.contains(".begin_transaction()")
-}
-
-fn function_uses_centralized_transaction_finisher(function: RustFunctionBlock<'_>) -> bool {
-    [
-        "finish_db_pool_transaction(",
-        "finish_db_pool_validation_transaction(",
-        "finish_fleet_pool_transaction(",
-        "finish_kv_callback_pool_transaction(",
-        "finish_kv_pool_transaction(",
-        "finish_kv_read_transaction(",
-        "finish_lease_pool_transaction(",
-        "finish_lease_read_transaction(",
-        "finish_queue_pool_transaction(",
-        "finish_queue_read_transaction(",
-        "finish_queue_validation_transaction(",
-        "finish_pool_owned_write_rollback_only_transaction_and_preserve_rollback_error(",
-        "finish_worker_database_operation(",
-    ]
-    .iter()
-    .any(|finisher| function.body.contains(finisher))
-}
-
-fn function_signature_has_pool_parameter(signature: &str) -> bool {
-    signature.contains("pool: &Pool") || signature.contains("pool: &WritePool")
-}
-
-fn rust_function_signatures(source: &str) -> Vec<&str> {
-    let mut signatures = Vec::new();
-    let mut search_start = 0;
-    while let Some(offset) = source[search_start..].find("fn ") {
-        let fn_start = search_start + offset;
-        let Some(open_brace_offset) = source[fn_start..].find('{') else {
-            break;
-        };
-        let signature_end = fn_start + open_brace_offset;
-        signatures.push(&source[fn_start..signature_end]);
-        search_start = signature_end + 1;
-    }
-    signatures
-}
-
-fn read_crate_source_file(relative_path: &str) -> String {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(relative_path);
-    fs::read_to_string(&path)
-        .unwrap_or_else(|error| panic!("failed to read {relative_path}: {error}"))
-}
-
-#[derive(Clone, Copy)]
-struct RustFunctionBlock<'a> {
-    signature: &'a str,
-    body: &'a str,
-}
-
-fn rust_function_blocks(source: &str) -> Vec<RustFunctionBlock<'_>> {
-    let mut functions = Vec::new();
-    let mut search_start = 0;
-    while let Some(offset) = source[search_start..].find("fn ") {
-        let fn_start = search_start + offset;
-        let Some(open_brace_offset) = source[fn_start..].find('{') else {
-            break;
-        };
-        let open_brace = fn_start + open_brace_offset;
-        let Some(close_brace) = find_matching_brace(source, open_brace) else {
-            break;
-        };
-        functions.push(RustFunctionBlock {
-            signature: &source[fn_start..open_brace],
-            body: &source[open_brace + 1..close_brace],
-        });
-        search_start = close_brace + 1;
-    }
-    functions
-}
-
-fn rust_function_body_by_name<'a>(source: &'a str, function_name: &str) -> &'a str {
-    rust_function_blocks(source)
-        .into_iter()
-        .find(|function| rust_function_name(function.signature) == Some(function_name))
-        .unwrap_or_else(|| panic!("missing function {function_name}"))
-        .body
-}
-
-fn rust_function_body_by_name_containing<'a>(
-    source: &'a str,
-    function_name: &str,
-    required_body_needle: &str,
-) -> &'a str {
-    rust_function_blocks(source)
-        .into_iter()
-        .find(|function| {
-            rust_function_name(function.signature) == Some(function_name)
-                && function.body.contains(required_body_needle)
-        })
-        .unwrap_or_else(|| {
-            panic!("missing function {function_name} containing {required_body_needle:?}")
-        })
-        .body
-}
-
-fn rust_drop_impl_body<'a>(source: &'a str, type_name: &str) -> &'a str {
-    let needle = format!("impl Drop for {type_name}");
-    let impl_start = source
-        .find(&needle)
-        .unwrap_or_else(|| panic!("missing {needle}"));
-    let open_brace = impl_start
-        + source[impl_start..]
-            .find('{')
-            .unwrap_or_else(|| panic!("missing opening brace for {needle}"));
-    let close_brace = find_matching_brace(source, open_brace)
-        .unwrap_or_else(|| panic!("missing closing brace for {needle}"));
-    &source[open_brace + 1..close_brace]
-}
-
-fn rust_struct_declaration_has_attribute(
-    source: &str,
-    type_name: &str,
-    attribute_prefix: &str,
-) -> bool {
-    let struct_needle = format!("pub struct {type_name}");
-    let struct_start = find_source_needle_with_identifier_boundary(source, &struct_needle)
-        .unwrap_or_else(|| panic!("missing {struct_needle}"));
-    let preceding = &source[..struct_start];
-    preceding
-        .lines()
-        .rev()
-        .take_while(|line| {
-            let trimmed = line.trim();
-            trimmed.is_empty()
-                || trimmed.starts_with("#[")
-                || trimmed.starts_with("///")
-                || trimmed.starts_with("#[derive")
-        })
-        .any(|line| line.trim_start().starts_with(attribute_prefix))
-}
-
-fn assert_source_order(source: &str, first: &str, second: &str, message: &str) {
-    let first_position = source
-        .find(first)
-        .unwrap_or_else(|| panic!("missing source needle {first:?}"));
-    let second_position = source
-        .find(second)
-        .unwrap_or_else(|| panic!("missing source needle {second:?}"));
-    assert!(first_position < second_position, "{message}");
-}
-
-fn assert_source_contains_all(source: &str, needles: &[&str], message: &str) {
-    for needle in needles {
-        assert!(
-            source.contains(needle),
-            "{message}: missing source needle {needle:?}"
-        );
-    }
-}
-
-fn assert_source_contains_none(source: &str, needles: &[&str], message: &str) {
-    for needle in needles {
-        assert!(
-            !source.contains(needle),
-            "{message}: unexpected source needle {needle:?}"
-        );
-    }
-}
-
-fn find_source_needle_with_identifier_boundary(source: &str, needle: &str) -> Option<usize> {
-    let mut search_start = 0;
-    while let Some(offset) = source[search_start..].find(needle) {
-        let absolute_start = search_start + offset;
-        let after_needle = absolute_start + needle.len();
-        let followed_by_identifier_char = source[after_needle..]
-            .chars()
-            .next()
-            .is_some_and(|ch| ch == '_' || ch.is_ascii_alphanumeric());
-        if !followed_by_identifier_char {
-            return Some(absolute_start);
-        }
-        search_start = after_needle;
-    }
-    None
-}
-
-fn find_matching_brace(source: &str, open_brace: usize) -> Option<usize> {
-    let mut depth = 0usize;
-    for (offset, byte) in source.as_bytes()[open_brace..].iter().enumerate() {
-        match byte {
-            b'{' => depth += 1,
-            b'}' => {
-                depth = depth.checked_sub(1)?;
-                if depth == 0 {
-                    return Some(open_brace + offset);
-                }
-            }
-            _ => {}
-        }
-    }
-    None
-}
-
-fn rust_function_name(signature: &str) -> Option<&str> {
-    let after_fn = signature.split_once("fn ")?.1;
-    let name_end = after_fn
-        .find(|ch: char| !(ch == '_' || ch.is_ascii_alphanumeric()))
-        .unwrap_or(after_fn.len());
-    Some(&after_fn[..name_end])
-}
-
-fn is_pool_owned_read_function_name(function_name: &str) -> bool {
-    if function_name.contains("_or_init") {
-        return false;
-    }
-    ["fetch_", "get_", "check_", "count_", "list_", "scan_"]
-        .iter()
-        .any(|prefix| function_name.starts_with(prefix))
-}
-
-fn source_contains_forbidden_sql_phrase(source_lowercase: &str, needle: &str) -> bool {
-    let mut search_start = 0;
-    while let Some(offset) = source_lowercase[search_start..].find(needle) {
-        let absolute_start = search_start + offset;
-        let preceded_by_identifier_char = source_lowercase[..absolute_start]
-            .chars()
-            .next_back()
-            .is_some_and(|ch| ch == '_' || ch.is_ascii_alphanumeric());
-        if !preceded_by_identifier_char {
-            return true;
-        }
-        search_start = absolute_start + needle.len();
-    }
-    false
-}
-
-fn source_contains_forbidden_database_clock_call(source_lowercase: &str, needle: &str) -> bool {
-    let mut search_start = 0;
-    while let Some(offset) = source_lowercase[search_start..].find(needle) {
-        let absolute_start = search_start + offset;
-        let preceding_char = source_lowercase[..absolute_start].chars().next_back();
-        let preceded_by_identifier_char =
-            preceding_char.is_some_and(|ch| ch == '_' || ch.is_ascii_alphanumeric());
-        let preceded_by_rust_namespace_or_method =
-            preceding_char.is_some_and(|ch| ch == ':' || ch == '.');
-        if !preceded_by_identifier_char && !preceded_by_rust_namespace_or_method {
-            return true;
-        }
-        search_start = absolute_start + needle.len();
-    }
-    false
-}
-
-fn collect_db_source_files(dir: &Path, out: &mut Vec<PathBuf>) {
-    let mut entries = fs::read_dir(dir)
-        .unwrap_or_else(|error| panic!("failed to read directory {}: {error}", dir.display()))
-        .collect::<Result<Vec<_>, _>>()
-        .unwrap_or_else(|error| {
-            panic!(
-                "failed to read directory entry in {}: {error}",
-                dir.display()
-            )
-        });
-    entries.sort_by_key(|entry| entry.path());
-
-    for entry in entries {
-        let path = entry.path();
-        if path.is_dir() {
-            collect_db_source_files(&path, out);
-        } else if path.extension().is_some_and(|extension| extension == "rs") {
-            out.push(path);
-        }
-    }
-}
-
-fn path_is_db_test_or_pooler_safe_query_helper(path: &Path) -> bool {
-    let relative = path
-        .strip_prefix(env!("CARGO_MANIFEST_DIR"))
-        .unwrap_or(path)
-        .to_string_lossy();
-    relative.ends_with("src/db/portable_query.rs")
-        || relative.ends_with("tests.rs")
-        || relative.ends_with("postgres_tests.rs")
-        || relative.ends_with("postgres_operation_count_tests.rs")
-        || relative.contains("/postgres_operation_count_tests/")
-        || relative.contains("/tests/")
-}
-
-fn path_is_db_test_or_public_pool_definition(path: &Path) -> bool {
-    path_is_db_test_or_pooler_safe_query_helper(path)
-        || path
-            .strip_prefix(env!("CARGO_MANIFEST_DIR"))
-            .unwrap_or(path)
-            .to_string_lossy()
-            .ends_with("src/db/pool.rs")
-}
-
-fn signature_uses_neutral_or_write_tx(signature: &str) -> bool {
-    signature.contains("&mut Tx<'_>") || signature.contains("&mut WriteTx<'_>")
-}
-
-fn path_allows_direct_transaction_finish_calls(path: &Path) -> bool {
-    let relative = path
-        .strip_prefix(env!("CARGO_MANIFEST_DIR"))
-        .unwrap_or(path)
-        .to_string_lossy();
-    relative.ends_with("src/db/mod.rs")
-        || relative.ends_with("src/db/pool.rs")
-        || relative.ends_with("src/db/fleet/once_task.rs")
-}
+mod source_guards;
 
 #[test]
 fn connect_options_preserve_url_ssl_mode_without_explicit_override() {
@@ -1616,6 +485,1406 @@ fn pool_config_debug_does_not_expose_database_url_secret() {
     assert!(!debug_output.contains("postgres://"));
 }
 
+#[tokio::test]
+async fn component_schema_migration_uses_bootstrapped_ledger_and_supports_qualified_tables() {
+    let database_url = postgres_test_support::standard_test_database_url();
+    let pool = connect_write_pool_for_db_test(
+        &database_url,
+        "paranoid_component_schema_migration_bootstrap_test",
+    )
+    .await;
+    let bootstrap_config = BootstrapConfig::new(unique_db_test_schema_name("__pcsm_bootstrap"));
+    let component_schema_name = unique_db_test_schema_name("__pcsm_component");
+    let component_table = PgQualifiedTableName::new(
+        Some(component_schema_name.clone()),
+        PgIdentifier::new("component_state").expect("component table identifier"),
+    );
+    let component = "test_component_upgrade";
+    let state_label = PgIdentifier::new("state").expect("schema instance key label");
+    let instance_key = component_schema_instance_key_for_tables([(&state_label, &component_table)]);
+    let v1 = ComponentSchemaVersion {
+        component,
+        instance_key: instance_key.as_str(),
+        version: 1,
+        fingerprint: "test-v1",
+    };
+    let v2 = ComponentSchemaVersion {
+        version: 2,
+        fingerprint: "test-v2",
+        ..v1
+    };
+    let v1_fresh_install = [
+        ComponentSchemaStatement::from_audited_dynamic_sql(AuditedSql::new(format!(
+            "CREATE SCHEMA IF NOT EXISTS {}",
+            component_schema_name.identifier().quoted()
+        )))
+        .expect("component schema creation statement"),
+        ComponentSchemaStatement::from_audited_dynamic_sql(AuditedSql::new(format!(
+            "CREATE TABLE {} (id BYTEA PRIMARY KEY)",
+            component_table.quoted()
+        )))
+        .expect("v1 fresh install statement"),
+    ];
+    let v1_validation = [
+        ComponentSchemaValidationCheck::from_audited_dynamic_boolean_expression(AuditedSql::new(
+            format!(
+                "NOT EXISTS (SELECT id FROM {} WHERE false)",
+                component_table.quoted()
+            ),
+        ))
+        .expect("v1 validation check"),
+    ];
+    let v1_schema =
+        ComponentSchema::new(v1, &v1_fresh_install, &[], &v1_validation).expect("v1 schema");
+
+    let v2_upgrade_statements =
+        [
+            ComponentSchemaStatement::from_audited_dynamic_sql(AuditedSql::new(format!(
+                "ALTER TABLE {} ADD COLUMN payload BYTEA NOT NULL DEFAULT ''::bytea",
+                component_table.quoted()
+            )))
+            .expect("v2 migration statement"),
+        ];
+    let v2_migrations = [ComponentSchemaMigration::new(
+        ComponentSchemaMigrationStep::new(
+            ComponentSchemaMigrationTarget::new(1, "test-v1"),
+            ComponentSchemaMigrationTarget::new(2, "test-v2"),
+        ),
+        &v2_upgrade_statements,
+    )];
+    let v2_validation = [
+        ComponentSchemaValidationCheck::from_audited_dynamic_boolean_expression(AuditedSql::new(
+            format!(
+                "NOT EXISTS (SELECT id, payload FROM {} WHERE false)",
+                component_table.quoted()
+            ),
+        ))
+        .expect("v2 validation check"),
+    ];
+    let v2_schema =
+        ComponentSchema::new(v2, &[], &v2_migrations, &v2_validation).expect("v2 schema");
+
+    drop_test_schema(pool.sqlx_pool(), bootstrap_config.schema_name()).await;
+    drop_test_schema(pool.sqlx_pool(), &component_schema_name).await;
+    let stores = bootstrap_config
+        .migrate_schema(&pool)
+        .await
+        .expect("migrate Paranoid DB foundation");
+
+    assert_eq!(
+        stores
+            .migrate_component_schema(&pool, &v1_schema)
+            .await
+            .expect("migrate v1 schema"),
+        ComponentSchemaMigrationOutcome::FreshInstall { version: 1 }
+    );
+
+    assert_eq!(
+        stores
+            .migrate_component_schema(&pool, &v2_schema)
+            .await
+            .expect("migrate v2 schema"),
+        ComponentSchemaMigrationOutcome::Upgraded {
+            from_version: 1,
+            to_version: 2,
+            steps_applied: 1,
+        }
+    );
+
+    assert_eq!(
+        stores
+            .migrate_component_schema(&pool, &v2_schema)
+            .await
+            .expect("validate already-current v2 schema"),
+        ComponentSchemaMigrationOutcome::AlreadyCurrent { version: 2 }
+    );
+
+    let mut validation_tx = pool
+        .begin_transaction()
+        .await
+        .expect("begin physical assertion transaction");
+    assert!(
+        fetch_column_exists_in_current_transaction(&mut validation_tx, &component_table, "payload")
+            .await
+    );
+    validation_tx
+        .rollback()
+        .await
+        .expect("rollback physical assertion transaction");
+
+    drop_test_schema(pool.sqlx_pool(), bootstrap_config.schema_name()).await;
+    drop_test_schema(pool.sqlx_pool(), &component_schema_name).await;
+}
+
+#[tokio::test]
+async fn component_schema_validation_false_rejects_before_recording_component_version() {
+    let database_url = postgres_test_support::standard_test_database_url();
+    let pool = connect_write_pool_for_db_test(
+        &database_url,
+        "paranoid_component_schema_validation_false_test",
+    )
+    .await;
+    let bootstrap_config = BootstrapConfig::new(unique_db_test_schema_name("__pcsvf_bootstrap"));
+    let component_schema_name = unique_db_test_schema_name("__pcsvf_component");
+    let component_table = PgQualifiedTableName::new(
+        Some(component_schema_name.clone()),
+        PgIdentifier::new("component_state").expect("component table identifier"),
+    );
+    let component = "test_component_validation_false";
+    let state_label = PgIdentifier::new("state").expect("schema instance key label");
+    let instance_key = component_schema_instance_key_for_tables([(&state_label, &component_table)]);
+    let version = ComponentSchemaVersion {
+        component,
+        instance_key: instance_key.as_str(),
+        version: 1,
+        fingerprint: "test-v1",
+    };
+    let fresh_install = [
+        ComponentSchemaStatement::from_audited_dynamic_sql(AuditedSql::new(format!(
+            "CREATE SCHEMA IF NOT EXISTS {}",
+            component_schema_name.identifier().quoted()
+        )))
+        .expect("component schema creation statement"),
+        ComponentSchemaStatement::from_audited_dynamic_sql(AuditedSql::new(format!(
+            "CREATE TABLE {} (id BYTEA PRIMARY KEY)",
+            component_table.quoted()
+        )))
+        .expect("fresh install statement"),
+    ];
+    let false_validation = [
+        ComponentSchemaValidationCheck::from_static_boolean_expression("false")
+            .expect("false validation check"),
+    ];
+    let false_schema =
+        ComponentSchema::new(version, &fresh_install, &[], &false_validation).expect("schema");
+    let null_validation = [
+        ComponentSchemaValidationCheck::from_static_boolean_expression("NULL::boolean")
+            .expect("null validation check"),
+    ];
+    let null_schema =
+        ComponentSchema::new(version, &fresh_install, &[], &null_validation).expect("schema");
+    let true_validation = [
+        ComponentSchemaValidationCheck::from_audited_dynamic_boolean_expression(AuditedSql::new(
+            format!(
+                "NOT EXISTS (SELECT id FROM {} WHERE false)",
+                component_table.quoted()
+            ),
+        ))
+        .expect("true validation check"),
+    ];
+    let true_schema =
+        ComponentSchema::new(version, &fresh_install, &[], &true_validation).expect("schema");
+
+    drop_test_schema(pool.sqlx_pool(), bootstrap_config.schema_name()).await;
+    drop_test_schema(pool.sqlx_pool(), &component_schema_name).await;
+    let stores = bootstrap_config
+        .migrate_schema(&pool)
+        .await
+        .expect("migrate Paranoid DB foundation");
+
+    let error = stores
+        .migrate_component_schema(&pool, &false_schema)
+        .await
+        .expect_err("false validation check must fail migration");
+    assert!(
+        error.to_string().contains("returned false"),
+        "error = {error:?}"
+    );
+
+    let error = stores
+        .migrate_component_schema(&pool, &null_schema)
+        .await
+        .expect_err("null validation check must fail migration");
+    assert!(
+        error.to_string().contains("returned null"),
+        "error = {error:?}"
+    );
+
+    assert_eq!(
+        stores
+            .migrate_component_schema(&pool, &true_schema)
+            .await
+            .expect("true validation check should still fresh install"),
+        ComponentSchemaMigrationOutcome::FreshInstall { version: 1 }
+    );
+
+    assert_eq!(
+        stores
+            .migrate_component_schema(&pool, &true_schema)
+            .await
+            .expect("already-current validation should pass"),
+        ComponentSchemaMigrationOutcome::AlreadyCurrent { version: 1 }
+    );
+
+    drop_test_schema(pool.sqlx_pool(), bootstrap_config.schema_name()).await;
+    drop_test_schema(pool.sqlx_pool(), &component_schema_name).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn component_schema_migration_serializes_concurrent_startup_for_same_component() {
+    let database_url = postgres_test_support::standard_test_database_url();
+    let pool = connect_write_pool_for_db_test(
+        &database_url,
+        "paranoid_component_schema_concurrent_migration_test",
+    )
+    .await;
+    let bootstrap_config = BootstrapConfig::new(unique_db_test_schema_name("__pcsc_bootstrap"));
+    let component_schema_name = unique_db_test_schema_name("__pcsc_component");
+    let component_table = PgQualifiedTableName::new(
+        Some(component_schema_name.clone()),
+        PgIdentifier::new("component_state").expect("component table identifier"),
+    );
+    let state_label = PgIdentifier::new("state").expect("schema instance key label");
+    let instance_key = component_schema_instance_key_for_tables([(&state_label, &component_table)]);
+    let fresh_install = [
+        ComponentSchemaStatement::from_audited_dynamic_sql(AuditedSql::new(format!(
+            "CREATE SCHEMA IF NOT EXISTS {}",
+            component_schema_name.identifier().quoted()
+        )))
+        .expect("component schema creation statement"),
+        ComponentSchemaStatement::from_audited_dynamic_sql(AuditedSql::new(format!(
+            "CREATE TABLE {} (id BYTEA PRIMARY KEY)",
+            component_table.quoted()
+        )))
+        .expect("fresh install statement"),
+    ];
+    let validation = [
+        ComponentSchemaValidationCheck::from_audited_dynamic_boolean_expression(AuditedSql::new(
+            format!(
+                "NOT EXISTS (SELECT id FROM {} WHERE false)",
+                component_table.quoted()
+            ),
+        ))
+        .expect("validation check"),
+    ];
+    let schema = ComponentSchema::new(
+        ComponentSchemaVersion {
+            component: "test_component_concurrent_startup",
+            instance_key: &instance_key,
+            version: 1,
+            fingerprint: "test-v1",
+        },
+        &fresh_install,
+        &[],
+        &validation,
+    )
+    .expect("component schema");
+
+    drop_test_schema(pool.sqlx_pool(), bootstrap_config.schema_name()).await;
+    drop_test_schema(pool.sqlx_pool(), &component_schema_name).await;
+    let stores = bootstrap_config
+        .migrate_schema(&pool)
+        .await
+        .expect("migrate Paranoid DB foundation");
+
+    let results = tokio::join!(
+        stores.migrate_component_schema(&pool, &schema),
+        stores.migrate_component_schema(&pool, &schema),
+        stores.migrate_component_schema(&pool, &schema),
+        stores.migrate_component_schema(&pool, &schema),
+        stores.migrate_component_schema(&pool, &schema),
+        stores.migrate_component_schema(&pool, &schema),
+        stores.migrate_component_schema(&pool, &schema),
+        stores.migrate_component_schema(&pool, &schema),
+    );
+    let mut fresh_installs = 0;
+    let mut already_current = 0;
+    for result in [
+        results.0, results.1, results.2, results.3, results.4, results.5, results.6, results.7,
+    ] {
+        match result.expect("concurrent migration must succeed") {
+            ComponentSchemaMigrationOutcome::FreshInstall { version: 1 } => fresh_installs += 1,
+            ComponentSchemaMigrationOutcome::AlreadyCurrent { version: 1 } => already_current += 1,
+            other => panic!("unexpected concurrent migration outcome: {other:?}"),
+        }
+    }
+
+    assert_eq!(fresh_installs, 1);
+    assert_eq!(already_current, 7);
+
+    drop_test_schema(pool.sqlx_pool(), bootstrap_config.schema_name()).await;
+    drop_test_schema(pool.sqlx_pool(), &component_schema_name).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn component_schema_migration_serializes_concurrent_upgrade_for_same_component() {
+    let database_url = postgres_test_support::standard_test_database_url();
+    let pool = connect_write_pool_for_db_test(
+        &database_url,
+        "paranoid_component_schema_concurrent_upgrade_test",
+    )
+    .await;
+    let bootstrap_config = BootstrapConfig::new(unique_db_test_schema_name("__pcsu_bootstrap"));
+    let component_schema_name = unique_db_test_schema_name("__pcsu_component");
+    let component_table = component_test_table(&component_schema_name, "component_state");
+    let component = "test_component_concurrent_upgrade";
+    let state_label = PgIdentifier::new("state").expect("schema instance key label");
+    let instance_key = component_schema_instance_key_for_tables([(&state_label, &component_table)]);
+    let v1 = component_test_version(component, &instance_key, 1, "test-v1");
+    let v2 = component_test_version(component, &instance_key, 2, "test-v2");
+    let v1_fresh_install =
+        component_fresh_install_statements(&component_schema_name, &component_table);
+    let v1_validation = [component_select_validation_check(&component_table, "id")];
+    let v1_schema =
+        ComponentSchema::new(v1, &v1_fresh_install, &[], &v1_validation).expect("v1 schema");
+    let v2_upgrade_statements = [component_add_column_statement(
+        &component_table,
+        "payload",
+        "BYTEA NOT NULL DEFAULT ''::bytea",
+    )];
+    let v2_migrations = [ComponentSchemaMigration::new(
+        component_test_step(1, "test-v1", 2, "test-v2"),
+        &v2_upgrade_statements,
+    )];
+    let v2_validation = [component_select_validation_check(
+        &component_table,
+        "id, payload",
+    )];
+    let v2_schema =
+        ComponentSchema::new(v2, &[], &v2_migrations, &v2_validation).expect("v2 schema");
+
+    drop_test_schema(pool.sqlx_pool(), bootstrap_config.schema_name()).await;
+    drop_test_schema(pool.sqlx_pool(), &component_schema_name).await;
+    let stores = bootstrap_config
+        .migrate_schema(&pool)
+        .await
+        .expect("migrate Paranoid DB foundation");
+    assert_eq!(
+        stores
+            .migrate_component_schema(&pool, &v1_schema)
+            .await
+            .expect("fresh install v1"),
+        ComponentSchemaMigrationOutcome::FreshInstall { version: 1 }
+    );
+
+    let results = tokio::join!(
+        stores.migrate_component_schema(&pool, &v2_schema),
+        stores.migrate_component_schema(&pool, &v2_schema),
+        stores.migrate_component_schema(&pool, &v2_schema),
+        stores.migrate_component_schema(&pool, &v2_schema),
+        stores.migrate_component_schema(&pool, &v2_schema),
+        stores.migrate_component_schema(&pool, &v2_schema),
+        stores.migrate_component_schema(&pool, &v2_schema),
+        stores.migrate_component_schema(&pool, &v2_schema),
+    );
+    let mut upgrades = 0;
+    let mut already_current = 0;
+    for result in [
+        results.0, results.1, results.2, results.3, results.4, results.5, results.6, results.7,
+    ] {
+        match result.expect("concurrent upgrade must succeed") {
+            ComponentSchemaMigrationOutcome::Upgraded {
+                from_version: 1,
+                to_version: 2,
+                steps_applied: 1,
+            } => upgrades += 1,
+            ComponentSchemaMigrationOutcome::AlreadyCurrent { version: 2 } => already_current += 1,
+            other => panic!("unexpected concurrent upgrade outcome: {other:?}"),
+        }
+    }
+
+    assert_eq!(upgrades, 1);
+    assert_eq!(already_current, 7);
+    assert_component_column_exists(&pool, &component_table, "payload").await;
+
+    drop_test_schema(pool.sqlx_pool(), bootstrap_config.schema_name()).await;
+    drop_test_schema(pool.sqlx_pool(), &component_schema_name).await;
+}
+
+#[tokio::test]
+async fn component_schema_failed_upgrade_rolls_back_physical_work_and_ledger_update() {
+    let database_url = postgres_test_support::standard_test_database_url();
+    let pool =
+        connect_write_pool_for_db_test(&database_url, "paranoid_component_schema_bad_upgrade_test")
+            .await;
+    let bootstrap_config = BootstrapConfig::new(unique_db_test_schema_name("__pcsbu_bootstrap"));
+    let component_schema_name = unique_db_test_schema_name("__pcsbu_component");
+    let component_table = component_test_table(&component_schema_name, "component_state");
+    let component = "test_component_bad_upgrade";
+    let state_label = PgIdentifier::new("state").expect("schema instance key label");
+    let instance_key = component_schema_instance_key_for_tables([(&state_label, &component_table)]);
+    let v1 = component_test_version(component, &instance_key, 1, "test-v1");
+    let v2 = component_test_version(component, &instance_key, 2, "test-v2");
+    let v1_fresh_install =
+        component_fresh_install_statements(&component_schema_name, &component_table);
+    let v1_validation = [component_select_validation_check(&component_table, "id")];
+    let v1_schema =
+        ComponentSchema::new(v1, &v1_fresh_install, &[], &v1_validation).expect("v1 schema");
+    let bad_v2_upgrade_statements = [
+        component_add_column_statement(
+            &component_table,
+            "payload",
+            "BYTEA NOT NULL DEFAULT ''::bytea",
+        ),
+        component_add_column_statement(
+            &component_table,
+            "payload",
+            "BYTEA NOT NULL DEFAULT ''::bytea",
+        ),
+    ];
+    let bad_v2_migrations = [ComponentSchemaMigration::new(
+        component_test_step(1, "test-v1", 2, "test-v2"),
+        &bad_v2_upgrade_statements,
+    )];
+    let v2_validation = [component_select_validation_check(
+        &component_table,
+        "id, payload",
+    )];
+    let bad_v2_schema =
+        ComponentSchema::new(v2, &[], &bad_v2_migrations, &v2_validation).expect("bad v2 schema");
+    let good_v2_upgrade_statements = [component_add_column_statement(
+        &component_table,
+        "payload",
+        "BYTEA NOT NULL DEFAULT ''::bytea",
+    )];
+    let good_v2_migrations = [ComponentSchemaMigration::new(
+        component_test_step(1, "test-v1", 2, "test-v2"),
+        &good_v2_upgrade_statements,
+    )];
+    let good_v2_schema =
+        ComponentSchema::new(v2, &[], &good_v2_migrations, &v2_validation).expect("good v2 schema");
+
+    drop_test_schema(pool.sqlx_pool(), bootstrap_config.schema_name()).await;
+    drop_test_schema(pool.sqlx_pool(), &component_schema_name).await;
+    let stores = bootstrap_config
+        .migrate_schema(&pool)
+        .await
+        .expect("migrate Paranoid DB foundation");
+    stores
+        .migrate_component_schema(&pool, &v1_schema)
+        .await
+        .expect("fresh install v1");
+
+    stores
+        .migrate_component_schema(&pool, &bad_v2_schema)
+        .await
+        .expect_err("duplicate column upgrade must fail");
+
+    assert_component_column_missing(&pool, &component_table, "payload").await;
+    assert_eq!(
+        fetch_component_schema_ledger_row(
+            &pool,
+            stores.schema_ledger_table_name(),
+            component,
+            &instance_key,
+        )
+        .await,
+        Some((1, "test-v1".to_owned())),
+        "failed upgrade must leave the component ledger at v1"
+    );
+
+    assert_eq!(
+        stores
+            .migrate_component_schema(&pool, &good_v2_schema)
+            .await
+            .expect("good upgrade should still run after failed upgrade rollback"),
+        ComponentSchemaMigrationOutcome::Upgraded {
+            from_version: 1,
+            to_version: 2,
+            steps_applied: 1,
+        }
+    );
+
+    drop_test_schema(pool.sqlx_pool(), bootstrap_config.schema_name()).await;
+    drop_test_schema(pool.sqlx_pool(), &component_schema_name).await;
+}
+
+#[tokio::test]
+async fn component_schema_already_current_validation_rejects_physical_drift() {
+    let database_url = postgres_test_support::standard_test_database_url();
+    let pool =
+        connect_write_pool_for_db_test(&database_url, "paranoid_component_schema_drift_test").await;
+    let bootstrap_config = BootstrapConfig::new(unique_db_test_schema_name("__pcsd_bootstrap"));
+    let component_schema_name = unique_db_test_schema_name("__pcsd_component");
+    let component_table = component_test_table(&component_schema_name, "component_state");
+    let component = "test_component_physical_drift";
+    let state_label = PgIdentifier::new("state").expect("schema instance key label");
+    let instance_key = component_schema_instance_key_for_tables([(&state_label, &component_table)]);
+    let version = component_test_version(component, &instance_key, 1, "test-v1");
+    let fresh_install =
+        component_fresh_install_statements(&component_schema_name, &component_table);
+    let validation = [component_select_validation_check(&component_table, "id")];
+    let schema = ComponentSchema::new(version, &fresh_install, &[], &validation).expect("schema");
+
+    drop_test_schema(pool.sqlx_pool(), bootstrap_config.schema_name()).await;
+    drop_test_schema(pool.sqlx_pool(), &component_schema_name).await;
+    let stores = bootstrap_config
+        .migrate_schema(&pool)
+        .await
+        .expect("migrate Paranoid DB foundation");
+    stores
+        .migrate_component_schema(&pool, &schema)
+        .await
+        .expect("fresh install schema");
+    execute_component_test_statement(
+        pool.sqlx_pool(),
+        format!("DROP TABLE {}", component_table.quoted()),
+    )
+    .await;
+
+    let error = stores
+        .migrate_component_schema(&pool, &schema)
+        .await
+        .expect_err("already-current ledger must not hide physical drift");
+    let error_debug = format!("{error:?}");
+    assert!(
+        error_debug.contains("42P01") && error_debug.contains("component_state"),
+        "error should be the physical validation query failing on the missing component table: {error:?}"
+    );
+
+    drop_test_schema(pool.sqlx_pool(), bootstrap_config.schema_name()).await;
+    drop_test_schema(pool.sqlx_pool(), &component_schema_name).await;
+}
+
+#[tokio::test]
+async fn component_schema_migration_rejects_conflicting_ledger_rows_before_physical_work() {
+    let database_url = postgres_test_support::standard_test_database_url();
+    let pool =
+        connect_write_pool_for_db_test(&database_url, "paranoid_component_schema_conflict_test")
+            .await;
+    let bootstrap_config = BootstrapConfig::new(unique_db_test_schema_name("__pcscl_bootstrap"));
+    let component_schema_name = unique_db_test_schema_name("__pcscl_component");
+    let future_table = component_test_table(&component_schema_name, "future_state");
+    let fingerprint_table = component_test_table(&component_schema_name, "fingerprint_state");
+    let state_label = PgIdentifier::new("state").expect("schema instance key label");
+    let future_instance_key =
+        component_schema_instance_key_for_tables([(&state_label, &future_table)]);
+    let fingerprint_instance_key =
+        component_schema_instance_key_for_tables([(&state_label, &fingerprint_table)]);
+    let future_fresh_install =
+        component_fresh_install_statements(&component_schema_name, &future_table);
+    let future_validation = [component_select_validation_check(&future_table, "id")];
+    let future_schema = ComponentSchema::new(
+        component_test_version(
+            "test_component_future_conflict",
+            &future_instance_key,
+            1,
+            "test-v1",
+        ),
+        &future_fresh_install,
+        &[],
+        &future_validation,
+    )
+    .expect("future conflict schema");
+    let fingerprint_fresh_install =
+        component_fresh_install_statements(&component_schema_name, &fingerprint_table);
+    let fingerprint_validation = [component_select_validation_check(&fingerprint_table, "id")];
+    let fingerprint_schema = ComponentSchema::new(
+        component_test_version(
+            "test_component_fingerprint_conflict",
+            &fingerprint_instance_key,
+            1,
+            "test-v1",
+        ),
+        &fingerprint_fresh_install,
+        &[],
+        &fingerprint_validation,
+    )
+    .expect("fingerprint conflict schema");
+
+    drop_test_schema(pool.sqlx_pool(), bootstrap_config.schema_name()).await;
+    drop_test_schema(pool.sqlx_pool(), &component_schema_name).await;
+    let stores = bootstrap_config
+        .migrate_schema(&pool)
+        .await
+        .expect("migrate Paranoid DB foundation");
+    insert_component_schema_ledger_row(
+        &pool,
+        stores.schema_ledger_table_name(),
+        "test_component_future_conflict",
+        &future_instance_key,
+        9,
+        "future",
+    )
+    .await;
+    insert_component_schema_ledger_row(
+        &pool,
+        stores.schema_ledger_table_name(),
+        "test_component_fingerprint_conflict",
+        &fingerprint_instance_key,
+        1,
+        "different",
+    )
+    .await;
+
+    let future_error = stores
+        .migrate_component_schema(&pool, &future_schema)
+        .await
+        .expect_err("future recorded version must fail before physical work");
+    assert!(
+        future_error.to_string().contains("newer than supported"),
+        "error = {future_error:?}"
+    );
+    let fingerprint_error = stores
+        .migrate_component_schema(&pool, &fingerprint_schema)
+        .await
+        .expect_err("same-version fingerprint mismatch must fail before physical work");
+    assert!(
+        fingerprint_error
+            .to_string()
+            .contains("recorded fingerprint"),
+        "error = {fingerprint_error:?}"
+    );
+    assert!(
+        !fetch_component_table_exists(&pool, &future_table).await,
+        "future-version conflict must not execute fresh-install DDL"
+    );
+    assert!(
+        !fetch_component_table_exists(&pool, &fingerprint_table).await,
+        "fingerprint conflict must not execute fresh-install DDL"
+    );
+
+    drop_test_schema(pool.sqlx_pool(), bootstrap_config.schema_name()).await;
+    drop_test_schema(pool.sqlx_pool(), &component_schema_name).await;
+}
+
+#[tokio::test]
+async fn component_schema_migration_executes_multi_step_upgrade_in_one_transaction() {
+    let database_url = postgres_test_support::standard_test_database_url();
+    let pool =
+        connect_write_pool_for_db_test(&database_url, "paranoid_component_schema_multistep_test")
+            .await;
+    let bootstrap_config = BootstrapConfig::new(unique_db_test_schema_name("__pcsms_bootstrap"));
+    let component_schema_name = unique_db_test_schema_name("__pcsms_component");
+    let component_table = component_test_table(&component_schema_name, "component_state");
+    let component = "test_component_multi_step";
+    let state_label = PgIdentifier::new("state").expect("schema instance key label");
+    let instance_key = component_schema_instance_key_for_tables([(&state_label, &component_table)]);
+    let v1 = component_test_version(component, &instance_key, 1, "test-v1");
+    let v3 = component_test_version(component, &instance_key, 3, "test-v3");
+    let v1_fresh_install =
+        component_fresh_install_statements(&component_schema_name, &component_table);
+    let v1_validation = [component_select_validation_check(&component_table, "id")];
+    let v1_schema =
+        ComponentSchema::new(v1, &v1_fresh_install, &[], &v1_validation).expect("v1 schema");
+    let add_payload = [component_add_column_statement(
+        &component_table,
+        "payload",
+        "BYTEA NOT NULL DEFAULT ''::bytea",
+    )];
+    let add_marker = [component_add_column_statement(
+        &component_table,
+        "marker",
+        "INTEGER NOT NULL DEFAULT 0",
+    )];
+    let v3_migrations = [
+        ComponentSchemaMigration::new(
+            component_test_step(1, "test-v1", 2, "test-v2"),
+            &add_payload,
+        ),
+        ComponentSchemaMigration::new(component_test_step(2, "test-v2", 3, "test-v3"), &add_marker),
+    ];
+    let v3_validation = [component_select_validation_check(
+        &component_table,
+        "id, payload, marker",
+    )];
+    let v3_schema =
+        ComponentSchema::new(v3, &[], &v3_migrations, &v3_validation).expect("v3 schema");
+
+    drop_test_schema(pool.sqlx_pool(), bootstrap_config.schema_name()).await;
+    drop_test_schema(pool.sqlx_pool(), &component_schema_name).await;
+    let stores = bootstrap_config
+        .migrate_schema(&pool)
+        .await
+        .expect("migrate Paranoid DB foundation");
+    stores
+        .migrate_component_schema(&pool, &v1_schema)
+        .await
+        .expect("fresh install v1");
+
+    assert_eq!(
+        stores
+            .migrate_component_schema(&pool, &v3_schema)
+            .await
+            .expect("upgrade directly to v3"),
+        ComponentSchemaMigrationOutcome::Upgraded {
+            from_version: 1,
+            to_version: 3,
+            steps_applied: 2,
+        }
+    );
+    assert_component_column_exists(&pool, &component_table, "payload").await;
+    assert_component_column_exists(&pool, &component_table, "marker").await;
+
+    drop_test_schema(pool.sqlx_pool(), bootstrap_config.schema_name()).await;
+    drop_test_schema(pool.sqlx_pool(), &component_schema_name).await;
+}
+
+#[tokio::test]
+async fn component_schema_instance_key_keeps_same_component_physical_instances_isolated() {
+    let database_url = postgres_test_support::standard_test_database_url();
+    let pool =
+        connect_write_pool_for_db_test(&database_url, "paranoid_component_schema_instances_test")
+            .await;
+    let bootstrap_config = BootstrapConfig::new(unique_db_test_schema_name("__pcsi_bootstrap"));
+    let component_schema_name = unique_db_test_schema_name("__pcsi_component");
+    let first_table = component_test_table(&component_schema_name, "first_state");
+    let second_table = component_test_table(&component_schema_name, "second_state");
+    let component = "test_component_shared_name";
+    let state_label = PgIdentifier::new("state").expect("schema instance key label");
+    let first_instance_key =
+        component_schema_instance_key_for_tables([(&state_label, &first_table)]);
+    let second_instance_key =
+        component_schema_instance_key_for_tables([(&state_label, &second_table)]);
+    let first_fresh_install =
+        component_fresh_install_statements(&component_schema_name, &first_table);
+    let first_validation = [component_select_validation_check(&first_table, "id")];
+    let first_schema = ComponentSchema::new(
+        component_test_version(component, &first_instance_key, 1, "first-v1"),
+        &first_fresh_install,
+        &[],
+        &first_validation,
+    )
+    .expect("first component schema");
+    let second_fresh_install =
+        component_fresh_install_statements(&component_schema_name, &second_table);
+    let second_validation = [component_select_validation_check(&second_table, "id")];
+    let second_schema = ComponentSchema::new(
+        component_test_version(component, &second_instance_key, 1, "second-v1"),
+        &second_fresh_install,
+        &[],
+        &second_validation,
+    )
+    .expect("second component schema");
+
+    drop_test_schema(pool.sqlx_pool(), bootstrap_config.schema_name()).await;
+    drop_test_schema(pool.sqlx_pool(), &component_schema_name).await;
+    let stores = bootstrap_config
+        .migrate_schema(&pool)
+        .await
+        .expect("migrate Paranoid DB foundation");
+    assert_eq!(
+        stores
+            .migrate_component_schema(&pool, &first_schema)
+            .await
+            .expect("fresh install first instance"),
+        ComponentSchemaMigrationOutcome::FreshInstall { version: 1 }
+    );
+    assert_eq!(
+        stores
+            .migrate_component_schema(&pool, &second_schema)
+            .await
+            .expect("fresh install second instance"),
+        ComponentSchemaMigrationOutcome::FreshInstall { version: 1 }
+    );
+    assert_eq!(
+        fetch_component_schema_ledger_row(
+            &pool,
+            stores.schema_ledger_table_name(),
+            component,
+            &first_instance_key,
+        )
+        .await,
+        Some((1, "first-v1".to_owned()))
+    );
+    assert_eq!(
+        fetch_component_schema_ledger_row(
+            &pool,
+            stores.schema_ledger_table_name(),
+            component,
+            &second_instance_key,
+        )
+        .await,
+        Some((1, "second-v1".to_owned()))
+    );
+
+    drop_test_schema(pool.sqlx_pool(), bootstrap_config.schema_name()).await;
+    drop_test_schema(pool.sqlx_pool(), &component_schema_name).await;
+}
+
+#[tokio::test]
+async fn component_schema_same_instance_conflicting_definition_does_not_run_physical_work() {
+    let database_url = postgres_test_support::standard_test_database_url();
+    let pool = connect_write_pool_for_db_test(
+        &database_url,
+        "paranoid_component_schema_same_instance_test",
+    )
+    .await;
+    let bootstrap_config = BootstrapConfig::new(unique_db_test_schema_name("__pcsid_bootstrap"));
+    let component_schema_name = unique_db_test_schema_name("__pcsid_component");
+    let component_table = component_test_table(&component_schema_name, "component_state");
+    let component = "test_component_same_instance_conflict";
+    let state_label = PgIdentifier::new("state").expect("schema instance key label");
+    let instance_key = component_schema_instance_key_for_tables([(&state_label, &component_table)]);
+    let first_fresh_install =
+        component_fresh_install_statements(&component_schema_name, &component_table);
+    let first_validation = [component_select_validation_check(&component_table, "id")];
+    let first_schema = ComponentSchema::new(
+        component_test_version(component, &instance_key, 1, "test-v1"),
+        &first_fresh_install,
+        &[],
+        &first_validation,
+    )
+    .expect("first component schema");
+    let conflicting_statement = [component_add_column_statement(
+        &component_table,
+        "should_not_exist",
+        "INTEGER NOT NULL DEFAULT 0",
+    )];
+    let validation = [component_select_validation_check(&component_table, "id")];
+    let conflicting_schema = ComponentSchema::new(
+        component_test_version(component, &instance_key, 1, "different-v1"),
+        &conflicting_statement,
+        &[],
+        &validation,
+    )
+    .expect("conflicting schema");
+
+    drop_test_schema(pool.sqlx_pool(), bootstrap_config.schema_name()).await;
+    drop_test_schema(pool.sqlx_pool(), &component_schema_name).await;
+    let stores = bootstrap_config
+        .migrate_schema(&pool)
+        .await
+        .expect("migrate Paranoid DB foundation");
+    stores
+        .migrate_component_schema(&pool, &first_schema)
+        .await
+        .expect("fresh install first definition");
+
+    let error = stores
+        .migrate_component_schema(&pool, &conflicting_schema)
+        .await
+        .expect_err("same instance with a different fingerprint must fail");
+    assert!(
+        error.to_string().contains("recorded fingerprint"),
+        "error = {error:?}"
+    );
+    assert_component_column_missing(&pool, &component_table, "should_not_exist").await;
+
+    drop_test_schema(pool.sqlx_pool(), bootstrap_config.schema_name()).await;
+    drop_test_schema(pool.sqlx_pool(), &component_schema_name).await;
+}
+
+#[tokio::test]
+async fn component_schema_public_migration_path_emits_expected_operation_shapes() {
+    let database_url = postgres_test_support::standard_test_database_url();
+    let pool =
+        connect_write_pool_for_db_test(&database_url, "paranoid_component_schema_op_count_test")
+            .await;
+    let observer = DatabaseOperationObserver::default();
+    let observed_pool = pool.clone_with_database_operation_observer(observer.clone());
+    let bootstrap_config = BootstrapConfig::new(unique_db_test_schema_name("__pcsoc_bootstrap"));
+    let component_schema_name = unique_db_test_schema_name("__pcsoc_component");
+    let component_table = component_test_table(&component_schema_name, "component_state");
+    let component = "test_component_operation_count";
+    let state_label = PgIdentifier::new("state").expect("schema instance key label");
+    let instance_key = component_schema_instance_key_for_tables([(&state_label, &component_table)]);
+    let v1 = component_test_version(component, &instance_key, 1, "test-v1");
+    let v2 = component_test_version(component, &instance_key, 2, "test-v2");
+    let v1_fresh_install =
+        component_fresh_install_statements(&component_schema_name, &component_table);
+    let v1_validation = [component_select_validation_check(&component_table, "id")];
+    let v1_schema =
+        ComponentSchema::new(v1, &v1_fresh_install, &[], &v1_validation).expect("v1 schema");
+    let v2_upgrade_statements = [component_add_column_statement(
+        &component_table,
+        "payload",
+        "BYTEA NOT NULL DEFAULT ''::bytea",
+    )];
+    let v2_migrations = [ComponentSchemaMigration::new(
+        component_test_step(1, "test-v1", 2, "test-v2"),
+        &v2_upgrade_statements,
+    )];
+    let v2_validation = [component_select_validation_check(
+        &component_table,
+        "id, payload",
+    )];
+    let v2_schema =
+        ComponentSchema::new(v2, &[], &v2_migrations, &v2_validation).expect("v2 schema");
+
+    drop_test_schema(pool.sqlx_pool(), bootstrap_config.schema_name()).await;
+    drop_test_schema(pool.sqlx_pool(), &component_schema_name).await;
+    let stores = bootstrap_config
+        .migrate_schema(&pool)
+        .await
+        .expect("migrate Paranoid DB foundation");
+
+    stores
+        .migrate_component_schema(&observed_pool, &v1_schema)
+        .await
+        .expect("fresh install v1");
+    assert_eq!(
+        component_schema_operation_shapes(&observer),
+        component_schema_fresh_install_operation_shapes(2, 1)
+    );
+    observer.clear();
+
+    stores
+        .migrate_component_schema(&observed_pool, &v2_schema)
+        .await
+        .expect("upgrade to v2");
+    assert_eq!(
+        component_schema_operation_shapes(&observer),
+        component_schema_upgrade_operation_shapes(1, 1)
+    );
+    observer.clear();
+
+    stores
+        .migrate_component_schema(&observed_pool, &v2_schema)
+        .await
+        .expect("validate already-current v2");
+    assert_eq!(
+        component_schema_operation_shapes(&observer),
+        component_schema_already_current_operation_shapes(1)
+    );
+
+    drop_test_schema(pool.sqlx_pool(), bootstrap_config.schema_name()).await;
+    drop_test_schema(pool.sqlx_pool(), &component_schema_name).await;
+}
+
+type ComponentSchemaOperationShape = (DatabaseOperationKind, &'static str);
+
+fn component_test_table(schema_name: &PgSchemaName, table_name: &str) -> PgQualifiedTableName {
+    PgQualifiedTableName::new(
+        Some(schema_name.clone()),
+        PgIdentifier::new(table_name).expect("test component table identifier"),
+    )
+}
+
+fn component_test_version<'a>(
+    component: &'a str,
+    instance_key: &'a str,
+    version: i32,
+    fingerprint: &'a str,
+) -> ComponentSchemaVersion<'a> {
+    ComponentSchemaVersion {
+        component,
+        instance_key,
+        version,
+        fingerprint,
+    }
+}
+
+fn component_test_step(
+    from_version: i32,
+    from_fingerprint: &'static str,
+    to_version: i32,
+    to_fingerprint: &'static str,
+) -> ComponentSchemaMigrationStep<'static> {
+    ComponentSchemaMigrationStep::new(
+        ComponentSchemaMigrationTarget::new(from_version, from_fingerprint),
+        ComponentSchemaMigrationTarget::new(to_version, to_fingerprint),
+    )
+}
+
+fn component_fresh_install_statements(
+    schema_name: &PgSchemaName,
+    table_name: &PgQualifiedTableName,
+) -> [ComponentSchemaStatement<'static>; 2] {
+    [
+        ComponentSchemaStatement::from_audited_dynamic_sql(AuditedSql::new(format!(
+            "CREATE SCHEMA IF NOT EXISTS {}",
+            schema_name.identifier().quoted()
+        )))
+        .expect("component schema creation statement"),
+        ComponentSchemaStatement::from_audited_dynamic_sql(AuditedSql::new(format!(
+            "CREATE TABLE {} (id BYTEA PRIMARY KEY)",
+            table_name.quoted()
+        )))
+        .expect("component table creation statement"),
+    ]
+}
+
+fn component_add_column_statement(
+    table_name: &PgQualifiedTableName,
+    column_name: &str,
+    column_type: &str,
+) -> ComponentSchemaStatement<'static> {
+    let column = PgIdentifier::new(column_name).expect("test component column identifier");
+    ComponentSchemaStatement::from_audited_dynamic_sql(AuditedSql::new(format!(
+        "ALTER TABLE {} ADD COLUMN {} {}",
+        table_name.quoted(),
+        column.quoted(),
+        column_type
+    )))
+    .expect("component add-column statement")
+}
+
+fn component_select_validation_check(
+    table_name: &PgQualifiedTableName,
+    select_list: &str,
+) -> ComponentSchemaValidationCheck<'static> {
+    ComponentSchemaValidationCheck::from_audited_dynamic_boolean_expression(AuditedSql::new(
+        format!(
+            "NOT EXISTS (SELECT {select_list} FROM {} WHERE false)",
+            table_name.quoted()
+        ),
+    ))
+    .expect("component select validation check")
+}
+
+fn component_schema_operation_shapes(
+    observer: &DatabaseOperationObserver,
+) -> Vec<ComponentSchemaOperationShape> {
+    observer
+        .records()
+        .into_iter()
+        .map(|record| (record.kind, record.label))
+        .collect()
+}
+
+fn component_schema_fresh_install_operation_shapes(
+    fresh_statement_count: usize,
+    validation_check_count: usize,
+) -> Vec<ComponentSchemaOperationShape> {
+    [
+        vec![(
+            DatabaseOperationKind::BeginTransaction,
+            "db.begin_transaction",
+        )],
+        component_schema_ledger_claim_shapes(),
+        repeated_component_operation_shape(
+            DatabaseOperationKind::Execute,
+            COMPONENT_SCHEMA_OPERATION_EXECUTE_FRESH_INSTALL_STATEMENT,
+            fresh_statement_count,
+        ),
+        repeated_component_operation_shape(
+            DatabaseOperationKind::FetchOne,
+            COMPONENT_SCHEMA_OPERATION_EXECUTE_VALIDATION_CHECK,
+            validation_check_count,
+        ),
+        component_schema_ledger_fresh_completion_shapes(),
+        vec![(DatabaseOperationKind::CommitTransaction, "db.tx.commit")],
+    ]
+    .concat()
+}
+
+fn component_schema_upgrade_operation_shapes(
+    upgrade_statement_count: usize,
+    validation_check_count: usize,
+) -> Vec<ComponentSchemaOperationShape> {
+    [
+        vec![(
+            DatabaseOperationKind::BeginTransaction,
+            "db.begin_transaction",
+        )],
+        component_schema_ledger_lock_shapes(),
+        repeated_component_operation_shape(
+            DatabaseOperationKind::Execute,
+            COMPONENT_SCHEMA_OPERATION_EXECUTE_UPGRADE_STATEMENT,
+            upgrade_statement_count,
+        ),
+        repeated_component_operation_shape(
+            DatabaseOperationKind::FetchOne,
+            COMPONENT_SCHEMA_OPERATION_EXECUTE_VALIDATION_CHECK,
+            validation_check_count,
+        ),
+        component_schema_ledger_upgrade_completion_shapes(),
+        vec![(DatabaseOperationKind::CommitTransaction, "db.tx.commit")],
+    ]
+    .concat()
+}
+
+fn component_schema_already_current_operation_shapes(
+    validation_check_count: usize,
+) -> Vec<ComponentSchemaOperationShape> {
+    [
+        vec![(
+            DatabaseOperationKind::BeginTransaction,
+            "db.begin_transaction",
+        )],
+        component_schema_ledger_lock_shapes(),
+        repeated_component_operation_shape(
+            DatabaseOperationKind::FetchOne,
+            COMPONENT_SCHEMA_OPERATION_EXECUTE_VALIDATION_CHECK,
+            validation_check_count,
+        ),
+        vec![(DatabaseOperationKind::CommitTransaction, "db.tx.commit")],
+    ]
+    .concat()
+}
+
+fn component_schema_ledger_claim_shapes() -> Vec<ComponentSchemaOperationShape> {
+    [
+        component_schema_ledger_ensure_and_validate_shapes(),
+        vec![(
+            DatabaseOperationKind::Execute,
+            SCHEMA_LEDGER_OPERATION_CLAIM_COMPONENT_VERSION,
+        )],
+    ]
+    .concat()
+}
+
+fn component_schema_ledger_lock_shapes() -> Vec<ComponentSchemaOperationShape> {
+    [
+        component_schema_ledger_claim_shapes(),
+        vec![(
+            DatabaseOperationKind::FetchOptional,
+            SCHEMA_LEDGER_OPERATION_LOCK_COMPONENT_VERSION,
+        )],
+    ]
+    .concat()
+}
+
+fn component_schema_ledger_fresh_completion_shapes() -> Vec<ComponentSchemaOperationShape> {
+    vec![
+        (
+            DatabaseOperationKind::Execute,
+            SCHEMA_LEDGER_OPERATION_RECORD_COMPONENT_VERSION,
+        ),
+        (
+            DatabaseOperationKind::FetchOptional,
+            SCHEMA_LEDGER_OPERATION_FETCH_COMPONENT_VERSION,
+        ),
+    ]
+}
+
+fn component_schema_ledger_upgrade_completion_shapes() -> Vec<ComponentSchemaOperationShape> {
+    vec![
+        (
+            DatabaseOperationKind::Execute,
+            SCHEMA_LEDGER_OPERATION_UPDATE_COMPONENT_VERSION,
+        ),
+        (
+            DatabaseOperationKind::FetchOptional,
+            SCHEMA_LEDGER_OPERATION_FETCH_COMPONENT_VERSION,
+        ),
+    ]
+}
+
+fn component_schema_ledger_ensure_and_validate_shapes() -> Vec<ComponentSchemaOperationShape> {
+    [
+        vec![
+            (
+                DatabaseOperationKind::Execute,
+                SCHEMA_LEDGER_OPERATION_CREATE_SAVEPOINT,
+            ),
+            (
+                DatabaseOperationKind::Execute,
+                SCHEMA_LEDGER_OPERATION_CREATE_TABLE,
+            ),
+            (
+                DatabaseOperationKind::Execute,
+                SCHEMA_LEDGER_OPERATION_RELEASE_SAVEPOINT,
+            ),
+        ],
+        component_schema_ledger_physical_validation_shapes(),
+    ]
+    .concat()
+}
+
+fn component_schema_ledger_physical_validation_shapes() -> Vec<ComponentSchemaOperationShape> {
+    vec![
+        (
+            DatabaseOperationKind::FetchAll,
+            SCHEMA_LEDGER_OPERATION_VALIDATE_COLUMNS,
+        ),
+        (
+            DatabaseOperationKind::FetchOne,
+            SCHEMA_LEDGER_OPERATION_VALIDATE_PRIMARY_KEY,
+        ),
+        (
+            DatabaseOperationKind::FetchAll,
+            SCHEMA_LEDGER_OPERATION_VALIDATE_CHECK_CONSTRAINTS,
+        ),
+    ]
+}
+
+fn repeated_component_operation_shape(
+    kind: DatabaseOperationKind,
+    label: &'static str,
+    count: usize,
+) -> Vec<ComponentSchemaOperationShape> {
+    vec![(kind, label); count]
+}
+
+async fn execute_component_test_statement(pool: &sqlx::PgPool, statement: String) {
+    unparameterized_simple_query(AuditedSql::new(statement))
+        .execute(pool)
+        .await
+        .expect("execute component test statement");
+}
+
+async fn insert_component_schema_ledger_row(
+    pool: &WritePool,
+    ledger_table: &PgQualifiedTableName,
+    component: &str,
+    instance_key: &str,
+    version: i32,
+    fingerprint: &str,
+) {
+    let statement = format!(
+        r#"
+        INSERT INTO {} (
+            component,
+            instance_key,
+            schema_version,
+            schema_fingerprint,
+            applied_at
+        )
+        VALUES ($1, $2, $3, $4, statement_timestamp())
+        "#,
+        ledger_table.quoted()
+    );
+    let mut tx = pool
+        .begin_transaction()
+        .await
+        .expect("begin schema ledger seed transaction");
+    portable_query(AuditedSql::new(statement))
+        .bind(component)
+        .bind(instance_key)
+        .bind(version)
+        .bind(fingerprint)
+        .execute(tx.sqlx_transaction().as_mut())
+        .await
+        .expect("insert component schema ledger row");
+    tx.commit()
+        .await
+        .expect("commit schema ledger seed transaction");
+}
+
+async fn fetch_component_schema_ledger_row(
+    pool: &WritePool,
+    ledger_table: &PgQualifiedTableName,
+    component: &str,
+    instance_key: &str,
+) -> Option<(i32, String)> {
+    let statement = format!(
+        r#"
+        SELECT schema_version, schema_fingerprint
+        FROM {}
+        WHERE component = $1
+          AND instance_key = $2
+        "#,
+        ledger_table.quoted()
+    );
+    let mut tx = pool
+        .begin_transaction()
+        .await
+        .expect("begin schema ledger assertion transaction");
+    let row = portable_query_as::<(i32, String)>(AuditedSql::new(statement))
+        .bind(component)
+        .bind(instance_key)
+        .fetch_optional(tx.sqlx_transaction().as_mut())
+        .await
+        .expect("fetch component schema ledger row");
+    tx.rollback()
+        .await
+        .expect("rollback schema ledger assertion transaction");
+    row
+}
+
+async fn fetch_component_table_exists(pool: &WritePool, table_name: &PgQualifiedTableName) -> bool {
+    let schema_name = table_name.schema().map(PgSchemaName::as_str);
+    let mut tx = pool
+        .begin_transaction()
+        .await
+        .expect("begin table assertion transaction");
+    let row = portable_query(
+        r#"
+        SELECT EXISTS (
+            SELECT 1
+            FROM information_schema.tables
+            WHERE table_schema = COALESCE($1, current_schema())
+              AND table_name = $2
+        )
+        "#,
+    )
+    .bind(schema_name)
+    .bind(table_name.table().as_str())
+    .fetch_one(tx.sqlx_transaction().as_mut())
+    .await
+    .expect("fetch table existence");
+
+    let exists = row.try_get(0).expect("decode table existence");
+    tx.rollback()
+        .await
+        .expect("rollback table assertion transaction");
+    exists
+}
+
+async fn assert_component_column_exists(
+    pool: &WritePool,
+    table_name: &PgQualifiedTableName,
+    column_name: &str,
+) {
+    let mut tx = pool
+        .begin_transaction()
+        .await
+        .expect("begin column assertion transaction");
+    assert!(
+        fetch_column_exists_in_current_transaction(&mut tx, table_name, column_name).await,
+        "expected column {column_name:?} to exist on {}",
+        table_name.quoted()
+    );
+    tx.rollback()
+        .await
+        .expect("rollback column assertion transaction");
+}
+
+async fn assert_component_column_missing(
+    pool: &WritePool,
+    table_name: &PgQualifiedTableName,
+    column_name: &str,
+) {
+    let mut tx = pool
+        .begin_transaction()
+        .await
+        .expect("begin column assertion transaction");
+    assert!(
+        !fetch_column_exists_in_current_transaction(&mut tx, table_name, column_name).await,
+        "expected column {column_name:?} to be absent from {}",
+        table_name.quoted()
+    );
+    tx.rollback()
+        .await
+        .expect("rollback column assertion transaction");
+}
+
 fn test_pool_config(database_url: &str) -> PoolConfig {
     PoolConfig::new(SecretString::from(database_url.to_owned()))
+}
+
+async fn connect_write_pool_for_db_test(database_url: &str, application_name: &str) -> WritePool {
+    let mut config = test_pool_config(database_url);
+    config.max_connections = 5;
+    config.application_name = Some(application_name.to_owned());
+    WritePool::connect(config)
+        .await
+        .expect("connect write pool")
+}
+
+fn unique_db_test_schema_name(prefix: &str) -> PgSchemaName {
+    let suffix = UniqueTestId::new()
+        .expect("new unique test id")
+        .to_text()
+        .replace('-', "_");
+    PgSchemaName::from_identifier_text(format!("{prefix}_{suffix}")).expect("test schema name")
+}
+
+async fn drop_test_schema(pool: &sqlx::PgPool, schema_name: &PgSchemaName) {
+    unparameterized_simple_query(AuditedSql::new(format!(
+        "DROP SCHEMA IF EXISTS {} CASCADE",
+        schema_name.identifier().quoted()
+    )))
+    .execute(pool)
+    .await
+    .expect("drop test schema");
+}
+
+async fn fetch_column_exists_in_current_transaction(
+    tx: &mut WriteTx<'_>,
+    table_name: &PgQualifiedTableName,
+    column_name: &str,
+) -> bool {
+    let schema_name = table_name.schema().map(PgSchemaName::as_str);
+    let row = portable_query(
+        r#"
+        SELECT EXISTS (
+            SELECT 1
+            FROM information_schema.columns
+            WHERE table_schema = COALESCE($1, current_schema())
+              AND table_name = $2
+              AND column_name = $3
+        )
+        "#,
+    )
+    .bind(schema_name)
+    .bind(table_name.table().as_str())
+    .bind(column_name)
+    .fetch_one(tx.sqlx_transaction().as_mut())
+    .await
+    .expect("fetch column existence");
+
+    row.try_get(0).expect("decode column existence")
 }

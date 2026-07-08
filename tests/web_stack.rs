@@ -1,7 +1,7 @@
 use std::convert::Infallible;
 use std::future::{Future, Ready, ready};
 use std::sync::Arc;
-use std::task::{Context, Poll, Wake, Waker};
+use std::task::{Context, Poll, Waker};
 
 use cookie::Cookie;
 use http::header::{COOKIE, HOST, ORIGIN, SET_COOKIE};
@@ -41,19 +41,12 @@ impl Service<Request<()>> for AppService {
     }
 }
 
-#[derive(Debug)]
-struct NoopWaker;
-
-impl Wake for NoopWaker {
-    fn wake(self: Arc<Self>) {}
-}
-
 fn block_on_ready<F>(future: F) -> F::Output
 where
     F: Future,
 {
-    let waker = Waker::from(Arc::new(NoopWaker));
-    let mut context = Context::from_waker(&waker);
+    let waker = Waker::noop();
+    let mut context = Context::from_waker(waker);
     let mut future = std::pin::pin!(future);
     match future.as_mut().poll(&mut context) {
         Poll::Ready(output) => output,

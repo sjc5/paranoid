@@ -73,6 +73,11 @@ pub enum Error {
         /// Underlying JSON error.
         source: serde_json::Error,
     },
+    /// Lock options violated heartbeat/staleness safety rules.
+    InvalidOptions {
+        /// Rejected option invariant.
+        reason: &'static str,
+    },
 }
 
 impl std::fmt::Display for Error {
@@ -107,6 +112,9 @@ impl std::fmt::Display for Error {
             Self::Json { operation, source } => {
                 write!(f, "paranoid local-lock: {operation}: {source}")
             }
+            Self::InvalidOptions { reason } => {
+                write!(f, "paranoid local-lock: invalid options: {reason}")
+            }
         }
     }
 }
@@ -122,18 +130,65 @@ impl StdError for Error {
 }
 
 /// Lock-file behavior.
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct ProcessLockOptions {
-    /// Heartbeat write cadence while the lock is held.
-    ///
-    /// Defaults to [`DEFAULT_HEARTBEAT_INTERVAL`].
-    pub heartbeat_interval: Option<Duration>,
-    /// Stale heartbeat threshold before another process may take over.
-    ///
-    /// Defaults to [`DEFAULT_STALE_AFTER`].
-    pub stale_after: Option<Duration>,
-    /// Called after a held lock loses ownership.
-    pub on_lock_lost: Option<Arc<dyn Fn() + Send + Sync + 'static>>,
+    heartbeat_interval: Duration,
+    stale_after: Duration,
+    on_lock_lost: Option<Arc<dyn Fn() + Send + Sync + 'static>>,
+}
+
+impl Default for ProcessLockOptions {
+    fn default() -> Self {
+        Self {
+            heartbeat_interval: DEFAULT_HEARTBEAT_INTERVAL,
+            stale_after: DEFAULT_STALE_AFTER,
+            on_lock_lost: None,
+        }
+    }
+}
+
+impl ProcessLockOptions {
+    /// Returns the configured heartbeat write cadence.
+    pub fn heartbeat_interval(&self) -> Duration {
+        self.heartbeat_interval
+    }
+
+    /// Returns the configured stale-heartbeat threshold.
+    pub fn stale_after(&self) -> Duration {
+        self.stale_after
+    }
+
+    /// Sets the heartbeat write cadence while preserving stale-recovery safety.
+    pub fn with_heartbeat_interval(mut self, heartbeat_interval: Duration) -> Result<Self> {
+        validate_lock_timing(heartbeat_interval, self.stale_after)?;
+        self.heartbeat_interval = heartbeat_interval;
+        Ok(self)
+    }
+
+    /// Sets the stale-heartbeat threshold while preserving stale-recovery safety.
+    pub fn with_stale_after(mut self, stale_after: Duration) -> Result<Self> {
+        validate_lock_timing(self.heartbeat_interval, stale_after)?;
+        self.stale_after = stale_after;
+        Ok(self)
+    }
+
+    /// Sets heartbeat and stale-recovery timing as one validated pair.
+    pub fn with_heartbeat_interval_and_stale_after(
+        mut self,
+        heartbeat_interval: Duration,
+        stale_after: Duration,
+    ) -> Result<Self> {
+        validate_lock_timing(heartbeat_interval, stale_after)?;
+        self.heartbeat_interval = heartbeat_interval;
+        self.stale_after = stale_after;
+        Ok(self)
+    }
+
+    /// Sets a callback called after a held lock loses ownership.
+    pub fn with_on_lock_lost(mut self, on_lock_lost: impl Fn() + Send + Sync + 'static) -> Self {
+        self.on_lock_lost = Some(Arc::new(on_lock_lost));
+        self
+    }
 }
 
 impl std::fmt::Debug for ProcessLockOptions {
@@ -470,12 +525,34 @@ enum TryAcquire {
 
 fn resolve_options(options: ProcessLockOptions) -> ResolvedOptions {
     ResolvedOptions {
-        heartbeat_interval: options
-            .heartbeat_interval
-            .unwrap_or(DEFAULT_HEARTBEAT_INTERVAL),
-        stale_after: options.stale_after.unwrap_or(DEFAULT_STALE_AFTER),
+        heartbeat_interval: options.heartbeat_interval,
+        stale_after: options.stale_after,
         on_lock_lost: options.on_lock_lost,
     }
+}
+
+fn validate_lock_timing(heartbeat_interval: Duration, stale_after: Duration) -> Result<()> {
+    if heartbeat_interval.is_zero() {
+        return Err(Error::InvalidOptions {
+            reason: "heartbeat_interval must be positive",
+        });
+    }
+    if stale_after.is_zero() {
+        return Err(Error::InvalidOptions {
+            reason: "stale_after must be positive",
+        });
+    }
+    let minimum_stale_after = heartbeat_interval
+        .checked_mul(2)
+        .ok_or(Error::InvalidOptions {
+            reason: "heartbeat_interval is too large for safe stale_after calculation",
+        })?;
+    if stale_after < minimum_stale_after {
+        return Err(Error::InvalidOptions {
+            reason: "stale_after must be at least twice heartbeat_interval",
+        });
+    }
+    Ok(())
 }
 
 fn parse_lease_record(raw_data: &[u8]) -> (LeaseRecord, bool) {
@@ -485,12 +562,16 @@ fn parse_lease_record(raw_data: &[u8]) -> (LeaseRecord, bool) {
     let parsed = record.version == LEASE_SCHEMA_VERSION
         && !record.owner_id.trim().is_empty()
         && record.pid > 0
-        && record.last_heartbeat_unix_nano > 0;
+        && record.last_heartbeat_unix_nano > 0
+        && u64::try_from(record.last_heartbeat_unix_nano).is_ok();
     (record, parsed)
 }
 
 fn is_lease_stale(record: &LeaseRecord, threshold: Duration) -> bool {
-    let heartbeat = UNIX_EPOCH + Duration::from_nanos(record.last_heartbeat_unix_nano as u64);
+    let Ok(last_heartbeat_unix_nano) = u64::try_from(record.last_heartbeat_unix_nano) else {
+        return false;
+    };
+    let heartbeat = UNIX_EPOCH + Duration::from_nanos(last_heartbeat_unix_nano);
     heartbeat.elapsed().unwrap_or_default() >= threshold
 }
 
@@ -714,13 +795,13 @@ mod tests {
             last_heartbeat_unix_nano: 1,
         };
         fs::write(&path, encode_lease_record(&record).unwrap()).unwrap();
-        let mut lock = ProcessLock::with_options(
-            &path,
-            ProcessLockOptions {
-                stale_after: Some(Duration::from_millis(1)),
-                ..ProcessLockOptions::default()
-            },
-        );
+        let options = ProcessLockOptions::default()
+            .with_heartbeat_interval_and_stale_after(
+                Duration::from_millis(1),
+                Duration::from_millis(2),
+            )
+            .unwrap();
+        let mut lock = ProcessLock::with_options(&path, options);
 
         lock.acquire().unwrap();
 
@@ -731,13 +812,13 @@ mod tests {
     #[test]
     fn release_does_not_remove_lock_owned_by_replacement() {
         let path = temp_lock_path("replacement");
-        let mut lock = ProcessLock::with_options(
-            &path,
-            ProcessLockOptions {
-                heartbeat_interval: Some(Duration::from_secs(60)),
-                ..ProcessLockOptions::default()
-            },
-        );
+        let options = ProcessLockOptions::default()
+            .with_heartbeat_interval_and_stale_after(
+                Duration::from_secs(60),
+                Duration::from_secs(180),
+            )
+            .unwrap();
+        let mut lock = ProcessLock::with_options(&path, options);
         lock.acquire().unwrap();
         let replacement = LeaseRecord {
             version: LEASE_SCHEMA_VERSION,
@@ -756,16 +837,13 @@ mod tests {
     fn heartbeat_loss_marks_lock_unheld_invokes_callback_and_release_cleans_thread() {
         let path = temp_lock_path("heartbeat-loss");
         let (lost_tx, lost_rx) = mpsc::channel();
-        let mut lock = ProcessLock::with_options(
-            &path,
-            ProcessLockOptions {
-                heartbeat_interval: Some(Duration::from_millis(10)),
-                on_lock_lost: Some(Arc::new(move || {
-                    let _ = lost_tx.send(());
-                })),
-                ..ProcessLockOptions::default()
-            },
-        );
+        let options = ProcessLockOptions::default()
+            .with_heartbeat_interval(Duration::from_millis(10))
+            .unwrap()
+            .with_on_lock_lost(move || {
+                let _ = lost_tx.send(());
+            });
+        let mut lock = ProcessLock::with_options(&path, options);
         lock.acquire().unwrap();
 
         fs::remove_file(&path).unwrap();
@@ -775,6 +853,37 @@ mod tests {
         lock.release().unwrap();
         assert!(lock.heartbeat_stop.is_none());
         assert!(lock.heartbeat_done.is_none());
+    }
+
+    #[test]
+    fn options_reject_heartbeat_free_or_immediately_stale_locks() {
+        assert!(matches!(
+            ProcessLockOptions::default().with_heartbeat_interval(Duration::ZERO),
+            Err(Error::InvalidOptions { .. })
+        ));
+        assert!(matches!(
+            ProcessLockOptions::default().with_stale_after(Duration::ZERO),
+            Err(Error::InvalidOptions { .. })
+        ));
+        assert!(matches!(
+            ProcessLockOptions::default().with_stale_after(DEFAULT_HEARTBEAT_INTERVAL),
+            Err(Error::InvalidOptions { .. })
+        ));
+    }
+
+    #[test]
+    fn unrepresentable_heartbeat_timestamp_is_not_parsed_as_valid_lease() {
+        let record = LeaseRecord {
+            version: LEASE_SCHEMA_VERSION,
+            owner_id: "huge-heartbeat".to_owned(),
+            pid: std::process::id(),
+            last_heartbeat_unix_nano: u128::from(u64::MAX) + 1,
+        };
+        let encoded = encode_lease_record(&record).unwrap();
+
+        let (_record, parsed) = parse_lease_record(&encoded);
+
+        assert!(!parsed);
     }
 
     fn temp_lock_path(name: &str) -> PathBuf {

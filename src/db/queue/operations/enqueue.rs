@@ -56,8 +56,12 @@ where
         .await
         .map_err(DbError::query)?;
 
-    let inserted_count: i64 = row.try_get("inserted_count").map_err(Error::decode_row)?;
-    let outcome: String = row.try_get("insert_outcome").map_err(Error::decode_row)?;
+    let inserted_count: i64 = row
+        .try_get(QueueQueryField::InsertedCount.name())
+        .map_err(Error::decode_row)?;
+    let outcome: String = row
+        .try_get(QueueQueryField::InsertOutcome.name())
+        .map_err(Error::decode_row)?;
     queue_batch_enqueue_results_from_insert_outcome(prepared.jobs, inserted_count, &outcome)
 }
 
@@ -90,8 +94,12 @@ where
         .await
         .map_err(DbError::query)?;
 
-    let inserted_id: Option<Vec<u8>> = row.try_get("inserted_id").map_err(Error::decode_row)?;
-    let outcome: String = row.try_get("insert_outcome").map_err(Error::decode_row)?;
+    let inserted_id: Option<Vec<u8>> = row
+        .try_get(QueueQueryField::InsertedId.name())
+        .map_err(Error::decode_row)?;
+    let outcome: String = row
+        .try_get(QueueQueryField::InsertOutcome.name())
+        .map_err(Error::decode_row)?;
     queue_enqueue_result_from_insert_outcome("enqueue", inserted_id, &outcome)
 }
 
@@ -123,9 +131,15 @@ pub(in crate::db::queue) async fn execute_dedupe_enqueue_in_current_transaction(
             .await
             .map_err(DbError::query)?;
 
-        let inserted_id: Option<Vec<u8>> = row.try_get("inserted_id").map_err(Error::decode_row)?;
-        let existing_id: Option<Vec<u8>> = row.try_get("existing_id").map_err(Error::decode_row)?;
-        let outcome: String = row.try_get("insert_outcome").map_err(Error::decode_row)?;
+        let inserted_id: Option<Vec<u8>> = row
+            .try_get(QueueQueryField::InsertedId.name())
+            .map_err(Error::decode_row)?;
+        let existing_id: Option<Vec<u8>> = row
+            .try_get(QueueQueryField::ExistingId.name())
+            .map_err(Error::decode_row)?;
+        let outcome: String = row
+            .try_get(QueueQueryField::InsertOutcome.name())
+            .map_err(Error::decode_row)?;
         match queue_dedupe_enqueue_result_from_insert_outcome(
             "dedupe enqueue",
             inserted_id,

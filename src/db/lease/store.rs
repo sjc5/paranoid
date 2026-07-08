@@ -2,11 +2,11 @@ use super::*;
 
 /// Schema configuration for the Postgres-backed lease primitive.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct StoreConfig {
+pub(crate) struct StoreConfig {
     /// Backing table for lease rows.
-    pub table_name: PgQualifiedTableName,
+    pub(crate) table_name: PgQualifiedTableName,
     /// Backing table for durable per-key fencing counters.
-    pub fencing_counter_table_name: PgQualifiedTableName,
+    pub(crate) fencing_counter_table_name: PgQualifiedTableName,
 }
 
 /// Postgres-backed lease store bound to one configured table.
@@ -16,22 +16,24 @@ pub struct Store {
     pub(super) queries: Queries,
 }
 
+#[cfg(test)]
 impl Default for StoreConfig {
     fn default() -> Self {
         Self {
-            table_name: PgQualifiedTableName::unqualified(DEFAULT_LEASE_TABLE_NAME)
-                .expect("default lease table name must be a valid Postgres identifier"),
+            table_name: PgQualifiedTableName::unqualified(TEST_LEASE_TABLE_NAME)
+                .expect("test lease table name must be a valid Postgres identifier"),
             fencing_counter_table_name: PgQualifiedTableName::unqualified(
-                DEFAULT_LEASE_FENCING_COUNTER_TABLE_NAME,
+                TEST_LEASE_FENCING_COUNTER_TABLE_NAME,
             )
-            .expect("default lease fencing counter table name must be a valid Postgres identifier"),
+            .expect("test lease fencing counter table name must be a valid Postgres identifier"),
         }
     }
 }
 
 impl StoreConfig {
     /// Creates a lease store config for a validated table name.
-    pub fn new(table_name: PgQualifiedTableName) -> Self {
+    #[cfg(test)]
+    pub(crate) fn new(table_name: PgQualifiedTableName) -> Self {
         let fencing_counter_table_name = derive_fencing_counter_table_name(&table_name);
         Self {
             table_name,
@@ -40,7 +42,7 @@ impl StoreConfig {
     }
 
     /// Creates a lease store config with explicit validated table names.
-    pub fn new_with_explicit_fencing_counter_table(
+    pub(crate) fn new_with_explicit_fencing_counter_table(
         table_name: PgQualifiedTableName,
         fencing_counter_table_name: PgQualifiedTableName,
     ) -> Self {
@@ -53,36 +55,28 @@ impl StoreConfig {
 
 impl Store {
     /// Creates a lease store handle with precomputed SQL for the configured table.
-    pub fn new(config: StoreConfig) -> Self {
+    pub(crate) fn new(config: StoreConfig) -> Self {
         let queries = Queries::new(&config);
         Self { config, queries }
     }
 
-    /// Returns this store's config.
-    pub fn config(&self) -> &StoreConfig {
-        &self.config
-    }
-
     /// Creates and validates this store's schema inside one transaction.
-    pub async fn migrate_schema(&self, pool: &WritePool) -> Result<(), DbError> {
+    #[cfg(test)]
+    pub(crate) async fn migrate_schema(&self, pool: &WritePool) -> Result<(), DbError> {
         migrate_schema(pool, &self.config).await
     }
 
     /// Runs schema migration inside the caller's active transaction.
-    pub async fn migrate_schema_in_current_transaction(
+    #[cfg(test)]
+    pub(crate) async fn migrate_schema_in_current_transaction(
         &self,
         tx: &mut WriteTx<'_>,
     ) -> Result<(), DbError> {
         migrate_schema_in_current_transaction(tx, &self.config).await
     }
 
-    /// Validates that this store's schema already exists and is compatible.
-    pub async fn validate_schema(&self, pool: &Pool) -> Result<(), DbError> {
-        validate_schema(pool, &self.config).await
-    }
-
     /// Validates schema inside the caller's active transaction.
-    pub async fn validate_schema_in_current_transaction(
+    pub(crate) async fn validate_schema_in_current_transaction(
         &self,
         tx: &mut Tx<'_>,
     ) -> Result<(), DbError> {

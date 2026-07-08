@@ -354,3 +354,420 @@ fn public_random_error_exposes_getrandom_source() {
         getrandom::Error::UNSUPPORTED.to_string()
     );
 }
+
+fn counting_fill(counter: &mut u8) -> impl FnMut(&mut [u8]) -> Result<(), Error> + '_ {
+    move |bytes: &mut [u8]| {
+        for byte in bytes.iter_mut() {
+            *byte = *counter;
+            *counter = counter.wrapping_add(1);
+        }
+        Ok(())
+    }
+}
+
+#[test]
+fn object_record_seals_opens_and_reports_exact_overhead() {
+    let key = test_key(3);
+    for plaintext in [&b""[..], &b"x"[..], &[0xab_u8; 100_000][..]] {
+        let mut counter = 0_u8;
+        let record = seal_object_record(
+            &key,
+            7,
+            0x01,
+            b"suffix",
+            plaintext,
+            counting_fill(&mut counter),
+        )
+        .expect("seal");
+        assert_eq!(record.len(), plaintext.len() + OBJECT_RECORD_OVERHEAD);
+
+        let header = parse_object_record_header(&record).expect("header");
+        assert_eq!(header.version(), OBJECT_RECORD_VERSION);
+        assert_eq!(header.key_generation(), 7);
+
+        let opened = open_object_record(&key, &record, 0x01, b"suffix").expect("open");
+        assert_eq!(opened.as_slice(), plaintext);
+    }
+}
+
+#[test]
+fn object_record_is_deterministic_given_fill_and_varies_with_nonce() {
+    let key = test_key(4);
+    let mut counter_a = 0_u8;
+    let mut counter_b = 0_u8;
+    let record_a = seal_object_record(
+        &key,
+        0,
+        0x02,
+        b"s",
+        b"payload",
+        counting_fill(&mut counter_a),
+    )
+    .expect("seal a");
+    let record_b = seal_object_record(
+        &key,
+        0,
+        0x02,
+        b"s",
+        b"payload",
+        counting_fill(&mut counter_b),
+    )
+    .expect("seal b");
+    assert_eq!(record_a, record_b);
+
+    let mut counter_c = 100_u8;
+    let record_c = seal_object_record(
+        &key,
+        0,
+        0x02,
+        b"s",
+        b"payload",
+        counting_fill(&mut counter_c),
+    )
+    .expect("seal c");
+    assert_ne!(record_a, record_c);
+}
+
+#[test]
+fn object_record_rejects_every_tampered_region_and_mismatched_inputs() {
+    let key = test_key(5);
+    let mut counter = 0_u8;
+    let record = seal_object_record(
+        &key,
+        9,
+        0x01,
+        b"addr+domain",
+        b"object bytes",
+        counting_fill(&mut counter),
+    )
+    .expect("seal");
+
+    for index in [1_usize, 5, 20, 30, record.len() - 1] {
+        let mut tampered = record.clone();
+        tampered[index] ^= 0x01;
+        assert!(
+            open_object_record(&key, &tampered, 0x01, b"addr+domain").is_err(),
+            "tampered byte {index} must fail"
+        );
+    }
+
+    let mut wrong_version = record.clone();
+    wrong_version[0] = 2;
+    assert!(matches!(
+        parse_object_record_header(&wrong_version),
+        Err(Error::UnsupportedObjectRecordVersion { version: 2 })
+    ));
+    assert!(open_object_record(&key, &wrong_version, 0x01, b"addr+domain").is_err());
+
+    assert!(open_object_record(&key, &record, 0x02, b"addr+domain").is_err());
+    assert!(open_object_record(&key, &record, 0x01, b"addr+domain!").is_err());
+    assert!(open_object_record(&test_key(6), &record, 0x01, b"addr+domain").is_err());
+}
+
+#[test]
+fn object_record_enforces_length_bounds_before_decryption() {
+    assert!(matches!(
+        parse_object_record_header(&[1_u8; OBJECT_RECORD_OVERHEAD - 1]),
+        Err(Error::ObjectRecordTooShort { .. })
+    ));
+    let oversized = vec![1_u8; MAX_OBJECT_RECORD_SIZE + 1];
+    assert!(matches!(
+        parse_object_record_header(&oversized),
+        Err(Error::ObjectRecordTooLarge { .. })
+    ));
+
+    let key = test_key(7);
+    let too_large_plaintext = vec![0_u8; MAX_OBJECT_RECORD_PLAINTEXT_SIZE + 1];
+    let mut counter = 0_u8;
+    assert!(matches!(
+        seal_object_record(
+            &key,
+            0,
+            0x01,
+            b"",
+            &too_large_plaintext,
+            counting_fill(&mut counter)
+        ),
+        Err(Error::PlaintextTooLarge { .. })
+    ));
+}
+
+#[test]
+fn object_record_propagates_injected_random_failure() {
+    let key = test_key(8);
+    let result = seal_object_record(&key, 0, 0x01, b"", b"payload", |_| {
+        Err(Error::InjectedRandomFillFailed)
+    });
+    assert!(matches!(result, Err(Error::InjectedRandomFillFailed)));
+}
+
+#[test]
+fn pad_bucket_len_matches_spec_rule() {
+    for (input, expected) in [
+        (0_usize, 512_usize),
+        (1, 512),
+        (511, 512),
+        (512, 512),
+        (513, 1024),
+        (65_536, 65_536),
+        (65_537, 131_072),
+        (
+            MAX_OBJECT_RECORD_PLAINTEXT_SIZE,
+            MAX_OBJECT_RECORD_PLAINTEXT_SIZE,
+        ),
+    ] {
+        assert_eq!(
+            pad_bucket_len(input).expect("bucket"),
+            expected,
+            "input {input}"
+        );
+    }
+    assert!(matches!(
+        pad_bucket_len(MAX_OBJECT_RECORD_PLAINTEXT_SIZE + 1),
+        Err(Error::PlaintextTooLarge { .. })
+    ));
+}
+
+#[test]
+fn blake3_keyed_hash_xof_prefix_matches_fixed_output_and_stream_does_not_repeat() {
+    let key = test_key(9);
+    let fixed = blake3_keyed_hash32(&key, b"gear table input");
+
+    let mut xof = [0_u8; 2048];
+    blake3_keyed_hash_xof_into(&key, b"gear table input", &mut xof);
+    assert_eq!(&xof[..32], &fixed);
+    assert_ne!(&xof[32..64], &xof[..32]);
+
+    let mut xof_again = [0_u8; 2048];
+    blake3_keyed_hash_xof_into(&key, b"gear table input", &mut xof_again);
+    assert_eq!(xof, xof_again);
+}
+
+#[test]
+fn derive_blake3_key32_is_deterministic_and_context_separated() {
+    let material = test_key(10);
+    let key_a = derive_blake3_key32("paranoid.test.context.a", &material);
+    let key_b = derive_blake3_key32("paranoid.test.context.a", &material);
+    let key_c = derive_blake3_key32("paranoid.test.context.b", &material);
+    assert_eq!(key_a, key_b);
+    assert_ne!(key_a, key_c);
+    assert_ne!(key_a.expose_secret(), material.expose_secret());
+}
+
+#[test]
+fn envelope_encrypt_with_random_fill_roundtrips_and_propagates_failure() {
+    let keyset =
+        derive_keyset_from_latest_first_keys([test_key(11)], "test-envelope-fill").expect("keyset");
+    let plaintext: SecretBytes = SecretBytes::from_slice(b"sans-io payload").expect("plaintext");
+
+    let mut counter = 0_u8;
+    let encrypted =
+        encrypt_with_random_fill(&keyset, &plaintext, b"ctx", counting_fill(&mut counter))
+            .expect("encrypt");
+    let decrypted: SecretBytes = decrypt(&keyset, &encrypted, b"ctx").expect("decrypt");
+    assert_eq!(decrypted.expose_secret(), b"sans-io payload");
+
+    let failed = encrypt_with_random_fill(&keyset, &plaintext, b"ctx", |_| {
+        Err(Error::InjectedRandomFillFailed)
+    });
+    assert!(matches!(failed, Err(Error::InjectedRandomFillFailed)));
+}
+
+#[test]
+fn password_sealed_key32_roundtrips_and_rejects_wrong_password_and_tampering() {
+    let key = test_key(12);
+    let password: SecretBytes = SecretBytes::from_slice(b"correct horse").expect("password");
+    let params = PasswordKdfParams::new_for_tests(19 * 1024, 2, 1);
+
+    let mut counter = 0_u8;
+    let record = seal_key32_with_password(&key, &password, params, counting_fill(&mut counter))
+        .expect("seal");
+    assert_eq!(record.len(), PASSWORD_SEALED_KEY32_RECORD_SIZE);
+    assert_eq!(record[0], PASSWORD_SEALED_KEY32_VERSION);
+
+    let opened = open_key32_with_password(&record, &password).expect("open");
+    assert_eq!(opened, key);
+    assert_eq!(
+        read_password_sealed_key32_params(&record).expect("params"),
+        params
+    );
+
+    let wrong: SecretBytes = SecretBytes::from_slice(b"incorrect horse").expect("password");
+    assert!(matches!(
+        open_key32_with_password(&record, &wrong),
+        Err(Error::DecryptionFailed)
+    ));
+
+    for index in [1_usize, 40, 50, record.len() - 1] {
+        let mut tampered = record.clone();
+        tampered[index] ^= 0x01;
+        assert!(
+            open_key32_with_password(&tampered, &password).is_err(),
+            "tampered byte {index} must fail"
+        );
+    }
+
+    let mut wrong_version = record.clone();
+    wrong_version[0] = 2;
+    assert!(matches!(
+        open_key32_with_password(&wrong_version, &password),
+        Err(Error::UnsupportedPasswordSealedKeyVersion { version: 2 })
+    ));
+
+    assert!(matches!(
+        open_key32_with_password(&record[..record.len() - 1], &password),
+        Err(Error::InvalidPasswordSealedKeyLength { .. })
+    ));
+}
+
+#[test]
+fn password_sealed_key32_rejects_out_of_range_params_before_kdf_work() {
+    let key = test_key(13);
+    let password: SecretBytes = SecretBytes::from_slice(b"pw").expect("password");
+    let params = PasswordKdfParams::new_for_tests(19 * 1024, 2, 1);
+    let mut counter = 0_u8;
+    let mut record = seal_key32_with_password(&key, &password, params, counting_fill(&mut counter))
+        .expect("seal");
+
+    // Forge an absurd memory cost: rejected as out-of-range before any KDF
+    // pass (this test would take effectively forever if the KDF ran).
+    record[33..37].copy_from_slice(&u32::MAX.to_le_bytes());
+    assert!(matches!(
+        open_key32_with_password(&record, &password),
+        Err(Error::PasswordSealedKeyParamsOutOfRange)
+    ));
+    assert!(matches!(
+        read_password_sealed_key32_params(&record),
+        Err(Error::PasswordSealedKeyParamsOutOfRange)
+    ));
+}
+
+#[test]
+fn password_sealed_key32_caller_salt_roundtrips_and_rejects_wrong_password_wrong_salt_and_tampering()
+ {
+    let key = test_key(20);
+    let password: SecretBytes = SecretBytes::from_slice(b"correct horse").expect("password");
+    let caller_salt = test_key(21);
+    let params = PasswordKdfParams::new_for_tests(19 * 1024, 2, 1);
+
+    let mut counter = 0_u8;
+    let record = seal_key32_with_password_and_caller_salt(
+        &key,
+        &password,
+        &caller_salt,
+        params,
+        counting_fill(&mut counter),
+    )
+    .expect("seal");
+    assert_eq!(record.len(), PASSWORD_SEALED_KEY32_CALLER_SALT_RECORD_SIZE);
+    assert_eq!(record[0], PASSWORD_SEALED_KEY32_CALLER_SALT_VERSION);
+
+    let opened =
+        open_key32_with_password_and_caller_salt(&record, &password, &caller_salt).expect("open");
+    assert_eq!(opened, key);
+    assert_eq!(
+        read_password_sealed_key32_caller_salt_params(&record).expect("params"),
+        params
+    );
+
+    let wrong_password: SecretBytes = SecretBytes::from_slice(b"incorrect horse").expect("wrong");
+    assert!(matches!(
+        open_key32_with_password_and_caller_salt(&record, &wrong_password, &caller_salt),
+        Err(Error::DecryptionFailed)
+    ));
+
+    let wrong_salt = test_key(22);
+    assert!(matches!(
+        open_key32_with_password_and_caller_salt(&record, &password, &wrong_salt),
+        Err(Error::DecryptionFailed)
+    ));
+
+    for index in [1_usize, 13, 20, record.len() - 1] {
+        let mut tampered = record.clone();
+        tampered[index] ^= 0x01;
+        assert!(
+            open_key32_with_password_and_caller_salt(&tampered, &password, &caller_salt).is_err(),
+            "tampered byte {index} must fail"
+        );
+    }
+
+    let mut wrong_version = record.clone();
+    wrong_version[0] = 3;
+    assert!(matches!(
+        open_key32_with_password_and_caller_salt(&wrong_version, &password, &caller_salt),
+        Err(Error::UnsupportedPasswordSealedKeyVersion { version: 3 })
+    ));
+
+    assert!(matches!(
+        open_key32_with_password_and_caller_salt(
+            &record[..record.len() - 1],
+            &password,
+            &caller_salt
+        ),
+        Err(Error::InvalidPasswordSealedKeyLength { .. })
+    ));
+}
+
+#[test]
+fn password_sealed_key32_caller_salt_rejects_out_of_range_params_before_kdf_work() {
+    let key = test_key(23);
+    let password: SecretBytes = SecretBytes::from_slice(b"pw").expect("password");
+    let caller_salt = test_key(24);
+    let params = PasswordKdfParams::new_for_tests(19 * 1024, 2, 1);
+    let mut counter = 0_u8;
+    let mut record = seal_key32_with_password_and_caller_salt(
+        &key,
+        &password,
+        &caller_salt,
+        params,
+        counting_fill(&mut counter),
+    )
+    .expect("seal");
+
+    // Forge an absurd memory cost: rejected as out-of-range before any KDF
+    // pass (this test would take effectively forever if the KDF ran).
+    record[1..5].copy_from_slice(&u32::MAX.to_le_bytes());
+    assert!(matches!(
+        open_key32_with_password_and_caller_salt(&record, &password, &caller_salt),
+        Err(Error::PasswordSealedKeyParamsOutOfRange)
+    ));
+    assert!(matches!(
+        read_password_sealed_key32_caller_salt_params(&record),
+        Err(Error::PasswordSealedKeyParamsOutOfRange)
+    ));
+}
+
+#[test]
+fn password_sealed_key32_stored_and_caller_salt_shapes_are_mutually_exclusive() {
+    let key = test_key(25);
+    let password: SecretBytes = SecretBytes::from_slice(b"shared password").expect("password");
+    let caller_salt = test_key(26);
+    let params = PasswordKdfParams::new_for_tests(19 * 1024, 2, 1);
+
+    let mut counter_a = 0_u8;
+    let stored_salt_record =
+        seal_key32_with_password(&key, &password, params, counting_fill(&mut counter_a))
+            .expect("seal stored-salt");
+
+    let mut counter_b = 0_u8;
+    let caller_salt_record = seal_key32_with_password_and_caller_salt(
+        &key,
+        &password,
+        &caller_salt,
+        params,
+        counting_fill(&mut counter_b),
+    )
+    .expect("seal caller-salt");
+
+    assert_ne!(stored_salt_record.len(), caller_salt_record.len());
+    assert_ne!(stored_salt_record[0], caller_salt_record[0]);
+
+    assert!(matches!(
+        open_key32_with_password_and_caller_salt(&stored_salt_record, &password, &caller_salt),
+        Err(Error::InvalidPasswordSealedKeyLength { .. })
+    ));
+    assert!(matches!(
+        open_key32_with_password(&caller_salt_record, &password),
+        Err(Error::InvalidPasswordSealedKeyLength { .. })
+    ));
+}

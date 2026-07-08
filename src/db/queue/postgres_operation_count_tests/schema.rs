@@ -2,7 +2,7 @@ use super::*;
 
 #[tokio::test]
 async fn queue_schema_setup_and_validation_emit_expected_database_operation_shapes() {
-    let database_url = test_database_url();
+    let database_url = standard_test_database_url();
 
     let sqlx_pool = connect_sqlx_pool(&database_url).await;
     let config = unique_test_config();
@@ -19,6 +19,18 @@ async fn queue_schema_setup_and_validation_emit_expected_database_operation_shap
     assert_eq!(
         operation_shapes_from_observer(&observer),
         transaction_operation_shapes(queue_migrate_schema_in_current_transaction_shapes())
+    );
+    observer.clear();
+
+    queue
+        .migrate_schema(&observed_pool)
+        .await
+        .expect("migrate already-current Queue schema");
+    assert_eq!(
+        operation_shapes_from_observer(&observer),
+        transaction_operation_shapes(
+            queue_migrate_already_current_schema_in_current_transaction_shapes()
+        )
     );
     observer.clear();
 
@@ -44,7 +56,7 @@ async fn queue_schema_setup_and_validation_emit_expected_database_operation_shap
 
 #[tokio::test]
 async fn queue_schema_migration_rolls_back_when_existing_schema_is_incompatible() {
-    let database_url = test_database_url();
+    let database_url = standard_test_database_url();
 
     let sqlx_pool = connect_sqlx_pool(&database_url).await;
     let config = unique_test_config();

@@ -42,12 +42,24 @@ spec should win. Do not rely on old audit notes, migration notes, stale brainsto
 docs, or assumptions from application code. The goal is to understand the invariant, the
 public API promise, and the existing verification story before editing.
 
+## Maintainer Tooling Should Be As Simple and Minimal As Possible
+
+Do not add unnecessary garbage like "help" args to maintainer-facing tooling. All
+maintainer-facing tooling (scripts, xtasks, makefiles, etc.) should be as simple and
+minimal as possible. There should be no extra or speculative surface area, period.
+
 ## Postgres Only / Connection Pooler Safe
 
 All packages shall be designed for use with Postgres only and shall be safe for use with
 connection poolers in transaction mode (or equivalent). It is prohibited to use advisory
-locks, LISTEN/NOTIFY or any other Postgres features that require maintaining session-level
-state across multiple transactions.
+locks, LISTEN/NOTIFY, or any other Postgres features that require maintaining
+session-level state across multiple transactions, subject to the following sole exception:
+
+The only advisory-lock exception is Paranoid-owned schema bootstrap before Paranoid's own
+coordination tables exist. That path may use one transaction-scoped
+`pg_advisory_xact_lock` to serialize creation/migration of Paranoid subsystem tables. It
+must not use session-scoped advisory locks, must not be exposed as a general coordination
+primitive, and must not appear in runtime paths after bootstrap.
 
 ## SQLx Is The Blessed Postgres Substrate
 
@@ -108,7 +120,7 @@ be CELEBRATING when that happens.
 ## Tests Must Never "Skip" When A Resource Is Missing
 
 It is strictly prohibited to skip tests, ever. If something a test needs to run is missing
-(e.g., a live Docker container or whatever), then the test must instantly and loudly fail.
+(such as a running container or whatever), then the test must instantly and loudly fail.
 Zero exceptions. We cannot risk ever having only a subset of tests run; it would
 dangerously lead to false confidence from a suite that didn't even run fully. Printing a
 warning is NOT sufficient. The tests must fail. Similarly, the repo's full gate
@@ -256,3 +268,11 @@ Unless there's an actual conflict with a file or directory on disk, it's just cr
 - Never, ever commit machine-specific absolute paths (for example, `/Users/...`) into
   repository files.
 - Use repository-root-relative paths in docs and instructions.
+
+## When To Run Tests/Gates/Checks
+
+Use common sense around when to run tests/gates/checks. Do NOT run expensive
+tests/gates/checks between every micro-change; that just wastes both of our time and makes
+things take exponentially longer than they need to. Conversely, do not report a feature or
+inititiative as complete/done unless you have ran ALL appropriate tests/gates/checks that
+may be impacted by such change.

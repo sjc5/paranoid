@@ -21,8 +21,7 @@ fn run() -> Result<i32, String> {
     let mut args = env::args_os();
     let _binary_name = args.next();
     let Some(command) = args.next() else {
-        print_usage();
-        return Ok(1);
+        return Err("xtask command is required".to_owned());
     };
 
     match command.to_str() {
@@ -33,10 +32,6 @@ fn run() -> Result<i32, String> {
         }
         Some("gate") => gate::run_from_args(args),
         Some("with-isolated-test-db") => isolated_test_db::run_from_args(args.collect()),
-        Some("--help" | "-h") => {
-            print_usage();
-            Ok(0)
-        }
         Some(other) => Err(format!("unknown xtask command {other:?}")),
         None => Err("xtask command must be valid UTF-8".to_owned()),
     }
@@ -49,12 +44,4 @@ fn utf8_args_for_command(command: &str, args: Vec<OsString>) -> Result<Vec<Strin
                 .map_err(|_| format!("{command} arguments must be valid UTF-8"))
         })
         .collect()
-}
-
-fn print_usage() {
-    eprintln!("usage: cargo run --manifest-path xtask/Cargo.toml -- <command> [args...]");
-    eprintln!("commands:");
-    eprintln!("  fuzz-gate [--target <cargo-fuzz-target>]... [--runs <positive-int>]");
-    eprintln!("  gate [--runs <positive-int>] [--log-dir <path>]");
-    eprintln!("  with-isolated-test-db -- <command...>");
 }

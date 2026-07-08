@@ -331,27 +331,10 @@ pub(super) fn duration_to_rounded_microseconds(duration: Duration) -> Result<i64
     Ok(microseconds as i64)
 }
 
+#[cfg(test)]
 pub(super) fn migration_index_identifier(
     config: &StoreConfig,
     suffix: &'static str,
 ) -> super::super::PgIdentifier {
-    let object_name =
-        migration_object_name(INDEX_KIND, &config.table_name.quoted().to_string(), suffix);
-    super::super::PgIdentifier::new(object_name)
-        .expect("generated migration index name must be valid")
-}
-
-pub(super) fn migration_object_name(kind: &str, table_name: &str, suffix: &str) -> String {
-    let hash_input = [kind, table_name, suffix].join("\0");
-    let hash = blake3::hash(hash_input.as_bytes());
-    format!(
-        "{}_{}_{}",
-        kind,
-        suffix,
-        first_8_bytes_as_hex(hash.as_bytes())
-    )
-}
-
-pub(super) fn first_8_bytes_as_hex(bytes: &[u8; 32]) -> String {
-    crate::db::first_8_bytes_as_lower_hex(bytes)
+    KvCatalog::new(config).migration_index_identifier_for_suffix(suffix)
 }

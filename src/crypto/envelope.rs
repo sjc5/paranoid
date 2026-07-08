@@ -11,7 +11,7 @@ use crate::crypto::{
     AES_256_GCM_SIV_NONCE_SIZE, AES_256_GCM_SIV_TAG_SIZE, KEY_SIZE, Key32, SecretBytes,
     XCHACHA20_POLY1305_NONCE_SIZE, XCHACHA20_POLY1305_TAG_SIZE, decrypt_aes_256_gcm_siv,
     decrypt_xchacha20_poly1305, derive_blake3_key, encrypt_aes_256_gcm_siv,
-    encrypt_xchacha20_poly1305, random_array,
+    encrypt_xchacha20_poly1305,
 };
 
 /// Maximum plaintext size accepted by purpose-bound encryption.
@@ -204,6 +204,31 @@ where
     encrypt_plaintext_bytes_as(keyset, plaintext.expose_secret(), context)
 }
 
+/// Encrypts a serializable value with the latest key in `keyset`, drawing every
+/// random value (padding fill, both salts, both nonces) from `fill_random`.
+///
+/// This is the sans-IO entry point: consumers that must not touch an ambient
+/// random source inject their shell's source instead. `fill_random` must fill its
+/// argument with cryptographically secure random bytes and may report failure
+/// with [`Error::InjectedRandomFillFailed`].
+pub fn encrypt_with_random_fill<T>(
+    keyset: &Keyset,
+    plaintext: &T,
+    context: &[u8],
+    fill_random: impl FnMut(&mut [u8]) -> Result<(), Error>,
+) -> Result<Encrypted<T>, Error>
+where
+    T: Plaintext,
+{
+    let plaintext = plaintext.to_plaintext_bytes()?;
+    encrypt_with_key_associated_data_and_fill(
+        plaintext.expose_secret(),
+        context,
+        keyset.latest_key(),
+        fill_random,
+    )
+}
+
 /// Decrypts encrypted bytes with the first matching key in `keyset`.
 pub fn decrypt<T>(keyset: &Keyset, encrypted: &Encrypted<T>, context: &[u8]) -> Result<T, Error>
 where
@@ -219,6 +244,20 @@ pub(crate) fn encrypt_plaintext_bytes_as<T>(
     context: &[u8],
 ) -> Result<Encrypted<T>, Error> {
     encrypt_with_key_and_associated_data(plaintext, context, keyset.latest_key())
+}
+
+/// Encrypts raw plaintext bytes under the latest key in `keyset` as a typed envelope.
+///
+/// Unstable component-authoring surface for component harnesses. No stability promise. Prefer the typed [`encrypt`] API when the
+/// plaintext implements [`Plaintext`]; this entry point exists for components that already
+/// hold canonical secret bytes and a component-owned envelope marker type.
+#[cfg(feature = "component-authoring")]
+pub fn encrypt_plaintext_bytes_as_for_component_authoring<T>(
+    keyset: &Keyset,
+    plaintext: &[u8],
+    context: &[u8],
+) -> Result<Encrypted<T>, Error> {
+    encrypt_plaintext_bytes_as(keyset, plaintext, context)
 }
 
 pub(crate) fn decrypt_bytes_with_associated_data(
@@ -239,6 +278,20 @@ pub(crate) fn decrypt_bytes_with_associated_data(
     }
 
     decrypted.ok_or(Error::DecryptionFailed)
+}
+
+/// Decrypts raw envelope bytes with the first matching key in `keyset`.
+///
+/// Unstable component-authoring surface for component harnesses. No stability promise. Prefer the typed [`decrypt`] API when the
+/// plaintext implements [`Plaintext`]; this entry point exists for components that store
+/// opaque envelope bytes and re-materialize component-owned secret types after decrypt.
+#[cfg(feature = "component-authoring")]
+pub fn decrypt_bytes_with_associated_data_for_component_authoring(
+    keyset: &Keyset,
+    envelope: &[u8],
+    associated_data: &[u8],
+) -> Result<SecretBytes, Error> {
+    decrypt_bytes_with_associated_data(keyset, envelope, associated_data)
 }
 
 #[cfg(test)]
@@ -301,18 +354,34 @@ fn encrypt_with_key_and_associated_data<T>(
     associated_data: &[u8],
     key: &ParanoidKey,
 ) -> Result<Encrypted<T>, Error> {
+    encrypt_with_key_associated_data_and_fill(plaintext, associated_data, key, |bytes| {
+        crate::crypto::fill_random(bytes).map_err(Error::from)
+    })
+}
+
+fn encrypt_with_key_associated_data_and_fill<T>(
+    plaintext: &[u8],
+    associated_data: &[u8],
+    key: &ParanoidKey,
+    mut fill_random: impl FnMut(&mut [u8]) -> Result<(), Error>,
+) -> Result<Encrypted<T>, Error> {
     let padded_payload_len = padded_payload_len_for_plaintext_len(plaintext.len())?;
 
-    let mut padded_payload: SecretBytes = SecretBytes::random(padded_payload_len)?;
+    let mut padded_payload: SecretBytes = SecretBytes::new_zeroed(padded_payload_len)?;
+    fill_random(padded_payload.expose_secret_mut())?;
     padded_payload.expose_secret_mut()[..TRUE_LENGTH_SIZE]
         .copy_from_slice(&(plaintext.len() as u64).to_le_bytes());
     padded_payload.expose_secret_mut()[TRUE_LENGTH_SIZE..TRUE_LENGTH_SIZE + plaintext.len()]
         .copy_from_slice(plaintext);
 
-    let hkdf_salt = random_array::<SALT_SIZE>()?;
-    let blake3_salt = random_array::<SALT_SIZE>()?;
-    let xchacha_nonce = random_array::<XCHACHA20_POLY1305_NONCE_SIZE>()?;
-    let aes_gcm_siv_nonce = random_array::<AES_256_GCM_SIV_NONCE_SIZE>()?;
+    let mut hkdf_salt = [0_u8; SALT_SIZE];
+    fill_random(&mut hkdf_salt)?;
+    let mut blake3_salt = [0_u8; SALT_SIZE];
+    fill_random(&mut blake3_salt)?;
+    let mut xchacha_nonce = [0_u8; XCHACHA20_POLY1305_NONCE_SIZE];
+    fill_random(&mut xchacha_nonce)?;
+    let mut aes_gcm_siv_nonce = [0_u8; AES_256_GCM_SIV_NONCE_SIZE];
+    fill_random(&mut aes_gcm_siv_nonce)?;
     let header = build_header(&hkdf_salt, &blake3_salt, &xchacha_nonce, &aes_gcm_siv_nonce);
     let associated_data_for_layers = build_layer_associated_data(&header, associated_data)?;
 
