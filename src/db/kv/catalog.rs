@@ -129,7 +129,7 @@ impl KvCatalog {
 
     pub(super) fn key_length_check_sql(&self) -> String {
         format!(
-            "octet_length({}) > 0 AND octet_length({}) <= {}",
+            "pg_catalog.octet_length({}) > 0 AND pg_catalog.octet_length({}) <= {}",
             KvColumn::Key.sql_identifier(),
             KvColumn::Key.sql_identifier(),
             MAX_KV_KEY_BYTES

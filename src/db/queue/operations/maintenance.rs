@@ -165,32 +165,38 @@ async fn cleanup_target_older_than_until_empty(
         }
 
         let mut tx = pool.begin_transaction().await.map_err(Error::from)?;
-        let database_operation_observer = tx.database_operation_observer().cloned();
-        let (operation, deleted) = match target {
-            CleanupTarget::Jobs(status) => (
-                "cleanup jobs until empty batch",
-                cleanup_jobs_older_than_once(
-                    tx.inner.as_mut(),
-                    database_operation_observer.as_ref(),
-                    sql_catalog,
-                    status,
-                    older_than,
-                    batch_size,
-                )
-                .await,
-            ),
-            CleanupTarget::DeadLetterJobs => (
-                "cleanup dead letter jobs until empty batch",
-                cleanup_available_dead_letter_jobs_older_than_once(
-                    tx.inner.as_mut(),
-                    database_operation_observer.as_ref(),
-                    sql_catalog,
-                    older_than,
-                    batch_size,
-                )
-                .await,
-            ),
+        let operation = match target {
+            CleanupTarget::Jobs(_) => "cleanup jobs until empty batch",
+            CleanupTarget::DeadLetterJobs => "cleanup dead letter jobs until empty batch",
         };
+        let deleted = async {
+            sql_catalog.config().protocol.admit(&mut tx).await?;
+            let database_operation_observer = tx.database_operation_observer().cloned();
+            match target {
+                CleanupTarget::Jobs(status) => {
+                    cleanup_jobs_older_than_once(
+                        tx.inner.as_mut(),
+                        database_operation_observer.as_ref(),
+                        sql_catalog,
+                        status,
+                        older_than,
+                        batch_size,
+                    )
+                    .await
+                }
+                CleanupTarget::DeadLetterJobs => {
+                    cleanup_available_dead_letter_jobs_older_than_once(
+                        tx.inner.as_mut(),
+                        database_operation_observer.as_ref(),
+                        sql_catalog,
+                        older_than,
+                        batch_size,
+                    )
+                    .await
+                }
+            }
+        }
+        .await;
         let deleted = finish_queue_pool_transaction(operation, tx, deleted).await?;
         total_deleted = checked_add_cleanup_total(total_deleted, deleted)?;
         if deleted < u64::from(batch_size) {
@@ -242,6 +248,7 @@ pub(in crate::db::queue) async fn reclaim_available_stale_running_jobs_once_in_c
 ) -> Result<ReclaimStaleRunningJobsResult, Error> {
     let stale_threshold_microseconds = stale_threshold_to_microseconds(stale_threshold)?;
     validate_reclaim_batch_size(reclaim_batch_size)?;
+    sql_catalog.config().protocol.admit(tx).await?;
     let database_operation_observer = tx.database_operation_observer().cloned();
     let never_started_jobs_returned_to_pending = reclaim_never_started_running_jobs(
         tx.inner.as_mut(),

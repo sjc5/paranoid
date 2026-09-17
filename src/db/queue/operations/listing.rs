@@ -1,4 +1,5 @@
 use super::*;
+use crate::db::bytea::Bytea;
 
 pub(in crate::db::queue) async fn list_jobs<'e, E>(
     executor: E,
@@ -121,7 +122,8 @@ where
         Err(error) => return Err(map_retry_query_error(error, sql_catalog.config())),
     };
     let inserted_id: Option<Vec<u8>> = row
-        .try_get(QueueQueryField::InsertedId.name())
+        .try_get::<Option<Bytea>, _>(QueueQueryField::InsertedId.name())
+        .map(|value| value.map(|bytes| bytes.0))
         .map_err(Error::decode_row)?;
     let source_exists: bool = row
         .try_get(QueueQueryField::SourceExists.name())

@@ -22,14 +22,7 @@ async fn queue_in_current_transaction_operations_emit_only_inner_database_operat
         .begin_transaction()
         .await
         .expect("begin caller transaction");
-    assert_eq!(
-        observer.records(),
-        vec![DatabaseOperationRecord {
-            kind: DatabaseOperationKind::BeginTransaction,
-            label: "db.begin_transaction",
-            statement: None,
-        }]
-    );
+    assert_eq!(observer.records(), vec![test_transaction_begin_record()]);
     observer.clear();
 
     let enqueued = queue
@@ -41,11 +34,16 @@ async fn queue_in_current_transaction_operations_emit_only_inner_database_operat
         )
         .await
         .expect("enqueue in caller transaction");
-    expect_single_record(
+    expect_operation_records(
         &observer,
-        DatabaseOperationKind::FetchOne,
-        QUEUE_OPERATION_ENQUEUE,
-        queue.sql_catalog().single_enqueue_query(),
+        &[
+            test_protocol_admission_record(),
+            DatabaseOperationRecord {
+                kind: DatabaseOperationKind::FetchOne,
+                label: QUEUE_OPERATION_ENQUEUE,
+                statement: Some(queue.sql_catalog().single_enqueue_query().to_owned()),
+            },
+        ],
     );
 
     assert_eq!(

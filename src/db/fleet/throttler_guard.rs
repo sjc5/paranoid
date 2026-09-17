@@ -180,6 +180,7 @@ pub(super) async fn run_throttler_probe_heartbeat(
                 consecutive_failures = 0;
             }
             Ok(false) => return,
+            Err(error) if crate::db::contains_protocol_failure(&error) => return,
             Err(_) => {
                 consecutive_failures = consecutive_failures.saturating_add(1);
                 if consecutive_failures

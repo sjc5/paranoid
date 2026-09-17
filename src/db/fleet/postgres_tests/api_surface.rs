@@ -149,6 +149,7 @@ fn fleet_table_names_must_not_overlap() {
         crate::db::PgQualifiedTableName::with_schema("public", "__paranoid_same_fleet_table")
             .expect("table");
     let config = StoreConfig {
+        protocol: crate::db::postgres_test_support::test_protocol(),
         root_key: RootKey::default(),
         state_table_name: ambiguous_state_table,
         coordination_table_name: unique_test_table_name(),

@@ -4,6 +4,7 @@ use super::*;
 impl Default for StoreConfig {
     fn default() -> Self {
         Self {
+            protocol: crate::db::postgres_test_support::test_protocol(),
             table_name: PgQualifiedTableName::unqualified(TEST_KV_TABLE_NAME)
                 .expect("test KV table name must be a valid Postgres identifier"),
             schema_ledger_table_name: test_schema_ledger_table_name(),
@@ -17,6 +18,7 @@ impl StoreConfig {
     #[cfg(test)]
     pub(crate) fn new(table_name: PgQualifiedTableName) -> Result<Self, Error> {
         let config = Self {
+            protocol: crate::db::postgres_test_support::test_protocol(),
             table_name,
             schema_ledger_table_name: test_schema_ledger_table_name(),
             create_updated_at_index: true,
@@ -113,6 +115,7 @@ impl Store {
         value: &[u8],
         ttl: Ttl,
     ) -> Result<(), Error> {
+        self.config.protocol.admit(&mut *tx).await?;
         let database_operation_observer = tx.database_operation_observer().cloned();
         self.set_bytes_with_executor(
             tx.inner.as_mut(),
@@ -154,6 +157,7 @@ impl Store {
         value: &[u8],
         ttl: Ttl,
     ) -> Result<DatabaseTimestampMicros, Error> {
+        self.config.protocol.admit(&mut *tx).await?;
         let database_operation_observer = tx.database_operation_observer().cloned();
         self.set_bytes_and_return_database_timestamp_with_executor(
             tx.inner.as_mut(),
@@ -188,6 +192,7 @@ impl Store {
         value: &[u8],
         ttl: Ttl,
     ) -> Result<bool, Error> {
+        self.config.protocol.admit(&mut *tx).await?;
         let database_operation_observer = tx.database_operation_observer().cloned();
         self.set_bytes_if_not_exists_with_executor(
             tx.inner.as_mut(),
@@ -229,6 +234,7 @@ impl Store {
         value: &[u8],
         ttl: Ttl,
     ) -> Result<SetIfNotExistsResult, Error> {
+        self.config.protocol.admit(&mut *tx).await?;
         let database_operation_observer = tx.database_operation_observer().cloned();
         self.set_bytes_if_not_exists_and_return_database_timestamp_with_executor(
             tx.inner.as_mut(),
@@ -271,6 +277,7 @@ impl Store {
         tx: &mut Tx<'_>,
         key: &Key,
     ) -> Result<Vec<u8>, Error> {
+        self.config.protocol.admit(&mut *tx).await?;
         let database_operation_observer = tx.database_operation_observer().cloned();
         self.get_bytes_with_executor(tx.inner.as_mut(), database_operation_observer.as_ref(), key)
             .await
@@ -282,6 +289,7 @@ impl Store {
         tx: &mut Tx<'_>,
         key: &Key,
     ) -> Result<BytesWithDatabaseTimestamp, Error> {
+        self.config.protocol.admit(&mut *tx).await?;
         let database_operation_observer = tx.database_operation_observer().cloned();
         self.get_bytes_and_return_database_timestamp_with_executor(
             tx.inner.as_mut(),
@@ -310,6 +318,9 @@ impl Store {
         tx: &mut Tx<'_>,
         keys: &[Key],
     ) -> Result<Vec<Option<Vec<u8>>>, Error> {
+        if !keys.is_empty() {
+            self.config.protocol.admit(&mut *tx).await?;
+        }
         let database_operation_observer = tx.database_operation_observer().cloned();
         self.get_bytes_multi_with_executor(
             tx.inner.as_mut(),
@@ -340,6 +351,9 @@ impl Store {
         entries: &[BytesSetEntry],
         ttl: Ttl,
     ) -> Result<(), Error> {
+        if !entries.is_empty() {
+            self.config.protocol.admit(&mut *tx).await?;
+        }
         let database_operation_observer = tx.database_operation_observer().cloned();
         self.set_bytes_multi_with_executor(
             tx.inner.as_mut(),
@@ -363,6 +377,7 @@ impl Store {
         tx: &mut WriteTx<'_>,
         key: &Key,
     ) -> Result<(), Error> {
+        self.config.protocol.admit(&mut *tx).await?;
         let database_operation_observer = tx.database_operation_observer().cloned();
         self.touch_key_with_executor(tx.inner.as_mut(), database_operation_observer.as_ref(), key)
             .await
@@ -384,6 +399,7 @@ impl Store {
         key: &Key,
         ttl: Ttl,
     ) -> Result<(), Error> {
+        self.config.protocol.admit(&mut *tx).await?;
         let database_operation_observer = tx.database_operation_observer().cloned();
         self.set_key_ttl_with_executor(
             tx.inner.as_mut(),
@@ -407,6 +423,7 @@ impl Store {
         tx: &mut WriteTx<'_>,
         key: &Key,
     ) -> Result<(), Error> {
+        self.config.protocol.admit(&mut *tx).await?;
         let database_operation_observer = tx.database_operation_observer().cloned();
         self.expire_key_with_executor(tx.inner.as_mut(), database_operation_observer.as_ref(), key)
             .await
@@ -425,6 +442,7 @@ impl Store {
         tx: &mut WriteTx<'_>,
         key: &Key,
     ) -> Result<(), Error> {
+        self.config.protocol.admit(&mut *tx).await?;
         let database_operation_observer = tx.database_operation_observer().cloned();
         self.delete_key_with_executor(tx.inner.as_mut(), database_operation_observer.as_ref(), key)
             .await
@@ -445,6 +463,7 @@ impl Store {
         tx: &mut Tx<'_>,
         key: &Key,
     ) -> Result<bool, Error> {
+        self.config.protocol.admit(&mut *tx).await?;
         let database_operation_observer = tx.database_operation_observer().cloned();
         self.check_key_exists_with_executor(
             tx.inner.as_mut(),
@@ -473,6 +492,7 @@ impl Store {
         tx: &mut WriteTx<'_>,
         batch_size: u32,
     ) -> Result<u64, Error> {
+        self.config.protocol.admit(&mut *tx).await?;
         let database_operation_observer = tx.database_operation_observer().cloned();
         self.delete_expired_keys_once_with_executor(
             tx.inner.as_mut(),
@@ -538,6 +558,7 @@ impl Store {
         tx: &mut Tx<'_>,
         prefix: &KeyPrefix,
     ) -> Result<u64, Error> {
+        self.config.protocol.admit(&mut *tx).await?;
         let database_operation_observer = tx.database_operation_observer().cloned();
         self.count_live_keys_with_prefix_with_executor(
             tx.inner.as_mut(),
@@ -570,6 +591,7 @@ impl Store {
         after_key: Option<&Key>,
         limit: u32,
     ) -> Result<Vec<ScannedBytes>, Error> {
+        self.config.protocol.admit(&mut *tx).await?;
         let database_operation_observer = tx.database_operation_observer().cloned();
         self.scan_bytes_with_prefix_with_executor(
             tx.inner.as_mut(),
@@ -604,6 +626,7 @@ impl Store {
         after_key: Option<&Key>,
         limit: u32,
     ) -> Result<Vec<Key>, Error> {
+        self.config.protocol.admit(&mut *tx).await?;
         let database_operation_observer = tx.database_operation_observer().cloned();
         self.scan_keys_with_prefix_with_executor(
             tx.inner.as_mut(),
@@ -636,6 +659,7 @@ impl Store {
         prefix: &KeyPrefix,
         batch_size: u32,
     ) -> Result<u64, Error> {
+        self.config.protocol.admit(&mut *tx).await?;
         let database_operation_observer = tx.database_operation_observer().cloned();
         self.delete_keys_with_prefix_once_with_executor(
             tx.inner.as_mut(),

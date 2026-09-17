@@ -9,6 +9,9 @@ use std::time::Duration;
 const BOOTSTRAP_SCHEMA_CREATION_RACE_MAX_ATTEMPTS: u32 = 64;
 const BOOTSTRAP_SCHEMA_CREATION_RACE_RETRY_DELAY: Duration = Duration::from_millis(25);
 
+/// Schema-local table name for Paranoid's installation protocol.
+pub const BOOTSTRAP_PROTOCOL_TABLE_NAME: &str = "protocol";
+
 /// Schema-local table name for Paranoid's bootstrap schema ledger.
 pub const BOOTSTRAP_SCHEMA_LEDGER_TABLE_NAME: &str = "schema_ledger";
 
@@ -51,6 +54,8 @@ pub struct BootstrapConfig {
 /// Fully qualified table names owned by one Paranoid bootstrap schema.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BootstrapTableNames {
+    /// Shared installation protocol relation.
+    pub protocol: PgQualifiedTableName,
     /// Schema ledger table.
     pub schema_ledger: PgQualifiedTableName,
     /// KV store table.
@@ -72,6 +77,8 @@ pub struct BootstrapTableNames {
 /// Store handles configured by [`BootstrapConfig`].
 #[derive(Clone, Debug)]
 pub struct BootstrapStores {
+    /// Shared installation protocol identity.
+    pub protocol: super::Protocol,
     /// KV store configured in the bootstrap schema.
     pub kv: kv::Store,
     /// Fleet store configured in the bootstrap schema.
@@ -137,6 +144,7 @@ impl BootstrapConfig {
     /// Returns the fully qualified table names owned by this bootstrap schema.
     pub fn table_names(&self) -> BootstrapTableNames {
         BootstrapTableNames {
+            protocol: self.qualified_table_name(BOOTSTRAP_PROTOCOL_TABLE_NAME),
             schema_ledger: self.qualified_table_name(BOOTSTRAP_SCHEMA_LEDGER_TABLE_NAME),
             kv: self.qualified_table_name(BOOTSTRAP_KV_TABLE_NAME),
             fleet_state: self.qualified_table_name(BOOTSTRAP_FLEET_STATE_TABLE_NAME),
@@ -153,14 +161,17 @@ impl BootstrapConfig {
     pub fn stores_for_already_migrated_schema(&self) -> Result<BootstrapStores, BootstrapError> {
         let table_names = self.table_names();
         let schema_ledger_table_name = table_names.schema_ledger.clone();
+        let protocol = super::Protocol::new(table_names.protocol);
 
         let kv_config = kv::StoreConfig {
+            protocol: protocol.clone(),
             table_name: table_names.kv,
             schema_ledger_table_name: schema_ledger_table_name.clone(),
             create_updated_at_index: true,
         };
 
         let fleet_config = fleet::StoreConfig {
+            protocol: protocol.clone(),
             root_key: fleet::RootKey::default(),
             state_table_name: table_names.fleet_state,
             coordination_table_name: table_names.fleet_coordination,
@@ -170,6 +181,7 @@ impl BootstrapConfig {
         };
 
         let queue_config = queue::StoreConfig {
+            protocol: protocol.clone(),
             table_name: table_names.queue_jobs,
             dead_letter_table_name: table_names.queue_dead_letters,
             pause_table_name: table_names.queue_pauses,
@@ -178,6 +190,7 @@ impl BootstrapConfig {
         };
 
         Ok(BootstrapStores {
+            protocol,
             kv: kv::Store::new_inner(kv_config)?,
             fleet: fleet::Store::new_inner(fleet_config)?,
             queue: queue::Store::new_inner(queue_config)?,
@@ -226,9 +239,32 @@ impl BootstrapConfig {
             let stores = self.stores_for_already_migrated_schema()?;
             acquire_bootstrap_transaction_lock(&mut tx).await?;
             create_bootstrap_schema_if_needed(&mut tx, self.schema_name()).await?;
+            let protocol_exists =
+                super::protocol_schema::protocol_exists(&mut tx, &stores.protocol).await?;
+            if protocol_exists {
+                stores.protocol.admit(&mut tx).await?;
+            }
             super::migrate_schema_ledger_schema_in_current_transaction(
                 &mut tx,
                 stores.schema_ledger_table_name(),
+            )
+            .await?;
+            if !protocol_exists {
+                stores.kv.validate_protocol_adoption_source(&mut tx).await?;
+                stores
+                    .fleet
+                    .validate_protocol_adoption_source(&mut tx)
+                    .await?;
+                stores
+                    .queue
+                    .validate_protocol_adoption_source(&mut tx)
+                    .await?;
+            }
+            super::protocol_schema::prepare_protocol(
+                &mut tx,
+                &stores.protocol,
+                stores.schema_ledger_table_name(),
+                !protocol_exists,
             )
             .await?;
             stores

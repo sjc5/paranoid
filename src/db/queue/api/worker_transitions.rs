@@ -40,6 +40,9 @@ impl Store {
         validate_registered_task_names(registered_task_names)?;
         validate_claim_limit(claim_limit)?;
         validate_worker_owner_id(worker_id.as_ref())?;
+        if !registered_task_names.is_empty() {
+            self.config.protocol.admit(tx).await?;
+        }
         let database_operation_observer = tx.database_operation_observer().cloned();
         claim_available_jobs_for_worker(
             tx.inner.as_mut(),
@@ -75,6 +78,7 @@ impl Store {
         worker_id: impl AsRef<str>,
     ) -> Result<(), Error> {
         validate_worker_owner_id(worker_id.as_ref())?;
+        self.config.protocol.admit(tx).await?;
         let database_operation_observer = tx.database_operation_observer().cloned();
         execute_owned_running_job_update(
             tx.inner.as_mut(),
@@ -114,6 +118,7 @@ impl Store {
         worker_id: impl AsRef<str>,
     ) -> Result<(), Error> {
         validate_worker_owner_id(worker_id.as_ref())?;
+        self.config.protocol.admit(tx).await?;
         let database_operation_observer = tx.database_operation_observer().cloned();
         execute_owned_running_job_update(
             tx.inner.as_mut(),
@@ -155,6 +160,7 @@ impl Store {
         worker_id: impl AsRef<str>,
     ) -> Result<(), Error> {
         validate_worker_owner_id(worker_id.as_ref())?;
+        self.config.protocol.admit(tx).await?;
         let database_operation_observer = tx.database_operation_observer().cloned();
         execute_owned_running_job_update(
             tx.inner.as_mut(),
@@ -211,6 +217,7 @@ impl Store {
             .try_into()
             .map_err(|_| Error::InvalidMaxRetries)?;
         let retry_after_microseconds = retry_backoff_to_microseconds(retry_after)?;
+        self.config.protocol.admit(tx).await?;
         let database_operation_observer = tx.database_operation_observer().cloned();
         schedule_owned_running_job_retry(
             tx.inner.as_mut(),
@@ -260,6 +267,7 @@ impl Store {
         increment_retry_count: bool,
     ) -> Result<(), Error> {
         validate_worker_owner_id(worker_id.as_ref())?;
+        self.config.protocol.admit(tx).await?;
         let database_operation_observer = tx.database_operation_observer().cloned();
         execute_mark_owned_running_job_failed(
             tx.inner.as_mut(),
@@ -309,6 +317,7 @@ impl Store {
         reason: DeadLetterReason,
     ) -> Result<JobId, Error> {
         validate_worker_owner_id(worker_id.as_ref())?;
+        self.config.protocol.admit(tx).await?;
         let database_operation_observer = tx.database_operation_observer().cloned();
         move_owned_running_job_to_dead_letter(
             tx.inner.as_mut(),
@@ -351,6 +360,7 @@ impl Store {
         worker_id: impl AsRef<str>,
     ) -> Result<(), Error> {
         validate_worker_owner_id(worker_id.as_ref())?;
+        self.config.protocol.admit(tx).await?;
         let database_operation_observer = tx.database_operation_observer().cloned();
         execute_owned_running_job_update(
             tx.inner.as_mut(),
@@ -395,6 +405,7 @@ impl Store {
         worker_id: impl AsRef<str>,
     ) -> Result<(), Error> {
         validate_worker_owner_id(worker_id.as_ref())?;
+        self.config.protocol.admit(tx).await?;
         let database_operation_observer = tx.database_operation_observer().cloned();
         execute_owned_running_job_update(
             tx.inner.as_mut(),
@@ -441,6 +452,7 @@ impl Store {
         worker_id: impl AsRef<str>,
     ) -> Result<u64, Error> {
         validate_worker_owner_id(worker_id.as_ref())?;
+        self.config.protocol.admit(tx).await?;
         let database_operation_observer = tx.database_operation_observer().cloned();
         return_available_owned_running_jobs_to_pending(
             tx.inner.as_mut(),
@@ -481,6 +493,7 @@ impl Store {
         worker_id: impl AsRef<str>,
     ) -> Result<u64, Error> {
         validate_worker_owner_id(worker_id.as_ref())?;
+        self.config.protocol.admit(tx).await?;
         let database_operation_observer = tx.database_operation_observer().cloned();
         return_available_owned_running_jobs_to_pending(
             tx.inner.as_mut(),

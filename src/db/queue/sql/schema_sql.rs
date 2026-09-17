@@ -182,7 +182,7 @@ pub(in crate::db::queue) fn build_create_jobs_table_statement(config: &StoreConf
     format!(
         r#"
         CREATE TABLE IF NOT EXISTS {} (
-            {id} {id_type} PRIMARY KEY CHECK (octet_length({id}) = {}),
+            {id} {id_type} PRIMARY KEY CHECK (pg_catalog.octet_length({id}) = {}),
             {task_name} {task_name_type} NOT NULL,
             {payload} {payload_type} NOT NULL,
             {status} {status_type} NOT NULL,
@@ -205,19 +205,19 @@ pub(in crate::db::queue) fn build_create_jobs_table_statement(config: &StoreConf
             ),
             CONSTRAINT {} CHECK (
                 {task_name} ~ '^[A-Za-z0-9_][A-Za-z0-9_.-]*$'
-                AND octet_length({task_name}) <= {}
+                AND pg_catalog.octet_length({task_name}) <= {}
                 AND (
                     {dedupe_key} IS NULL
                     OR (
                         {dedupe_key} <> ''
-                        AND octet_length({dedupe_key}) <= {}
+                        AND pg_catalog.octet_length({dedupe_key}) <= {}
                     )
                 )
                 AND (
                     {worker_id} IS NULL
                     OR (
                         {worker_id} <> ''
-                        AND octet_length({worker_id}) <= {}
+                        AND pg_catalog.octet_length({worker_id}) <= {}
                     )
                 )
             ),
@@ -300,8 +300,8 @@ pub(in crate::db::queue) fn build_create_dead_letter_table_statement(
     format!(
         r#"
         CREATE TABLE IF NOT EXISTS {} (
-            {id} {id_type} PRIMARY KEY CHECK (octet_length({id}) = {}),
-            {original_job_id} {original_job_id_type} NOT NULL CHECK (octet_length({original_job_id}) = {}),
+            {id} {id_type} PRIMARY KEY CHECK (pg_catalog.octet_length({id}) = {}),
+            {original_job_id} {original_job_id_type} NOT NULL CHECK (pg_catalog.octet_length({original_job_id}) = {}),
             {task_name} {task_name_type} NOT NULL,
             {payload} {payload_type} NOT NULL,
             {last_error} {last_error_type} NOT NULL,
@@ -320,12 +320,12 @@ pub(in crate::db::queue) fn build_create_dead_letter_table_statement(
             ),
             CONSTRAINT {} CHECK (
                 {task_name} ~ '^[A-Za-z0-9_][A-Za-z0-9_.-]*$'
-                AND octet_length({task_name}) <= {}
+                AND pg_catalog.octet_length({task_name}) <= {}
                 AND (
                     {dedupe_key} IS NULL
                     OR (
                         {dedupe_key} <> ''
-                        AND octet_length({dedupe_key}) <= {}
+                        AND pg_catalog.octet_length({dedupe_key}) <= {}
                     )
                 )
             ),
@@ -389,7 +389,7 @@ pub(in crate::db::queue) fn build_create_pause_table_statement(config: &StoreCon
                 OR (
                     {task_name} IS NOT NULL
                     AND {task_name} ~ '^[A-Za-z0-9_][A-Za-z0-9_.-]*$'
-                    AND octet_length({task_name}) <= {}
+                    AND pg_catalog.octet_length({task_name}) <= {}
                 )
             )
         )

@@ -3,7 +3,10 @@ use crate::db::fleet::{
     RootKey as FleetRootKey, Store as FleetStore, StoreConfig as FleetStoreConfig,
 };
 use crate::db::lease::{LEASE_OPERATION_CLAIM, LEASE_OPERATION_RELEASE};
-use crate::db::postgres_test_support::{connect_sqlx_pool_for_harness, standard_test_database_url};
+use crate::db::postgres_test_support::{
+    connect_sqlx_pool_for_harness, standard_test_database_url, test_protocol_admission_record,
+    test_transaction_begin_record,
+};
 use crate::db::{
     DatabaseOperationKind, DatabaseOperationObserver, DatabaseOperationRecord, PoolConfig,
     SCHEMA_LEDGER_OPERATION_CLAIM_COMPONENT_VERSION, SCHEMA_LEDGER_OPERATION_CREATE_SAVEPOINT,
@@ -129,10 +132,13 @@ fn database_operation_kind_sort_key(kind: DatabaseOperationKind) -> u8 {
 
 fn transaction_operation_shapes(inner: Vec<OperationShape>) -> Vec<OperationShape> {
     [
-        vec![(
-            DatabaseOperationKind::BeginTransaction,
-            "db.begin_transaction",
-        )],
+        vec![
+            (
+                DatabaseOperationKind::BeginTransaction,
+                "db.begin_transaction",
+            ),
+            (DatabaseOperationKind::FetchAll, "paranoid.protocol.admit"),
+        ],
         inner,
         vec![(DatabaseOperationKind::CommitTransaction, "db.tx.commit")],
     ]
@@ -150,6 +156,7 @@ fn worker_database_operation_shapes(inner: Vec<OperationShape>) -> Vec<Operation
                 DatabaseOperationKind::Execute,
                 QUEUE_OPERATION_SET_LOCAL_STATEMENT_TIMEOUT,
             ),
+            (DatabaseOperationKind::FetchAll, "paranoid.protocol.admit"),
         ],
         inner,
         vec![(DatabaseOperationKind::CommitTransaction, "db.tx.commit")],
@@ -325,7 +332,7 @@ fn repeated_pool_transaction_records(
     count: usize,
     record: DatabaseOperationRecord,
 ) -> Vec<DatabaseOperationRecord> {
-    let mut records = Vec::with_capacity(count * 3);
+    let mut records = Vec::with_capacity(count * 4);
     for _ in 0..count {
         records.extend(transaction_records([record.clone()]));
     }
@@ -335,12 +342,9 @@ fn repeated_pool_transaction_records(
 fn transaction_records<const N: usize>(
     inner: [DatabaseOperationRecord; N],
 ) -> Vec<DatabaseOperationRecord> {
-    let mut records = Vec::with_capacity(N + 2);
-    records.push(DatabaseOperationRecord {
-        kind: DatabaseOperationKind::BeginTransaction,
-        label: "db.begin_transaction",
-        statement: None,
-    });
+    let mut records = Vec::with_capacity(N + 3);
+    records.push(test_transaction_begin_record());
+    records.push(test_protocol_admission_record());
     records.extend(inner);
     records.push(DatabaseOperationRecord {
         kind: DatabaseOperationKind::CommitTransaction,
@@ -353,12 +357,9 @@ fn transaction_records<const N: usize>(
 fn read_transaction_records<const N: usize>(
     inner: [DatabaseOperationRecord; N],
 ) -> Vec<DatabaseOperationRecord> {
-    let mut records = Vec::with_capacity(N + 2);
-    records.push(DatabaseOperationRecord {
-        kind: DatabaseOperationKind::BeginTransaction,
-        label: "db.begin_transaction",
-        statement: None,
-    });
+    let mut records = Vec::with_capacity(N + 3);
+    records.push(test_transaction_begin_record());
+    records.push(test_protocol_admission_record());
     records.extend(inner);
     records.push(DatabaseOperationRecord {
         kind: DatabaseOperationKind::RollbackTransaction,
@@ -371,17 +372,14 @@ fn read_transaction_records<const N: usize>(
 fn worker_database_operation_records<const N: usize>(
     inner: [DatabaseOperationRecord; N],
 ) -> Vec<DatabaseOperationRecord> {
-    let mut records = Vec::with_capacity(N + 3);
-    records.push(DatabaseOperationRecord {
-        kind: DatabaseOperationKind::BeginTransaction,
-        label: "db.begin_transaction",
-        statement: None,
-    });
+    let mut records = Vec::with_capacity(N + 4);
+    records.push(test_transaction_begin_record());
     records.push(DatabaseOperationRecord {
         kind: DatabaseOperationKind::Execute,
         label: QUEUE_OPERATION_SET_LOCAL_STATEMENT_TIMEOUT,
         statement: Some(QUEUE_SET_LOCAL_STATEMENT_TIMEOUT_QUERY.to_owned()),
     });
+    records.push(test_protocol_admission_record());
     records.extend(inner);
     records.push(DatabaseOperationRecord {
         kind: DatabaseOperationKind::CommitTransaction,
@@ -522,9 +520,7 @@ async fn connect_paranoid_pool(database_url: &str) -> WritePool {
     let mut config = PoolConfig::new(SecretString::from(database_url.to_owned()));
     config.max_connections = 2;
     config.application_name = Some("paranoid_queue_operation_count_test".to_owned());
-    WritePool::connect(config)
-        .await
-        .expect("connect paranoid pool")
+    crate::db::postgres_test_support::connect_test_write_pool(config).await
 }
 
 async fn connect_sqlx_pool(database_url: &str) -> PgPool {

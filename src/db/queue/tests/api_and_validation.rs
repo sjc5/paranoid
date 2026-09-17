@@ -691,6 +691,7 @@ fn queue_config_and_input_validators_reject_ambiguous_protocol_values() {
     ));
     assert!(matches!(
         Store::new(StoreConfig {
+            protocol: crate::db::postgres_test_support::test_protocol(),
             table_name: jobs.clone(),
             dead_letter_table_name: dead.clone(),
             pause_table_name: dead.clone(),
@@ -701,6 +702,7 @@ fn queue_config_and_input_validators_reject_ambiguous_protocol_values() {
     ));
     assert!(matches!(
         Store::new(StoreConfig {
+            protocol: crate::db::postgres_test_support::test_protocol(),
             table_name: jobs.clone(),
             dead_letter_table_name: dead.clone(),
             pause_table_name: pauses.clone(),
@@ -711,7 +713,7 @@ fn queue_config_and_input_validators_reject_ambiguous_protocol_values() {
     ));
     assert!(matches!(
         Store::new(StoreConfig {
-            table_name: jobs.clone(),
+            protocol: crate::db::postgres_test_support::test_protocol(),            table_name: jobs.clone(),
             dead_letter_table_name: dead.clone(),
             pause_table_name: pauses.clone(),
             schema_ledger_table_name: test_schema_ledger_table_name(),

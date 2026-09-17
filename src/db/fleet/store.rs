@@ -1,3 +1,12 @@
+use crate::db::schema_ledger::{
+    CompatibleComponentSchemaPlan, plan_component_schema_with_compatible_prepared_versions,
+    validate_component_schema_with_compatible_prepared_versions,
+};
+const COMPATIBLE_PREPARED_FLEET_VERSIONS: &[crate::db::ComponentSchemaMigrationTarget<'static>] =
+    &[crate::db::ComponentSchemaMigrationTarget::new(
+        8,
+        "paranoid.fleet.v8",
+    )];
 use super::*;
 
 /// Schema configuration for Fleet coordination primitives.
@@ -8,6 +17,8 @@ use super::*;
 #[cfg(feature = "component-authoring")]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct StoreConfig {
+    /// Shared installation protocol identity.
+    pub protocol: crate::db::Protocol,
     /// Root key prefix for Fleet-owned records.
     pub root_key: RootKey,
     /// Backing table for Fleet-owned durable keyed state.
@@ -25,6 +36,8 @@ pub struct StoreConfig {
 #[cfg(not(feature = "component-authoring"))]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct StoreConfig {
+    /// Shared installation protocol identity.
+    pub protocol: crate::db::Protocol,
     /// Root key prefix for Fleet-owned records.
     pub(crate) root_key: RootKey,
     /// Backing table for Fleet-owned durable keyed state.
@@ -57,6 +70,7 @@ impl StoreConfig {
     ) -> Result<Self, Error> {
         let raw_coordination_config = RawLeaseStoreConfig::new(coordination_table_name);
         let config = Self {
+            protocol: crate::db::postgres_test_support::test_protocol(),
             root_key,
             state_table_name,
             coordination_table_name: raw_coordination_config.table_name,
@@ -77,6 +91,7 @@ impl StoreConfig {
         fencing_counter_table_name: PgQualifiedTableName,
     ) -> Result<Self, Error> {
         let config = Self {
+            protocol: crate::db::postgres_test_support::test_protocol(),
             root_key,
             state_table_name,
             coordination_table_name,
@@ -90,6 +105,7 @@ impl StoreConfig {
 
     pub(crate) fn kv_store_config(&self) -> KvStoreConfig {
         KvStoreConfig {
+            protocol: self.protocol.clone(),
             table_name: self.state_table_name.clone(),
             schema_ledger_table_name: self.schema_ledger_table_name.clone(),
             create_updated_at_index: self.create_state_updated_at_index,
@@ -100,6 +116,7 @@ impl StoreConfig {
         RawLeaseStoreConfig::new_with_explicit_fencing_counter_table(
             self.coordination_table_name.clone(),
             self.fencing_counter_table_name.clone(),
+            self.protocol.clone(),
         )
     }
 }
@@ -108,6 +125,7 @@ impl StoreConfig {
 impl Default for StoreConfig {
     fn default() -> Self {
         Self {
+            protocol: crate::db::postgres_test_support::test_protocol(),
             root_key: RootKey::default(),
             state_table_name: PgQualifiedTableName::unqualified(TEST_FLEET_STATE_TABLE_NAME)
                 .expect("test Fleet state table name must be a valid Postgres identifier"),
@@ -126,6 +144,10 @@ impl Default for StoreConfig {
 }
 
 impl Store {
+    pub(crate) fn protocol(&self) -> &crate::db::Protocol {
+        &self.config.protocol
+    }
+
     /// Creates a Fleet store handle with precomputed backing stores.
     #[cfg(test)]
     pub(crate) fn new(config: StoreConfig) -> Result<Self, Error> {
@@ -478,6 +500,7 @@ impl Store {
 
 fn validate_distinct_table_names(config: &StoreConfig) -> Result<(), Error> {
     if pg_table_name_set_could_contain_same_relation(&[
+        config.protocol.table_name(),
         &config.state_table_name,
         &config.coordination_table_name,
         &config.fencing_counter_table_name,
@@ -509,15 +532,24 @@ pub(crate) async fn migrate_schema_in_current_transaction(
     validate_distinct_table_names(config)
         .map_err(|error| DbError::schema_mismatch(error.to_string()))?;
 
+    config.protocol.admit(tx).await?;
     let instance_key = fleet_schema_instance_key(config);
     let component_schema_version = fleet_component_schema_version(&instance_key);
-    let migration_plan = plan_component_schema_migration_in_current_transaction(
+    let migration_plan = plan_component_schema_with_compatible_prepared_versions(
         tx,
         &config.schema_ledger_table_name,
         component_schema_version,
         FLEET_SCHEMA_MIGRATION_STEPS,
+        COMPATIBLE_PREPARED_FLEET_VERSIONS,
     )
     .await?;
+
+    let migration_plan = match migration_plan {
+        CompatibleComponentSchemaPlan::Prepared => {
+            return validate_fleet_backing_schemas_in_current_transaction(tx, config).await;
+        }
+        CompatibleComponentSchemaPlan::Migrate(plan) => plan,
+    };
 
     match migration_plan {
         ComponentSchemaMigrationPlan::FreshInstall => {
@@ -572,6 +604,7 @@ async fn validate_schema_in_current_transaction(
 ) -> Result<(), DbError> {
     validate_distinct_table_names(config)
         .map_err(|error| DbError::schema_mismatch(error.to_string()))?;
+    config.protocol.admit(tx).await?;
     validate_fleet_backing_schemas_in_current_transaction(tx, config).await?;
     validate_fleet_schema_version_in_current_transaction(tx, config).await
 }
@@ -609,10 +642,11 @@ async fn validate_fleet_schema_version_in_current_transaction(
     config: &StoreConfig,
 ) -> Result<(), DbError> {
     let instance_key = fleet_schema_instance_key(config);
-    validate_component_schema_version_in_current_transaction(
+    validate_component_schema_with_compatible_prepared_versions(
         tx,
         &config.schema_ledger_table_name,
         fleet_component_schema_version(&instance_key),
+        COMPATIBLE_PREPARED_FLEET_VERSIONS,
     )
     .await
 }
@@ -653,4 +687,25 @@ async fn execute_fleet_schema_upgrade_steps_in_current_transaction(
     Err(DbError::schema_mismatch(
         "Fleet schema upgrade steps were planned but no Fleet upgrade executor exists",
     ))
+}
+
+impl Store {
+    pub(crate) async fn validate_protocol_adoption_source(
+        &self,
+        tx: &mut Tx<'_>,
+    ) -> Result<(), DbError> {
+        self.kv_store.validate_protocol_adoption_source(tx).await?;
+        let key = fleet_schema_instance_key(&self.config);
+        crate::db::protocol_schema::validate_protocol_adoption_source(
+            tx,
+            &self.config.schema_ledger_table_name,
+            fleet_component_schema_version(&key),
+            &[
+                &self.config.state_table_name,
+                &self.config.coordination_table_name,
+                &self.config.fencing_counter_table_name,
+            ],
+        )
+        .await
+    }
 }

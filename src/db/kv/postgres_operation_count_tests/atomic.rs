@@ -33,11 +33,8 @@ async fn kv_atomic_mutations_emit_exact_database_operation_records() {
     assert_eq!(
         observer.records(),
         vec![
-            DatabaseOperationRecord {
-                kind: DatabaseOperationKind::BeginTransaction,
-                label: "db.begin_transaction",
-                statement: None,
-            },
+            test_transaction_begin_record(),
+            test_protocol_admission_record(),
             DatabaseOperationRecord {
                 kind: DatabaseOperationKind::FetchOptional,
                 label: KV_OPERATION_LOCK_KEY_FOR_ATOMIC_MUTATION,
@@ -74,11 +71,8 @@ async fn kv_atomic_mutations_emit_exact_database_operation_records() {
     assert_eq!(
         observer.records(),
         vec![
-            DatabaseOperationRecord {
-                kind: DatabaseOperationKind::BeginTransaction,
-                label: "db.begin_transaction",
-                statement: None,
-            },
+            test_transaction_begin_record(),
+            test_protocol_admission_record(),
             DatabaseOperationRecord {
                 kind: DatabaseOperationKind::FetchOptional,
                 label: KV_OPERATION_LOCK_KEY_FOR_ATOMIC_MUTATION,
@@ -113,11 +107,8 @@ async fn kv_atomic_mutations_emit_exact_database_operation_records() {
     assert_eq!(
         observer.records(),
         vec![
-            DatabaseOperationRecord {
-                kind: DatabaseOperationKind::BeginTransaction,
-                label: "db.begin_transaction",
-                statement: None,
-            },
+            test_transaction_begin_record(),
+            test_protocol_admission_record(),
             DatabaseOperationRecord {
                 kind: DatabaseOperationKind::FetchOptional,
                 label: KV_OPERATION_LOCK_KEY_FOR_ATOMIC_MUTATION,
@@ -149,11 +140,8 @@ async fn kv_atomic_mutations_emit_exact_database_operation_records() {
     assert_eq!(
         observer.records(),
         vec![
-            DatabaseOperationRecord {
-                kind: DatabaseOperationKind::BeginTransaction,
-                label: "db.begin_transaction",
-                statement: None,
-            },
+            test_transaction_begin_record(),
+            test_protocol_admission_record(),
             DatabaseOperationRecord {
                 kind: DatabaseOperationKind::FetchOptional,
                 label: KV_OPERATION_LOCK_KEY_FOR_ATOMIC_MUTATION,

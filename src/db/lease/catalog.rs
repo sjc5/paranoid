@@ -106,13 +106,14 @@ impl LeaseColumn {
             Some(LeaseCheckConstraint::NonEmptyMaxOctetLength(max_octets)) => {
                 let column = self.name();
                 Some(format!(
-                    "octet_length({column}) > 0 AND octet_length({column}) <= {max_octets}"
+                    "pg_catalog.octet_length({column}) > 0 AND pg_catalog.octet_length({column}) <= {max_octets}"
                 ))
             }
             Some(LeaseCheckConstraint::Positive) => Some(format!("{} > 0", self.name())),
-            Some(LeaseCheckConstraint::ExactOctetLength(octets)) => {
-                Some(format!("octet_length({}) = {octets}", self.name()))
-            }
+            Some(LeaseCheckConstraint::ExactOctetLength(octets)) => Some(format!(
+                "pg_catalog.octet_length({}) = {octets}",
+                self.name()
+            )),
             None => None,
         }
     }

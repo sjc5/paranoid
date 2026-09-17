@@ -8,6 +8,7 @@ pub(super) fn validate_store_config(config: &StoreConfig) -> Result<(), Error> {
 
 pub(super) fn validate_distinct_table_names(config: &StoreConfig) -> Result<(), Error> {
     if pg_table_name_set_could_contain_same_relation(&[
+        config.protocol.table_name(),
         &config.table_name,
         &config.dead_letter_table_name,
         &config.pause_table_name,

@@ -1,10 +1,12 @@
 use super::*;
+use crate::db::bytea::Bytea;
 
 pub(in crate::db::queue) async fn execute_enqueue_in_current_transaction(
     tx: &mut Tx<'_>,
     sql_catalog: &SqlCatalog,
     prepared: PreparedEnqueue,
 ) -> Result<EnqueueResult, Error> {
+    sql_catalog.config().protocol.admit(tx).await?;
     let database_operation_observer = tx.database_operation_observer().cloned();
     if prepared.dedupe_key.is_some() {
         execute_dedupe_enqueue_in_current_transaction(tx, sql_catalog, prepared).await
@@ -95,7 +97,8 @@ where
         .map_err(DbError::query)?;
 
     let inserted_id: Option<Vec<u8>> = row
-        .try_get(QueueQueryField::InsertedId.name())
+        .try_get::<Option<Bytea>, _>(QueueQueryField::InsertedId.name())
+        .map(|value| value.map(|bytes| bytes.0))
         .map_err(Error::decode_row)?;
     let outcome: String = row
         .try_get(QueueQueryField::InsertOutcome.name())
@@ -108,6 +111,7 @@ pub(in crate::db::queue) async fn execute_dedupe_enqueue_in_current_transaction(
     sql_catalog: &SqlCatalog,
     mut prepared: PreparedEnqueue,
 ) -> Result<EnqueueResult, Error> {
+    sql_catalog.config().protocol.admit(tx).await?;
     let database_operation_observer = tx.database_operation_observer().cloned();
     for attempt_index in 0..MAX_QUEUE_DEDUPE_INSERT_ATTEMPTS {
         record_database_operation(
@@ -132,10 +136,12 @@ pub(in crate::db::queue) async fn execute_dedupe_enqueue_in_current_transaction(
             .map_err(DbError::query)?;
 
         let inserted_id: Option<Vec<u8>> = row
-            .try_get(QueueQueryField::InsertedId.name())
+            .try_get::<Option<Bytea>, _>(QueueQueryField::InsertedId.name())
+            .map(|value| value.map(|bytes| bytes.0))
             .map_err(Error::decode_row)?;
         let existing_id: Option<Vec<u8>> = row
-            .try_get(QueueQueryField::ExistingId.name())
+            .try_get::<Option<Bytea>, _>(QueueQueryField::ExistingId.name())
+            .map(|value| value.map(|bytes| bytes.0))
             .map_err(Error::decode_row)?;
         let outcome: String = row
             .try_get(QueueQueryField::InsertOutcome.name())

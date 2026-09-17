@@ -2,6 +2,7 @@ use super::*;
 
 pub(super) fn validate_distinct_table_names(config: &StoreConfig) -> Result<(), Error> {
     if pg_table_name_set_could_contain_same_relation(&[
+        config.protocol.table_name(),
         &config.table_name,
         &config.schema_ledger_table_name,
     ]) {

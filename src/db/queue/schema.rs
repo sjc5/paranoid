@@ -1,4 +1,14 @@
 #[cfg(test)]
+use crate::db::schema_ledger::validate_component_schema_with_compatible_prepared_versions;
+use crate::db::schema_ledger::{
+    CompatibleComponentSchemaPlan, plan_component_schema_with_compatible_prepared_versions,
+};
+const COMPATIBLE_PREPARED_QUEUE_VERSIONS: &[crate::db::ComponentSchemaMigrationTarget<'static>] =
+    &[crate::db::ComponentSchemaMigrationTarget::new(
+        2,
+        "paranoid.queue.v2",
+    )];
+#[cfg(test)]
 use super::schema_validation::deep_validate_schema_in_current_transaction;
 use super::*;
 use super::{
@@ -19,16 +29,29 @@ pub(crate) async fn migrate_schema_in_current_transaction(
     tx: &mut WriteTx<'_>,
     config: &StoreConfig,
 ) -> Result<(), Error> {
+    config.protocol.admit(tx).await?;
     let queue = Store::new_inner(config.clone())?;
     let instance_key = queue_schema_instance_key(queue.config_inner());
     let component_schema_version = queue_component_schema_version(&instance_key);
-    let migration_plan = plan_component_schema_migration_in_current_transaction(
+    let migration_plan = plan_component_schema_with_compatible_prepared_versions(
         tx,
         &queue.config_inner().schema_ledger_table_name,
         component_schema_version,
         QUEUE_SCHEMA_MIGRATION_STEPS,
+        COMPATIBLE_PREPARED_QUEUE_VERSIONS,
     )
     .await?;
+
+    let migration_plan = match migration_plan {
+        CompatibleComponentSchemaPlan::Prepared => {
+            validate_physical_schema_in_current_transaction(tx, config).await?;
+            return super::schema_validation::validate_prepared_claim_token_in_current_transaction(
+                tx, config,
+            )
+            .await;
+        }
+        CompatibleComponentSchemaPlan::Migrate(plan) => plan,
+    };
 
     match migration_plan {
         ComponentSchemaMigrationPlan::FreshInstall => {
@@ -101,6 +124,7 @@ pub(crate) async fn validate_schema_in_current_transaction(
     tx: &mut WriteTx<'_>,
     config: &StoreConfig,
 ) -> Result<(), Error> {
+    config.protocol.admit(tx).await?;
     let queue = Store::new_inner(config.clone())?;
     validate_physical_schema_in_current_transaction(tx, queue.config_inner()).await?;
     validate_queue_schema_version_in_current_transaction(tx, queue.config_inner()).await?;
@@ -129,10 +153,11 @@ async fn validate_queue_schema_version_in_current_transaction(
     config: &StoreConfig,
 ) -> Result<(), Error> {
     let instance_key = queue_schema_instance_key(config);
-    validate_component_schema_version_in_current_transaction(
+    validate_component_schema_with_compatible_prepared_versions(
         tx,
         &config.schema_ledger_table_name,
         queue_component_schema_version(&instance_key),
+        COMPATIBLE_PREPARED_QUEUE_VERSIONS,
     )
     .await?;
     Ok(())
@@ -171,4 +196,24 @@ async fn execute_queue_schema_upgrade_steps_in_current_transaction(
         "Queue schema upgrade steps were planned but no Queue upgrade executor exists",
     )
     .into())
+}
+
+impl Store {
+    pub(crate) async fn validate_protocol_adoption_source(
+        &self,
+        tx: &mut Tx<'_>,
+    ) -> Result<(), DbError> {
+        let key = queue_schema_instance_key(&self.config);
+        crate::db::protocol_schema::validate_protocol_adoption_source(
+            tx,
+            &self.config.schema_ledger_table_name,
+            queue_component_schema_version(&key),
+            &[
+                &self.config.table_name,
+                &self.config.dead_letter_table_name,
+                &self.config.pause_table_name,
+            ],
+        )
+        .await
+    }
 }

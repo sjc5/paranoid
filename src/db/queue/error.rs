@@ -208,9 +208,9 @@ pub enum Error {
         /// Operation being executed.
         operation: &'static str,
         /// Original operation error.
+        #[source]
         operation_error: Box<Error>,
         /// Rollback error.
-        #[source]
         rollback_error: crate::db::Error,
     },
     /// A queue database operation failed and its cleanup rollback also failed.
@@ -219,9 +219,9 @@ pub enum Error {
         /// Operation being executed.
         operation: &'static str,
         /// Original operation error.
+        #[source]
         operation_error: Box<Error>,
         /// Rollback error.
-        #[source]
         rollback_error: crate::db::Error,
     },
     /// A worker failed to persist a terminal job state and then failed to requeue the job.

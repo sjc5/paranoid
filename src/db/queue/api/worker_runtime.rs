@@ -57,6 +57,11 @@ impl Store {
         worker_config: WorkerConfig,
         maintenance_config: WorkerMaintenanceConfig,
     ) -> Result<WorkerHandle, Error> {
+        if self.config.protocol != *fleet_store.protocol() {
+            return Err(Error::InvalidWorkerConfig {
+                reason: "Queue and Fleet maintenance must share one installation protocol",
+            });
+        }
         let worker_owner_id = WorkerOwnerId::new_unique_for_worker_name(worker_name)?;
         let resolved_worker_config = ResolvedWorkerConfig::new(worker_config)?;
         let resolved_maintenance_config =

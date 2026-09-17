@@ -28,11 +28,8 @@ async fn kv_set_and_get_bytes_emit_exact_database_operation_records() {
     assert_eq!(
         observer.records(),
         vec![
-            DatabaseOperationRecord {
-                kind: DatabaseOperationKind::BeginTransaction,
-                label: "db.begin_transaction",
-                statement: None,
-            },
+            test_transaction_begin_record(),
+            test_protocol_admission_record(),
             DatabaseOperationRecord {
                 kind: DatabaseOperationKind::Execute,
                 label: KV_OPERATION_SET_BYTES,
@@ -381,11 +378,8 @@ async fn kv_common_store_operations_emit_exact_database_operation_records() {
     assert_eq!(
         observer.records(),
         vec![
-            DatabaseOperationRecord {
-                kind: DatabaseOperationKind::BeginTransaction,
-                label: "db.begin_transaction",
-                statement: None,
-            },
+            test_transaction_begin_record(),
+            test_protocol_admission_record(),
             DatabaseOperationRecord {
                 kind: DatabaseOperationKind::Execute,
                 label: KV_OPERATION_ENSURE_SLOT_KEYS_EXIST,

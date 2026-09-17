@@ -45,10 +45,13 @@ async fn kv_schema_setup_and_validation_emit_expected_database_operation_shapes(
     assert_eq!(
         operation_shapes(&observer),
         [
-            vec![(
-                DatabaseOperationKind::BeginTransaction,
-                "db.begin_transaction"
-            )],
+            vec![
+                (
+                    DatabaseOperationKind::BeginTransaction,
+                    "db.begin_transaction"
+                ),
+                (DatabaseOperationKind::FetchAll, "paranoid.protocol.admit")
+            ],
             kv_validate_schema_in_current_transaction_shapes(),
             vec![(DatabaseOperationKind::RollbackTransaction, "db.tx.rollback")],
         ]

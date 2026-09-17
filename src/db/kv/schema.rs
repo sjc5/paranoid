@@ -21,6 +21,7 @@ pub(crate) async fn migrate_schema_in_current_transaction(
     validate_distinct_table_names(config)
         .map_err(|error| DbError::schema_mismatch(error.to_string()))?;
 
+    config.protocol.admit(tx).await?;
     let instance_key = kv_schema_instance_key(config);
     let component_schema_version = kv_component_schema_version(&instance_key);
     let migration_plan = plan_component_schema_migration_in_current_transaction(
@@ -80,6 +81,7 @@ pub(crate) async fn validate_schema_in_current_transaction(
 ) -> Result<(), DbError> {
     validate_distinct_table_names(config)
         .map_err(|error| DbError::schema_mismatch(error.to_string()))?;
+    config.protocol.admit(tx).await?;
     validate_physical_schema_in_current_transaction(tx, config).await?;
     validate_kv_schema_version_in_current_transaction(tx, config).await
 }
@@ -295,13 +297,7 @@ pub(super) async fn validate_required_check_constraints(
     catalog: &KvCatalog,
 ) -> Result<(), DbError> {
     let quoted_table_name = catalog.quoted_table_name();
-    let statement = r#"
-        SELECT pg_get_expr(con.conbin, con.conrelid)
-        FROM pg_constraint con
-        WHERE con.conrelid = to_regclass($1)
-          AND con.contype = 'c'
-          AND con.convalidated
-        "#;
+    let statement = crate::db::schema::BUILTIN_CHECK_EXPRESSIONS_SQL;
     tx.record_database_operation(
         DatabaseOperationKind::FetchAll,
         KV_OPERATION_SCHEMA_VALIDATE_CHECK_CONSTRAINTS,
@@ -313,7 +309,7 @@ pub(super) async fn validate_required_check_constraints(
         .await
         .map_err(DbError::query)?
         .into_iter()
-        .map(|expression| normalize_check_constraint_expression(&expression))
+        .map(|expression| crate::db::schema::normalize_builtin_check_expression(&expression))
         .collect::<Vec<String>>();
 
     let required_key_length_expression = catalog.normalized_key_length_check_expression();
@@ -539,4 +535,20 @@ pub(super) fn validate_required_column(
 #[cfg(test)]
 pub(super) fn build_migrate_statements(config: &StoreConfig) -> Vec<String> {
     KvCatalog::new(config).all_migrate_statements()
+}
+
+impl Store {
+    pub(crate) async fn validate_protocol_adoption_source(
+        &self,
+        tx: &mut Tx<'_>,
+    ) -> Result<(), DbError> {
+        let key = kv_schema_instance_key(&self.config);
+        crate::db::protocol_schema::validate_protocol_adoption_source(
+            tx,
+            &self.config.schema_ledger_table_name,
+            kv_component_schema_version(&key),
+            &[&self.config.table_name],
+        )
+        .await
+    }
 }

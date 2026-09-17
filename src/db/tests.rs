@@ -1528,10 +1528,13 @@ fn component_schema_fresh_install_operation_shapes(
     validation_check_count: usize,
 ) -> Vec<ComponentSchemaOperationShape> {
     [
-        vec![(
-            DatabaseOperationKind::BeginTransaction,
-            "db.begin_transaction",
-        )],
+        vec![
+            (
+                DatabaseOperationKind::BeginTransaction,
+                "db.begin_transaction",
+            ),
+            (DatabaseOperationKind::FetchAll, "paranoid.protocol.admit"),
+        ],
         component_schema_ledger_claim_shapes(),
         repeated_component_operation_shape(
             DatabaseOperationKind::Execute,
@@ -1554,10 +1557,13 @@ fn component_schema_upgrade_operation_shapes(
     validation_check_count: usize,
 ) -> Vec<ComponentSchemaOperationShape> {
     [
-        vec![(
-            DatabaseOperationKind::BeginTransaction,
-            "db.begin_transaction",
-        )],
+        vec![
+            (
+                DatabaseOperationKind::BeginTransaction,
+                "db.begin_transaction",
+            ),
+            (DatabaseOperationKind::FetchAll, "paranoid.protocol.admit"),
+        ],
         component_schema_ledger_lock_shapes(),
         repeated_component_operation_shape(
             DatabaseOperationKind::Execute,
@@ -1579,10 +1585,13 @@ fn component_schema_already_current_operation_shapes(
     validation_check_count: usize,
 ) -> Vec<ComponentSchemaOperationShape> {
     [
-        vec![(
-            DatabaseOperationKind::BeginTransaction,
-            "db.begin_transaction",
-        )],
+        vec![
+            (
+                DatabaseOperationKind::BeginTransaction,
+                "db.begin_transaction",
+            ),
+            (DatabaseOperationKind::FetchAll, "paranoid.protocol.admit"),
+        ],
         component_schema_ledger_lock_shapes(),
         repeated_component_operation_shape(
             DatabaseOperationKind::FetchOne,

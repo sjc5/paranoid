@@ -166,13 +166,17 @@ fn start_worker_heartbeat_loop_if_enabled(
             interval.tick().await;
             loop {
                 tokio::select! {
-                    _ = &mut stop_receiver => return,
+                    _ = &mut stop_receiver => return Ok(()),
                     _ = interval.tick() => {
                         match context.touch_execution_heartbeat().await {
                             Ok(()) => {}
                             Err(Error::JobNotRunning) => {
                                 job_cancellation_signal.request_cancellation();
-                                return;
+                                return Ok(());
+                            }
+                            Err(error) if crate::db::contains_protocol_failure(&error) => {
+                                job_cancellation_signal.request_cancellation();
+                                return Err(error);
                             }
                             Err(_) => {}
                         }
@@ -195,13 +199,13 @@ pub(super) async fn stop_worker_heartbeat_loop(
 }
 
 pub(super) struct WorkerHeartbeatLoopHandle {
-    join_handle: Option<tokio::task::JoinHandle<()>>,
+    join_handle: Option<tokio::task::JoinHandle<Result<(), Error>>>,
     stop_sender: Option<tokio::sync::oneshot::Sender<()>>,
 }
 
 impl WorkerHeartbeatLoopHandle {
     pub(in crate::db::queue) fn new(
-        join_handle: tokio::task::JoinHandle<()>,
+        join_handle: tokio::task::JoinHandle<Result<(), Error>>,
         stop_sender: tokio::sync::oneshot::Sender<()>,
     ) -> Self {
         Self {
@@ -220,7 +224,7 @@ impl WorkerHeartbeatLoopHandle {
         if let Some(mut join_handle) = self.join_handle.take() {
             (&mut join_handle)
                 .await
-                .map_err(|source| Error::WorkerHeartbeatTaskJoinFailed { source })?;
+                .map_err(|source| Error::WorkerHeartbeatTaskJoinFailed { source })??;
         }
         Ok(())
     }

@@ -79,7 +79,7 @@ fn migration_sql_uses_c_collation_and_text_pattern_ops() {
     let joined = statements.join("\n");
 
     assert!(
-        joined.contains(r#"key TEXT COLLATE "C" PRIMARY KEY CHECK (octet_length(key) > 0 AND octet_length(key) <= 2048)"#)
+        joined.contains(r#"key TEXT COLLATE "C" PRIMARY KEY CHECK (pg_catalog.octet_length(key) > 0 AND pg_catalog.octet_length(key) <= 2048)"#)
     );
     assert!(joined.contains("value BYTEA NOT NULL"));
     assert!(joined.contains("expires_at TIMESTAMPTZ"));
@@ -363,6 +363,7 @@ fn kv_table_names_must_not_overlap() {
     let ambiguous_ledger_table =
         PgQualifiedTableName::with_schema("public", "__paranoid_same_table").expect("table");
     let config = StoreConfig {
+        protocol: crate::db::postgres_test_support::test_protocol(),
         table_name: ambiguous_kv_table,
         schema_ledger_table_name: ambiguous_ledger_table,
         create_updated_at_index: true,

@@ -4,7 +4,7 @@ use super::{
     RecordedComponentSchemaVersion, Tx, WritePool, WriteTx,
     finish_pool_owned_rollback_only_transaction_and_preserve_rollback_error,
     finish_pool_owned_write_transaction_and_preserve_rollback_error,
-    normalize_check_constraint_expression, pg_table_name_set_could_contain_same_relation,
+    pg_table_name_set_could_contain_same_relation,
     plan_component_schema_migration_in_current_transaction, pooler_safe_query,
     pooler_safe_query_as, pooler_safe_query_scalar,
     record_component_schema_migration_completion_in_current_transaction, record_database_operation,
@@ -249,6 +249,7 @@ pub enum Error {
         /// Operation being cleaned up.
         operation: &'static str,
         /// Original operation error.
+        #[source]
         operation_error: Box<Error>,
         /// Rollback failure.
         rollback_error: crate::db::Error,
@@ -583,6 +584,8 @@ pub struct AtomicLiveOrInitMutationResult {
 /// Schema configuration for the Postgres-backed KV primitive.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct StoreConfig {
+    /// Shared installation protocol identity.
+    pub protocol: crate::db::Protocol,
     /// Backing table for KV rows.
     pub(crate) table_name: PgQualifiedTableName,
     /// Schema ledger table for this KV store.

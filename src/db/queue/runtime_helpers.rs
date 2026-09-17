@@ -280,23 +280,27 @@ pub(super) async fn count_worker_owned_running_jobs_with_database_operation_time
 ) -> Result<i64, Error> {
     let operation = "count worker-owned running jobs";
     let mut tx = begin_worker_database_operation(pool, operation, timeout).await?;
-    let statement = format!(
-        "SELECT COUNT(*) FROM {} WHERE worker_id = $1 AND status = $2",
-        queue.config_inner().table_name.quoted()
-    );
-    record_database_operation(
-        tx.database_operation_observer(),
-        DatabaseOperationKind::FetchOne,
-        QUEUE_OPERATION_COUNT_WORKER_OWNED_RUNNING_JOBS,
-        Some(statement.as_str()),
-    );
-    let result = pooler_safe_query_scalar::<i64>(sqlx::AssertSqlSafe(statement.as_str()))
-        .bind(worker_id)
-        .bind(JobStatus::Running.as_str())
-        .fetch_one(tx.inner.as_mut())
-        .await
-        .map_err(DbError::query)
-        .map_err(Error::from);
+    let result = async {
+        queue.config_inner().protocol.admit(&mut tx).await?;
+        let statement = format!(
+            "SELECT COUNT(*) FROM {} WHERE worker_id = $1 AND status = $2",
+            queue.config_inner().table_name.quoted()
+        );
+        record_database_operation(
+            tx.database_operation_observer(),
+            DatabaseOperationKind::FetchOne,
+            QUEUE_OPERATION_COUNT_WORKER_OWNED_RUNNING_JOBS,
+            Some(statement.as_str()),
+        );
+        pooler_safe_query_scalar::<i64>(sqlx::AssertSqlSafe(statement.as_str()))
+            .bind(worker_id)
+            .bind(JobStatus::Running.as_str())
+            .fetch_one(tx.inner.as_mut())
+            .await
+            .map_err(DbError::query)
+            .map_err(Error::from)
+    }
+    .await;
     finish_worker_database_operation(tx, operation, timeout, result).await
 }
 

@@ -6,8 +6,6 @@ use super::fleet::{
 };
 #[cfg(test)]
 use super::test_schema_ledger_table_name;
-#[cfg(test)]
-use super::validate_component_schema_version_in_current_transaction;
 use super::{
     ComponentSchemaMigrationPlan, ComponentSchemaMigrationStep, ComponentSchemaVersion,
     DatabaseOperationKind, DatabaseOperationObserver, DbError, PgIdentifier, PgQualifiedTableName,
@@ -16,8 +14,7 @@ use super::{
     finish_pool_owned_rollback_only_transaction_and_preserve_rollback_error,
     finish_pool_owned_write_transaction_and_preserve_rollback_error,
     normalize_check_constraint_expression, pg_table_name_set_could_contain_same_relation,
-    plan_component_schema_migration_in_current_transaction, pooler_safe_query,
-    pooler_safe_query_scalar, random_unit_f64_from_system,
+    pooler_safe_query, pooler_safe_query_scalar, random_unit_f64_from_system,
     record_component_schema_migration_completion_in_current_transaction, record_database_operation,
     schema_instance_key_for_parts,
 };
@@ -168,6 +165,8 @@ async fn finish_queue_read_transaction<T>(
 #[cfg(feature = "component-authoring")]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct StoreConfig {
+    /// Shared installation protocol identity.
+    pub protocol: crate::db::Protocol,
     /// Jobs table.
     pub table_name: PgQualifiedTableName,
     /// Dead-letter jobs table.
@@ -183,6 +182,8 @@ pub struct StoreConfig {
 #[cfg(not(feature = "component-authoring"))]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct StoreConfig {
+    /// Shared installation protocol identity.
+    pub protocol: crate::db::Protocol,
     /// Jobs table.
     pub(crate) table_name: PgQualifiedTableName,
     /// Dead-letter jobs table.
