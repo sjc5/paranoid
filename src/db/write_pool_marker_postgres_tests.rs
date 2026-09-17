@@ -694,7 +694,7 @@ async fn connect_write_pool(database_url: &str, application_name: &str) -> Write
     let mut config = PoolConfig::new(SecretString::from(database_url.to_owned()));
     config.max_connections = 5;
     config.application_name = Some(application_name.to_owned());
-    WritePool::connect(config).await.expect("connect WritePool")
+    crate::db::postgres_test_support::connect_test_write_pool(config).await
 }
 
 async fn grant_marker_table_read_access_to_login_role(

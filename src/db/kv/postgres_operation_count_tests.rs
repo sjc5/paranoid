@@ -1,5 +1,8 @@
 use super::*;
-use crate::db::postgres_test_support::{connect_sqlx_pool_for_harness, standard_test_database_url};
+use crate::db::postgres_test_support::{
+    connect_sqlx_pool_for_harness, standard_test_database_url, test_protocol_admission_record,
+    test_transaction_begin_record,
+};
 use crate::db::{
     DatabaseOperationKind, DatabaseOperationObserver, DatabaseOperationRecord, PoolConfig,
     SCHEMA_LEDGER_OPERATION_CLAIM_COMPONENT_VERSION, SCHEMA_LEDGER_OPERATION_CREATE_SAVEPOINT,
@@ -35,10 +38,13 @@ fn operation_shapes(observer: &DatabaseOperationObserver) -> Vec<OperationShape>
 
 fn transaction_operation_shapes(inner: Vec<OperationShape>) -> Vec<OperationShape> {
     [
-        vec![(
-            DatabaseOperationKind::BeginTransaction,
-            "db.begin_transaction",
-        )],
+        vec![
+            (
+                DatabaseOperationKind::BeginTransaction,
+                "db.begin_transaction",
+            ),
+            (DatabaseOperationKind::FetchAll, "paranoid.protocol.admit"),
+        ],
         inner,
         vec![(DatabaseOperationKind::CommitTransaction, "db.tx.commit")],
     ]
@@ -306,11 +312,8 @@ fn transaction_records(record: DatabaseOperationRecord) -> Vec<DatabaseOperation
 
 fn read_transaction_records(record: DatabaseOperationRecord) -> Vec<DatabaseOperationRecord> {
     vec![
-        DatabaseOperationRecord {
-            kind: DatabaseOperationKind::BeginTransaction,
-            label: "db.begin_transaction",
-            statement: None,
-        },
+        test_transaction_begin_record(),
+        test_protocol_admission_record(),
         record,
         DatabaseOperationRecord {
             kind: DatabaseOperationKind::RollbackTransaction,
@@ -322,11 +325,8 @@ fn read_transaction_records(record: DatabaseOperationRecord) -> Vec<DatabaseOper
 
 fn failed_transaction_records(record: DatabaseOperationRecord) -> Vec<DatabaseOperationRecord> {
     vec![
-        DatabaseOperationRecord {
-            kind: DatabaseOperationKind::BeginTransaction,
-            label: "db.begin_transaction",
-            statement: None,
-        },
+        test_transaction_begin_record(),
+        test_protocol_admission_record(),
         record,
         DatabaseOperationRecord {
             kind: DatabaseOperationKind::RollbackTransaction,
@@ -339,12 +339,9 @@ fn failed_transaction_records(record: DatabaseOperationRecord) -> Vec<DatabaseOp
 fn transaction_records_many<const N: usize>(
     records: [DatabaseOperationRecord; N],
 ) -> Vec<DatabaseOperationRecord> {
-    let mut operation_records = Vec::with_capacity(N + 2);
-    operation_records.push(DatabaseOperationRecord {
-        kind: DatabaseOperationKind::BeginTransaction,
-        label: "db.begin_transaction",
-        statement: None,
-    });
+    let mut operation_records = Vec::with_capacity(N + 3);
+    operation_records.push(test_transaction_begin_record());
+    operation_records.push(test_protocol_admission_record());
     operation_records.extend(records);
     operation_records.push(DatabaseOperationRecord {
         kind: DatabaseOperationKind::CommitTransaction,
@@ -358,9 +355,7 @@ async fn connect_paranoid_pool(database_url: &str) -> WritePool {
     let mut config = PoolConfig::new(SecretString::from(database_url.to_owned()));
     config.max_connections = 2;
     config.application_name = Some("paranoid_kv_operation_count_test".to_owned());
-    WritePool::connect(config)
-        .await
-        .expect("connect paranoid pool")
+    crate::db::postgres_test_support::connect_test_write_pool(config).await
 }
 
 async fn connect_sqlx_pool(database_url: &str) -> PgPool {

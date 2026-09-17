@@ -107,10 +107,13 @@ fn operation_shapes(records: Vec<DatabaseOperationRecord>) -> Vec<OperationShape
 
 fn transaction_shapes_vec(inner: Vec<OperationShape>) -> Vec<OperationShape> {
     [
-        vec![(
-            DatabaseOperationKind::BeginTransaction,
-            "db.begin_transaction",
-        )],
+        vec![
+            (
+                DatabaseOperationKind::BeginTransaction,
+                "db.begin_transaction",
+            ),
+            (DatabaseOperationKind::FetchAll, "paranoid.protocol.admit"),
+        ],
         inner,
         vec![(DatabaseOperationKind::CommitTransaction, "db.tx.commit")],
     ]
@@ -118,22 +121,24 @@ fn transaction_shapes_vec(inner: Vec<OperationShape>) -> Vec<OperationShape> {
 }
 
 fn transaction_shapes<const N: usize>(inner: [OperationShape; N]) -> Vec<OperationShape> {
-    let mut records = Vec::with_capacity(N + 2);
+    let mut records = Vec::with_capacity(N + 3);
     records.push((
         DatabaseOperationKind::BeginTransaction,
         "db.begin_transaction",
     ));
+    records.push((DatabaseOperationKind::FetchAll, "paranoid.protocol.admit"));
     records.extend(inner);
     records.push((DatabaseOperationKind::CommitTransaction, "db.tx.commit"));
     records
 }
 
 fn rollback_transaction_shapes<const N: usize>(inner: [OperationShape; N]) -> Vec<OperationShape> {
-    let mut records = Vec::with_capacity(N + 2);
+    let mut records = Vec::with_capacity(N + 3);
     records.push((
         DatabaseOperationKind::BeginTransaction,
         "db.begin_transaction",
     ));
+    records.push((DatabaseOperationKind::FetchAll, "paranoid.protocol.admit"));
     records.extend(inner);
     records.push((DatabaseOperationKind::RollbackTransaction, "db.tx.rollback"));
     records
@@ -400,9 +405,7 @@ async fn connect_paranoid_pool(database_url: &str) -> WritePool {
     let mut config = PoolConfig::new(SecretString::from(database_url.to_owned()));
     config.max_connections = 2;
     config.application_name = Some("paranoid_fleet_operation_count_test".to_owned());
-    WritePool::connect(config)
-        .await
-        .expect("connect paranoid pool")
+    crate::db::postgres_test_support::connect_test_write_pool(config).await
 }
 
 async fn connect_sqlx_pool(database_url: &str) -> PgPool {

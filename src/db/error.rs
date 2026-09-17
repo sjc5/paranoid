@@ -4,6 +4,9 @@ use std::error::Error as StdError;
 /// Database foundation error.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
+    /// The installation protocol cannot admit this database operation.
+    #[error("Paranoid protocol rejected database work: {0}")]
+    Protocol(#[from] super::ProtocolError),
     /// Pool configuration was internally inconsistent.
     #[error("invalid Postgres pool configuration: {reason}")]
     InvalidPoolConfig {
@@ -46,6 +49,7 @@ pub enum Error {
         /// Operation being cleaned up.
         operation: &'static str,
         /// Original operation error.
+        #[source]
         operation_error: Box<Error>,
         /// Rollback failure.
         rollback_error: Box<Error>,

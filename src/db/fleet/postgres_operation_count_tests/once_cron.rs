@@ -215,6 +215,7 @@ async fn fleet_once_and_cron_emit_exact_database_operation_records() {
                     DatabaseOperationKind::BeginTransaction,
                     "db.begin_transaction",
                 ),
+                (DatabaseOperationKind::FetchAll, "paranoid.protocol.admit"),
                 (DatabaseOperationKind::FetchOptional, KV_OPERATION_GET_BYTES),
                 (DatabaseOperationKind::FetchOptional, LEASE_OPERATION_RENEW),
                 (
@@ -265,6 +266,7 @@ async fn fleet_once_and_cron_emit_exact_database_operation_records() {
                     DatabaseOperationKind::BeginTransaction,
                     "db.begin_transaction",
                 ),
+                (DatabaseOperationKind::FetchAll, "paranoid.protocol.admit"),
                 (DatabaseOperationKind::FetchOptional, KV_OPERATION_GET_BYTES),
                 (DatabaseOperationKind::FetchOptional, LEASE_OPERATION_RENEW),
                 (

@@ -82,8 +82,8 @@ async fn queue_migration_rejects_future_schema_ledger_row_before_current_schema_
         &config.schema_ledger_table_name,
         "queue",
         &instance_key,
-        2,
-        "paranoid.queue.v2",
+        3,
+        "paranoid.queue.v3",
     )
     .await;
     drop_queue_test_tables(&test_database.sqlx_pool, &config).await;

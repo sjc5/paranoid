@@ -20,6 +20,7 @@ impl Store {
         tx: &mut Tx<'_>,
         options: ListJobsOptions,
     ) -> Result<ListJobsResult, Error> {
+        self.config.protocol.admit(tx).await?;
         let database_operation_observer = tx.database_operation_observer().cloned();
         list_jobs(
             tx.inner.as_mut(),
@@ -49,6 +50,7 @@ impl Store {
         tx: &mut Tx<'_>,
         options: ListDeadLetterJobsOptions,
     ) -> Result<ListDeadLetterJobsResult, Error> {
+        self.config.protocol.admit(tx).await?;
         let database_operation_observer = tx.database_operation_observer().cloned();
         list_dead_letter_jobs(
             tx.inner.as_mut(),
@@ -84,6 +86,7 @@ impl Store {
         dead_letter_job_id: JobId,
         run_at_or_after: Option<JobRunAtOrAfter>,
     ) -> Result<JobId, Error> {
+        self.config.protocol.admit(tx).await?;
         let database_operation_observer = tx.database_operation_observer().cloned();
         requeue_dead_letter_job(
             tx.inner.as_mut(),
@@ -114,6 +117,7 @@ impl Store {
         tx: &mut WriteTx<'_>,
         dead_letter_job_id: JobId,
     ) -> Result<(), Error> {
+        self.config.protocol.admit(tx).await?;
         let database_operation_observer = tx.database_operation_observer().cloned();
         delete_dead_letter_job(
             tx.inner.as_mut(),
@@ -186,6 +190,7 @@ impl Store {
         older_than: Duration,
         batch_size: u32,
     ) -> Result<u64, Error> {
+        self.config.protocol.admit(tx).await?;
         let database_operation_observer = tx.database_operation_observer().cloned();
         cleanup_jobs_older_than_once(
             tx.inner.as_mut(),
@@ -260,6 +265,7 @@ impl Store {
         older_than: Duration,
         batch_size: u32,
     ) -> Result<u64, Error> {
+        self.config.protocol.admit(tx).await?;
         let database_operation_observer = tx.database_operation_observer().cloned();
         cleanup_jobs_older_than_once(
             tx.inner.as_mut(),
@@ -332,6 +338,7 @@ impl Store {
         older_than: Duration,
         batch_size: u32,
     ) -> Result<u64, Error> {
+        self.config.protocol.admit(tx).await?;
         let database_operation_observer = tx.database_operation_observer().cloned();
         cleanup_available_dead_letter_jobs_older_than_once(
             tx.inner.as_mut(),

@@ -20,10 +20,9 @@ use super::{
     SQLSTATE_LOCK_NOT_AVAILABLE, SQLSTATE_QUERY_CANCELED, Tx, WritePool, WriteTx,
     duration_from_nonnegative_f64_seconds,
     finish_pool_owned_write_transaction_and_preserve_rollback_error,
-    pg_table_name_set_could_contain_same_relation,
-    plan_component_schema_migration_in_current_transaction, random_unit_f64_from_system,
+    pg_table_name_set_could_contain_same_relation, random_unit_f64_from_system,
     record_component_schema_migration_completion_in_current_transaction,
-    schema_instance_key_for_parts, validate_component_schema_version_in_current_transaction,
+    schema_instance_key_for_parts,
 };
 #[cfg(test)]
 use super::{finish_db_pool_validation_transaction, test_schema_ledger_table_name};

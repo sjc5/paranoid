@@ -254,6 +254,7 @@ pub(crate) async fn migrate_component_schema(
 ) -> Result<ComponentSchemaMigrationOutcome, Error> {
     let mut tx = pool.begin_transaction().await?;
     let result = async {
+        stores.protocol.admit(&mut tx).await?;
         migrate_component_schema_in_current_transaction(
             &mut tx,
             stores.schema_ledger_table_name(),

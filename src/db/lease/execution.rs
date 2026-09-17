@@ -1,4 +1,5 @@
 use super::*;
+use crate::db::bytea::Bytea;
 
 impl Store {
     pub(super) async fn try_claim_lease_with_executor<'e, E>(
@@ -20,7 +21,7 @@ impl Store {
             LEASE_OPERATION_CLAIM,
             Some(self.queries.claim_lease.as_str()),
         );
-        let row = pooler_safe_query_as::<(String, i64, Vec<u8>, i64)>(sqlx::AssertSqlSafe(
+        let row = pooler_safe_query_as::<(String, i64, Bytea, i64)>(sqlx::AssertSqlSafe(
             self.queries.claim_lease.as_str(),
         ))
         .bind(key.as_str())
@@ -37,7 +38,7 @@ impl Store {
                     key,
                     persisted_holder_id,
                     fencing_token,
-                    persisted_lease_token,
+                    persisted_lease_token.0,
                     expires_at,
                 )
             },
@@ -63,7 +64,7 @@ impl Store {
             LEASE_OPERATION_RENEW,
             Some(self.queries.renew_lease.as_str()),
         );
-        let row = pooler_safe_query_as::<(String, i64, Vec<u8>, i64)>(sqlx::AssertSqlSafe(
+        let row = pooler_safe_query_as::<(String, i64, Bytea, i64)>(sqlx::AssertSqlSafe(
             self.queries.renew_lease.as_str(),
         ))
         .bind(claim.key.as_str())
@@ -82,7 +83,7 @@ impl Store {
                     &claim.key,
                     persisted_holder_id,
                     fencing_token,
-                    persisted_lease_token,
+                    persisted_lease_token.0,
                     expires_at,
                 )
             },

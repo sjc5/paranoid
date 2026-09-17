@@ -426,7 +426,7 @@ fn schema_migrations_record_versions_only_after_physical_validation() {
     );
     assert_source_order(
         queue_body,
-        "plan_component_schema_migration_in_current_transaction(",
+        "plan_component_schema_with_compatible_prepared_versions(",
         "execute_queue_migration_statements_in_current_transaction(tx, queue.config_inner())",
         "Queue migration must classify the existing schema-ledger row before running current-schema DDL",
     );
@@ -444,7 +444,7 @@ fn schema_migrations_record_versions_only_after_physical_validation() {
     );
     assert_source_order(
         fleet_body,
-        "plan_component_schema_migration_in_current_transaction(",
+        "plan_component_schema_with_compatible_prepared_versions(",
         "migrate_kv_schema_in_current_transaction(tx, &config.kv_store_config()).await?",
         "Fleet migration must classify the existing schema-ledger row before migrating backing stores",
     );

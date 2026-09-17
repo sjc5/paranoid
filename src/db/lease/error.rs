@@ -80,6 +80,7 @@ pub enum CoordinationError {
         /// Operation being cleaned up.
         operation: &'static str,
         /// Original operation error.
+        #[source]
         operation_error: Box<CoordinationError>,
         /// Rollback failure.
         rollback_error: crate::db::Error,

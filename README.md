@@ -31,7 +31,7 @@ Default features are disabled. Enable only the namespaces your crate uses.
 
 ```toml
 [dependencies]
-paranoid = { version = "0.0.0-pre.8", features = ["db"] }
+paranoid = { version = "0.0.0-pre.10", features = ["db"] }
 ```
 
 Available feature groups:
@@ -280,6 +280,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 ```
+
+Bootstrap binds KV, Fleet, and Queue to one installation protocol relation. The first
+Paranoid operation in each transaction acquires a shared relation lock and checks the
+active epoch and fingerprint. Admission is reused until transaction completion; borrowing
+the raw SQLx transaction invalidates that cache because application SQL can roll back a
+savepoint. Pool transactions explicitly use READ COMMITTED and READ WRITE, independently
+of database defaults. SQL privileges still determine whether a role can write.
+
+This Rust implementation supports epoch 1 (`paranoid.protocol.pre9-state.v1`) and
+preserves its existing stored formats. Bootstrap also accepts the explicitly compatible
+prepared Fleet v8 and Queue v2 layouts under epoch 1 without changing their schema ledger
+records. An incompatible activation must hold the protocol relation exclusively, so it
+waits for admitted transactions. Subsequent Rust operations return `db::ProtocolError`
+before accessing Paranoid state. Queue workers stop after protocol rejection, and lease
+guards lose authority when renewal detects it. Guards and callbacks do not retain a
+database transaction throughout application work; applications must still observe their
+existing cancellation and leadership-loss signals.
+
+The protocol relation must exist before handles constructed for an already-migrated schema
+can access state. Schema preparation and epoch activation are distinct operations; this
+Rust implementation can prepare epoch-1 metadata but cannot activate another epoch. All
+participating processes must enforce admission before an incompatible activation. The
+unmodified `0.0.0-pre.9` release does not enforce it.
 
 Application-owned SQL can share the Paranoid-created SQLx pool and transactions. If an
 application wants its own queries to keep the same portable execution style

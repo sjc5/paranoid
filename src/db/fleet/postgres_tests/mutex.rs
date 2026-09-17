@@ -628,6 +628,12 @@ async fn fleet_mutex_guard_heartbeat_recovers_after_transient_renewal_error() {
         .await
         .expect("migrate Fleet schema");
 
+    let failure_trigger = install_one_shot_update_failure_trigger_on_table(
+        &test_database.sqlx_pool,
+        &test_database.config.coordination_table_name,
+    )
+    .await;
+
     let guard = mutex
         .try_claim_guard(&test_database.paranoid_pool, guard_config)
         .await
@@ -638,11 +644,6 @@ async fn fleet_mutex_guard_heartbeat_recovers_after_transient_renewal_error() {
         .await
         .expect("initial guard snapshot");
     let initial_expires_at = initial_snapshot.expires_at_unix_microseconds();
-    let failure_trigger = install_one_shot_update_failure_trigger_on_table(
-        &test_database.sqlx_pool,
-        &test_database.config.coordination_table_name,
-    )
-    .await;
 
     wait_until(
         "mutex guard heartbeat renews after transient renewal error",

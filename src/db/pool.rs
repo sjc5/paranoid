@@ -2,6 +2,7 @@ use super::{DatabaseOperationKind, DatabaseOperationObserver, Error};
 use secrecy::{ExposeSecret, SecretString};
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use sqlx::{PgPool, Postgres};
+use std::collections::HashSet;
 use std::ops::{Deref, DerefMut};
 use std::str::FromStr;
 use std::time::Duration;
@@ -78,6 +79,7 @@ pub struct WritePool {
 /// Paranoid transaction handle type.
 pub struct Tx<'tx> {
     pub(crate) inner: sqlx::Transaction<'tx, Postgres>,
+    pub(crate) admitted_protocols: HashSet<String>,
     pub(crate) operation_observer: Option<DatabaseOperationObserver>,
 }
 
@@ -150,16 +152,21 @@ impl Pool {
         &self.inner
     }
 
-    /// Starts an explicit Postgres transaction.
+    /// Starts an explicit READ COMMITTED, READ WRITE Postgres transaction.
     pub async fn begin_transaction(&self) -> Result<Tx<'_>, Error> {
         self.record_database_operation(
             DatabaseOperationKind::BeginTransaction,
             "db.begin_transaction",
-            None,
+            Some("BEGIN ISOLATION LEVEL READ COMMITTED READ WRITE"),
         );
-        let inner = self.inner.begin().await.map_err(Error::transaction)?;
+        let inner = self
+            .inner
+            .begin_with("BEGIN ISOLATION LEVEL READ COMMITTED READ WRITE")
+            .await
+            .map_err(Error::transaction)?;
         Ok(Tx {
             inner,
+            admitted_protocols: HashSet::new(),
             operation_observer: self.operation_observer.clone(),
         })
     }
@@ -283,6 +290,8 @@ impl<'tx> Tx<'tx> {
     /// This is a supported integration point for app-owned SQL that should
     /// commit or roll back with Paranoid-owned operations.
     pub fn sqlx_transaction(&mut self) -> &mut sqlx::Transaction<'tx, Postgres> {
+        // Caller SQL may roll back a savepoint that acquired a protocol lock.
+        self.admitted_protocols.clear();
         &mut self.inner
     }
 

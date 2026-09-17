@@ -31,7 +31,18 @@ impl MutexGuard {
 
     /// Releases the guarded mutex claim and stops the heartbeat loop.
     pub async fn release(mut self) -> Result<bool, Error> {
-        self.try_release().await
+        let result = self.try_release().await;
+        if result
+            .as_ref()
+            .is_err_and(|error| crate::db::contains_protocol_failure(error))
+        {
+            // Incompatible cleanup cannot regain authority by retrying from Drop.
+            // Consuming release joins the heartbeat before returning its failure.
+            let stopped = self.stop_heartbeat_loop().await;
+            self.current_claim.lock().await.take();
+            return combine_mutex_guard_stop_and_release_results(stopped, result);
+        }
+        result
     }
 
     /// Tries to release the guarded mutex claim while retaining retry authority on release failure.
@@ -175,6 +186,10 @@ pub(super) async fn run_mutex_guard_heartbeat(
             }
             Ok(None) => {
                 *claim_guard = None;
+                mark_mutex_guard_lost(&runtime.leadership_lost, &runtime.leadership_lost_notify);
+                return;
+            }
+            Err(error) if crate::db::contains_protocol_failure(&error) => {
                 mark_mutex_guard_lost(&runtime.leadership_lost, &runtime.leadership_lost_notify);
                 return;
             }

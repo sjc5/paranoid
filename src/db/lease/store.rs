@@ -3,6 +3,7 @@ use super::*;
 /// Schema configuration for the Postgres-backed lease primitive.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct StoreConfig {
+    pub(crate) protocol: crate::db::Protocol,
     /// Backing table for lease rows.
     pub(crate) table_name: PgQualifiedTableName,
     /// Backing table for durable per-key fencing counters.
@@ -20,6 +21,7 @@ pub struct Store {
 impl Default for StoreConfig {
     fn default() -> Self {
         Self {
+            protocol: crate::db::postgres_test_support::test_protocol(),
             table_name: PgQualifiedTableName::unqualified(TEST_LEASE_TABLE_NAME)
                 .expect("test lease table name must be a valid Postgres identifier"),
             fencing_counter_table_name: PgQualifiedTableName::unqualified(
@@ -36,6 +38,7 @@ impl StoreConfig {
     pub(crate) fn new(table_name: PgQualifiedTableName) -> Self {
         let fencing_counter_table_name = derive_fencing_counter_table_name(&table_name);
         Self {
+            protocol: crate::db::postgres_test_support::test_protocol(),
             table_name,
             fencing_counter_table_name,
         }
@@ -45,10 +48,12 @@ impl StoreConfig {
     pub(crate) fn new_with_explicit_fencing_counter_table(
         table_name: PgQualifiedTableName,
         fencing_counter_table_name: PgQualifiedTableName,
+        protocol: crate::db::Protocol,
     ) -> Self {
         Self {
             table_name,
             fencing_counter_table_name,
+            protocol,
         }
     }
 }
@@ -107,6 +112,7 @@ impl Store {
         duration: ClaimDuration,
     ) -> Result<Option<Claim>, Error> {
         let lease_token = Token::random()?;
+        self.config.protocol.admit(&mut *tx).await?;
         let database_operation_observer = tx.database_operation_observer().cloned();
         self.try_claim_lease_with_executor(
             tx.inner.as_mut(),
@@ -141,6 +147,7 @@ impl Store {
         duration: ClaimDuration,
     ) -> Result<Option<Claim>, Error> {
         let next_lease_token = Token::random()?;
+        self.config.protocol.admit(&mut *tx).await?;
         let database_operation_observer = tx.database_operation_observer().cloned();
         self.try_renew_lease_with_executor(
             tx.inner.as_mut(),
@@ -167,6 +174,7 @@ impl Store {
         tx: &mut WriteTx<'_>,
         claim: &Claim,
     ) -> Result<bool, Error> {
+        self.config.protocol.admit(&mut *tx).await?;
         let database_operation_observer = tx.database_operation_observer().cloned();
         self.release_lease_with_executor(
             tx.inner.as_mut(),
@@ -195,6 +203,7 @@ impl Store {
         tx: &mut Tx<'_>,
         key: &Key,
     ) -> Result<Option<HolderSnapshot>, Error> {
+        self.config.protocol.admit(&mut *tx).await?;
         let database_operation_observer = tx.database_operation_observer().cloned();
         self.fetch_live_lease_holder_with_executor(
             tx.inner.as_mut(),

@@ -33,6 +33,17 @@ pub(super) async fn run_queue_worker_loop(
                 claim_error_backoff = MIN_QUEUE_WORKER_CLAIM_ERROR_BACKOFF;
                 summary.record_claimed_count(claimed_count)?;
             }
+            Err(error) if crate::db::contains_protocol_failure(&error) => {
+                let (in_flight_errors, cleanup_result) =
+                    handle_queue_worker_runtime_error(&runtime, &mut in_flight_jobs).await;
+                return Err(
+                    worker_runtime_error_after_in_flight_abort_and_claimed_job_cleanup(
+                        error,
+                        in_flight_errors,
+                        cleanup_result,
+                    ),
+                );
+            }
             Err(_) => {
                 wait_for_worker_claim_retry_backoff_or_shutdown(
                     &runtime.worker_shutdown_signal,

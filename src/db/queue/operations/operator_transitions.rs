@@ -1,4 +1,5 @@
 use super::*;
+use crate::db::bytea::Bytea;
 
 pub(in crate::db::queue) struct ExpectedJobStateTransition<'a> {
     pub(in crate::db::queue) statement: &'a str,
@@ -127,7 +128,8 @@ where
     .await
     .map_err(DbError::query)?;
     let inserted_id: Option<Vec<u8>> = row
-        .try_get(QueueQueryField::InsertedId.name())
+        .try_get::<Option<Bytea>, _>(QueueQueryField::InsertedId.name())
+        .map(|value| value.map(|bytes| bytes.0))
         .map_err(Error::decode_row)?;
     let target_exists: bool = row
         .try_get(QueueQueryField::TargetExists.name())

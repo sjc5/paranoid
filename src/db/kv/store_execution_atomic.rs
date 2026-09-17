@@ -1,4 +1,5 @@
 use super::*;
+use crate::db::bytea::Bytea;
 
 impl Store {
     pub(super) async fn lock_key_for_atomic_mutation(
@@ -6,15 +7,16 @@ impl Store {
         tx: &mut Tx<'_>,
         key: &Key,
     ) -> Result<(bool, Option<LockedKvRow>), Error> {
+        self.config.protocol.admit(tx).await?;
         for _ in 0..8 {
             tx.record_database_operation(
                 DatabaseOperationKind::FetchOptional,
                 KV_OPERATION_LOCK_KEY_FOR_ATOMIC_MUTATION,
                 Some(self.queries.lock_key_for_atomic_mutation.as_str()),
             );
-            let locked_row = pooler_safe_query_as::<(bool, Vec<u8>, bool, i64)>(
-                sqlx::AssertSqlSafe(self.queries.lock_key_for_atomic_mutation.as_str()),
-            )
+            let locked_row = pooler_safe_query_as::<(bool, Bytea, bool, i64)>(sqlx::AssertSqlSafe(
+                self.queries.lock_key_for_atomic_mutation.as_str(),
+            ))
             .bind(key.as_str())
             .fetch_optional(tx.inner.as_mut())
             .await
@@ -24,7 +26,7 @@ impl Store {
                     (
                         inserted_absent_placeholder,
                         LockedKvRow {
-                            value,
+                            value: value.0,
                             is_live,
                             database_timestamp: DatabaseTimestampMicros(database_timestamp),
                         },
@@ -91,6 +93,7 @@ impl Store {
         tx: &mut Tx<'_>,
         key: &Key,
     ) -> Result<(), Error> {
+        self.config.protocol.admit(tx).await?;
         tx.record_database_operation(
             DatabaseOperationKind::Execute,
             KV_OPERATION_DELETE_KEY_FOR_ATOMIC_MUTATION,
@@ -114,6 +117,7 @@ impl Store {
         value: &[u8],
         ttl: Ttl,
     ) -> Result<(), Error> {
+        self.config.protocol.admit(tx).await?;
         let rows_affected = if let Some(ttl_microseconds) = ttl.positive_microseconds()? {
             tx.record_database_operation(
                 DatabaseOperationKind::Execute,
@@ -168,6 +172,7 @@ impl Store {
         key: &Key,
         value: &[u8],
     ) -> Result<(), Error> {
+        self.config.protocol.admit(tx).await?;
         tx.record_database_operation(
             DatabaseOperationKind::Execute,
             KV_OPERATION_SET_BYTES_PRESERVING_EXPIRATION_FOR_ATOMIC_MUTATION,

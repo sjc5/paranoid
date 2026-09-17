@@ -352,6 +352,7 @@ pub enum Error {
         /// Operation being cleaned up.
         operation: &'static str,
         /// Original operation error.
+        #[source]
         operation_error: Box<Error>,
         /// Rollback failure.
         rollback_error: crate::db::Error,

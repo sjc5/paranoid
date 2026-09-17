@@ -82,14 +82,7 @@ async fn queue_registered_json_task_helpers_emit_exact_database_operation_record
         .begin_transaction()
         .await
         .expect("begin caller transaction");
-    assert_eq!(
-        observer.records(),
-        vec![DatabaseOperationRecord {
-            kind: DatabaseOperationKind::BeginTransaction,
-            label: "db.begin_transaction",
-            statement: None,
-        }]
-    );
+    assert_eq!(observer.records(), vec![test_transaction_begin_record()]);
     observer.clear();
 
     registered_task
@@ -100,11 +93,16 @@ async fn queue_registered_json_task_helpers_emit_exact_database_operation_record
         )
         .await
         .expect("enqueue through registered task helper in caller transaction");
-    expect_single_record(
+    expect_operation_records(
         &observer,
-        DatabaseOperationKind::FetchOne,
-        QUEUE_OPERATION_ENQUEUE,
-        queue.sql_catalog().single_enqueue_query(),
+        &[
+            test_protocol_admission_record(),
+            DatabaseOperationRecord {
+                kind: DatabaseOperationKind::FetchOne,
+                label: QUEUE_OPERATION_ENQUEUE,
+                statement: Some(queue.sql_catalog().single_enqueue_query().to_owned()),
+            },
+        ],
     );
 
     registered_task

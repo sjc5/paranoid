@@ -1,7 +1,7 @@
 use super::{
-    ComponentSchemaMigrationPlan, ComponentSchemaMigrationStep, DatabaseOperationKind, DbError,
-    PgIdentifier, PgQualifiedTableName, PgSqlState, RecordedComponentSchemaVersion, Tx,
-    normalize_check_constraint_expression, plan_component_schema_migration, pooler_safe_query,
+    ComponentSchemaMigrationPlan, ComponentSchemaMigrationStep, ComponentSchemaMigrationTarget,
+    DatabaseOperationKind, DbError, PgIdentifier, PgQualifiedTableName, PgSqlState,
+    RecordedComponentSchemaVersion, Tx, plan_component_schema_migration, pooler_safe_query,
     pooler_safe_query_as, pooler_safe_query_scalar, sql_state_from_sqlx_error,
 };
 
@@ -178,17 +178,17 @@ impl<'a> SchemaLedgerCatalog<'a> {
             r#"
         CREATE TABLE IF NOT EXISTS {} (
             {component} {component_type} COLLATE "C" NOT NULL CHECK (
-                octet_length({component}) > 0
-                AND octet_length({component}) <= {MAX_SCHEMA_LEDGER_COMPONENT_BYTES}
+                pg_catalog.octet_length({component}) > 0
+                AND pg_catalog.octet_length({component}) <= {MAX_SCHEMA_LEDGER_COMPONENT_BYTES}
             ),
             {instance_key} {instance_key_type} COLLATE "C" NOT NULL CHECK (
-                octet_length({instance_key}) > 0
-                AND octet_length({instance_key}) <= {MAX_SCHEMA_LEDGER_INSTANCE_KEY_BYTES}
+                pg_catalog.octet_length({instance_key}) > 0
+                AND pg_catalog.octet_length({instance_key}) <= {MAX_SCHEMA_LEDGER_INSTANCE_KEY_BYTES}
             ),
             {schema_version} {schema_version_type} NOT NULL CHECK ({schema_version} > 0),
             {schema_fingerprint} {schema_fingerprint_type} COLLATE "C" NOT NULL CHECK (
-                octet_length({schema_fingerprint}) > 0
-                AND octet_length({schema_fingerprint}) <= {MAX_SCHEMA_LEDGER_FINGERPRINT_BYTES}
+                pg_catalog.octet_length({schema_fingerprint}) > 0
+                AND pg_catalog.octet_length({schema_fingerprint}) <= {MAX_SCHEMA_LEDGER_FINGERPRINT_BYTES}
             ),
             {applied_at} {applied_at_type} NOT NULL,
             PRIMARY KEY ({primary_key_columns})
@@ -372,14 +372,8 @@ async fn plan_component_schema_migration_in_current_transaction_inner<'a>(
     component_schema_version: ComponentSchemaVersion<'_>,
     upgrade_steps: &'a [ComponentSchemaMigrationStep<'a>],
 ) -> Result<ComponentSchemaMigrationPlan<'a>, DbError> {
-    validate_component_schema_version(component_schema_version)?;
-    execute_schema_ledger_migration_in_current_transaction(tx, table_name).await?;
-    let recorded = claim_or_lock_component_schema_version_row_in_current_transaction(
-        tx,
-        table_name,
-        component_schema_version,
-    )
-    .await?;
+    let recorded =
+        read_component_schema_for_migration(tx, table_name, component_schema_version).await?;
     plan_component_schema_migration(component_schema_version, recorded, upgrade_steps)
 }
 
@@ -549,6 +543,21 @@ async fn validate_component_schema_version_row_in_current_transaction(
     table_name: &PgQualifiedTableName,
     component_schema_version: ComponentSchemaVersion<'_>,
 ) -> Result<(), DbError> {
+    validate_component_schema_version_row_with_compatible_prepared_versions(
+        tx,
+        table_name,
+        component_schema_version,
+        &[],
+    )
+    .await
+}
+
+async fn validate_component_schema_version_row_with_compatible_prepared_versions(
+    tx: &mut Tx<'_>,
+    table_name: &PgQualifiedTableName,
+    component_schema_version: ComponentSchemaVersion<'_>,
+    prepared: &[ComponentSchemaMigrationTarget<'_>],
+) -> Result<(), DbError> {
     let actual = fetch_component_schema_version_row_in_current_transaction(
         tx,
         table_name,
@@ -562,6 +571,13 @@ async fn validate_component_schema_version_row_in_current_transaction(
             component_schema_version.component, component_schema_version.instance_key
         )));
     };
+
+    if prepared
+        .iter()
+        .any(|target| target.version == actual.version && target.fingerprint == actual.fingerprint)
+    {
+        return Ok(());
+    }
 
     if actual.version != component_schema_version.version {
         return Err(DbError::schema_mismatch(format!(
@@ -972,13 +988,7 @@ async fn validate_schema_ledger_required_check_constraints(
     catalog: &SchemaLedgerCatalog<'_>,
 ) -> Result<(), DbError> {
     let quoted_table_name = catalog.quoted_table_name();
-    let statement = r#"
-        SELECT pg_get_expr(con.conbin, con.conrelid)
-        FROM pg_constraint con
-        WHERE con.conrelid = to_regclass($1)
-          AND con.contype = 'c'
-          AND con.convalidated
-        "#;
+    let statement = crate::db::schema::BUILTIN_CHECK_EXPRESSIONS_SQL;
     tx.record_database_operation(
         DatabaseOperationKind::FetchAll,
         SCHEMA_LEDGER_OPERATION_VALIDATE_CHECK_CONSTRAINTS,
@@ -990,7 +1000,7 @@ async fn validate_schema_ledger_required_check_constraints(
         .await
         .map_err(DbError::query)?
         .into_iter()
-        .map(|expression| normalize_check_constraint_expression(&expression))
+        .map(|expression| crate::db::schema::normalize_builtin_check_expression(&expression))
         .collect::<Vec<String>>();
 
     for column in SCHEMA_LEDGER_CHECKED_COLUMNS {
@@ -1072,4 +1082,58 @@ pub(crate) fn build_migrate_schema_ledger_statement_for_test(
     config: &SchemaLedgerConfig,
 ) -> String {
     build_create_schema_ledger_table_statement(&config.table_name)
+}
+
+async fn read_component_schema_for_migration(
+    tx: &mut Tx<'_>,
+    table_name: &PgQualifiedTableName,
+    component_schema_version: ComponentSchemaVersion<'_>,
+) -> Result<Option<RecordedComponentSchemaVersion>, DbError> {
+    validate_component_schema_version(component_schema_version)?;
+    execute_schema_ledger_migration_in_current_transaction(tx, table_name).await?;
+    claim_or_lock_component_schema_version_row_in_current_transaction(
+        tx,
+        table_name,
+        component_schema_version,
+    )
+    .await
+}
+
+pub(crate) enum CompatibleComponentSchemaPlan<'a> {
+    Migrate(ComponentSchemaMigrationPlan<'a>),
+    Prepared,
+}
+
+/// Accepts only explicitly declared physical layouts while retaining the admitted runtime protocol.
+pub(crate) async fn plan_component_schema_with_compatible_prepared_versions<'a>(
+    tx: &mut Tx<'_>,
+    table_name: &PgQualifiedTableName,
+    version: ComponentSchemaVersion<'_>,
+    steps: &'a [ComponentSchemaMigrationStep<'a>],
+    prepared: &[ComponentSchemaMigrationTarget<'_>],
+) -> Result<CompatibleComponentSchemaPlan<'a>, DbError> {
+    let recorded = read_component_schema_for_migration(tx, table_name, version).await?;
+    if recorded.as_ref().is_some_and(|actual| {
+        prepared.iter().any(|target| {
+            target.version == actual.version && target.fingerprint == actual.fingerprint
+        })
+    }) {
+        return Ok(CompatibleComponentSchemaPlan::Prepared);
+    }
+    plan_component_schema_migration(version, recorded, steps)
+        .map(CompatibleComponentSchemaPlan::Migrate)
+}
+
+pub(crate) async fn validate_component_schema_with_compatible_prepared_versions(
+    tx: &mut Tx<'_>,
+    table_name: &PgQualifiedTableName,
+    version: ComponentSchemaVersion<'_>,
+    prepared: &[ComponentSchemaMigrationTarget<'_>],
+) -> Result<(), DbError> {
+    validate_component_schema_version(version)?;
+    validate_schema_ledger_with_transaction(tx, table_name).await?;
+    validate_component_schema_version_row_with_compatible_prepared_versions(
+        tx, table_name, version, prepared,
+    )
+    .await
 }

@@ -133,15 +133,15 @@ mod tests {
 
         assert!(
             joined
-                .contains(r#"key TEXT COLLATE "C" PRIMARY KEY CHECK (octet_length(key) > 0 AND octet_length(key) <= 2048)"#)
+                .contains(r#"key TEXT COLLATE "C" PRIMARY KEY CHECK (pg_catalog.octet_length(key) > 0 AND pg_catalog.octet_length(key) <= 2048)"#)
         );
         assert!(joined.contains(
-            r#"holder_id TEXT COLLATE "C" NOT NULL CHECK (octet_length(holder_id) > 0 AND octet_length(holder_id) <= 512)"#
+            r#"holder_id TEXT COLLATE "C" NOT NULL CHECK (pg_catalog.octet_length(holder_id) > 0 AND pg_catalog.octet_length(holder_id) <= 512)"#
         ));
         assert!(joined.contains("fencing_token BIGINT NOT NULL CHECK (fencing_token > 0)"));
-        assert!(
-            joined.contains("lease_token BYTEA NOT NULL CHECK (octet_length(lease_token) = 32)")
-        );
+        assert!(joined.contains(
+            "lease_token BYTEA NOT NULL CHECK (pg_catalog.octet_length(lease_token) = 32)"
+        ));
         assert!(
             joined.contains("last_fencing_token BIGINT NOT NULL CHECK (last_fencing_token > 0)")
         );
@@ -235,8 +235,11 @@ mod tests {
             PgQualifiedTableName::with_schema("public", "__paranoid_same_lease_table")
                 .expect("valid public-qualified table");
 
-        let config =
-            StoreConfig::new_with_explicit_fencing_counter_table(unqualified_table, public_table);
+        let config = StoreConfig::new_with_explicit_fencing_counter_table(
+            unqualified_table,
+            public_table,
+            crate::db::postgres_test_support::test_protocol(),
+        );
 
         let error = validate_distinct_table_names(&config).expect_err("ambiguous table names");
         assert!(

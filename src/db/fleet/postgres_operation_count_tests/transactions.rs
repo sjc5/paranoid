@@ -30,7 +30,10 @@ async fn fleet_in_current_transaction_operations_emit_only_inner_database_operat
         .expect("set counter in caller transaction");
     expect_operation_shapes(
         &observer,
-        &[(DatabaseOperationKind::Execute, KV_OPERATION_SET_BYTES)],
+        &[
+            (DatabaseOperationKind::FetchAll, "paranoid.protocol.admit"),
+            (DatabaseOperationKind::Execute, KV_OPERATION_SET_BYTES),
+        ],
     );
 
     assert_eq!(

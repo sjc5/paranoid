@@ -1,4 +1,5 @@
 use super::*;
+use crate::db::bytea::Bytea;
 
 pub(in crate::db::queue) struct OwnedRunningJobUpdate<'a> {
     pub(in crate::db::queue) statement: &'a str,
@@ -217,7 +218,8 @@ where
         .map_err(Error::decode_row)?;
     move_owned_running_job_to_dead_letter_result_from_outcome(
         &outcome,
-        row.try_get(QueueQueryField::InsertedId.name())
+        row.try_get::<Option<Bytea>, _>(QueueQueryField::InsertedId.name())
+            .map(|value| value.map(|bytes| bytes.0))
             .map_err(Error::decode_row)?,
     )
 }

@@ -312,7 +312,7 @@ async fn queue_worker_abort_join_result_filter_ignores_expected_cancellation_and
 #[tokio::test]
 async fn queue_worker_stop_heartbeat_loop_reports_heartbeat_task_join_errors() {
     let (stop_sender, _stop_receiver) = tokio::sync::oneshot::channel();
-    let heartbeat_task = tokio::spawn(std::future::pending::<()>());
+    let heartbeat_task = tokio::spawn(std::future::pending::<Result<(), Error>>());
     heartbeat_task.abort();
     let heartbeat_handle = WorkerHeartbeatLoopHandle::new(heartbeat_task, stop_sender);
     let error = stop_worker_heartbeat_loop(Some(heartbeat_handle))

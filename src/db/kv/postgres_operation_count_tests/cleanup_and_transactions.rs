@@ -81,14 +81,7 @@ async fn kv_in_current_transaction_operations_emit_only_inner_database_operation
         .begin_transaction()
         .await
         .expect("begin caller transaction");
-    assert_eq!(
-        observer.records(),
-        vec![DatabaseOperationRecord {
-            kind: DatabaseOperationKind::BeginTransaction,
-            label: "db.begin_transaction",
-            statement: None,
-        }]
-    );
+    assert_eq!(observer.records(), vec![test_transaction_begin_record()]);
     observer.clear();
 
     let raw_key = Key::from_parts(["operation-count", "tx", "raw"]).expect("raw key");
@@ -98,11 +91,14 @@ async fn kv_in_current_transaction_operations_emit_only_inner_database_operation
         .expect("set raw bytes in caller transaction");
     assert_eq!(
         observer.records(),
-        vec![DatabaseOperationRecord {
-            kind: DatabaseOperationKind::Execute,
-            label: KV_OPERATION_SET_BYTES,
-            statement: Some(store.queries.set_bytes_no_expiration.clone()),
-        }]
+        vec![
+            test_protocol_admission_record(),
+            DatabaseOperationRecord {
+                kind: DatabaseOperationKind::Execute,
+                label: KV_OPERATION_SET_BYTES,
+                statement: Some(store.queries.set_bytes_no_expiration.clone()),
+            }
+        ]
     );
     observer.clear();
 

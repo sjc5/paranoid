@@ -1,4 +1,5 @@
 use super::*;
+use crate::db::bytea::Bytea;
 
 impl Store {
     pub(super) async fn acquire_prepared_slot_bytes_in_current_transaction(
@@ -8,6 +9,7 @@ impl Store {
         value: &[u8],
         ttl_microseconds: i64,
     ) -> Result<Option<Key>, Error> {
+        self.config.protocol.admit(tx).await?;
         tx.record_database_operation(
             DatabaseOperationKind::Execute,
             KV_OPERATION_ENSURE_SLOT_KEYS_EXIST,
@@ -271,11 +273,12 @@ impl Store {
             KV_OPERATION_GET_BYTES,
             Some(self.queries.get_bytes.as_str()),
         );
-        pooler_safe_query_scalar::<Vec<u8>>(sqlx::AssertSqlSafe(self.queries.get_bytes.as_str()))
+        pooler_safe_query_scalar::<Bytea>(sqlx::AssertSqlSafe(self.queries.get_bytes.as_str()))
             .bind(key.as_str())
             .fetch_optional(executor)
             .await
             .map_err(DbError::query)?
+            .map(|value| value.0)
             .ok_or(Error::KeyNotFound)
     }
 
@@ -294,7 +297,7 @@ impl Store {
             KV_OPERATION_GET_BYTES_RETURNING_DATABASE_TIMESTAMP,
             Some(self.queries.get_bytes_returning_database_timestamp.as_str()),
         );
-        let (value, database_timestamp) = pooler_safe_query_as::<(Vec<u8>, i64)>(
+        let (value, database_timestamp) = pooler_safe_query_as::<(Bytea, i64)>(
             sqlx::AssertSqlSafe(self.queries.get_bytes_returning_database_timestamp.as_str()),
         )
         .bind(key.as_str())
@@ -304,7 +307,7 @@ impl Store {
         .ok_or(Error::KeyNotFound)?;
 
         Ok(BytesWithDatabaseTimestamp {
-            value,
+            value: value.0,
             database_timestamp: DatabaseTimestampMicros(database_timestamp),
         })
     }
@@ -329,7 +332,7 @@ impl Store {
             KV_OPERATION_GET_BYTES_MULTI,
             Some(self.queries.get_bytes_multi.as_str()),
         );
-        let rows = pooler_safe_query_as::<(String, Vec<u8>)>(sqlx::AssertSqlSafe(
+        let rows = pooler_safe_query_as::<(String, Bytea)>(sqlx::AssertSqlSafe(
             self.queries.get_bytes_multi.as_str(),
         ))
         .bind(&prepared_keys.keys)
@@ -340,7 +343,7 @@ impl Store {
         let mut results = vec![None; prepared_keys.keys.len()];
         for (key, value) in rows {
             if let Some(index) = prepared_keys.key_to_index.get(key.as_str()) {
-                results[*index] = Some(value);
+                results[*index] = Some(value.0);
             }
         }
 

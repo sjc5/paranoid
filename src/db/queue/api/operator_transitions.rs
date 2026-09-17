@@ -16,6 +16,7 @@ impl Store {
         tx: &mut WriteTx<'_>,
         job_id: JobId,
     ) -> Result<(), Error> {
+        self.config.protocol.admit(tx).await?;
         let database_operation_observer = tx.database_operation_observer().cloned();
         execute_job_state_transition(
             tx.inner.as_mut(),
@@ -50,6 +51,7 @@ impl Store {
         job_id: JobId,
         run_at_or_after: Option<JobRunAtOrAfter>,
     ) -> Result<(), Error> {
+        self.config.protocol.admit(tx).await?;
         let database_operation_observer = tx.database_operation_observer().cloned();
         execute_retry_failed_job(
             tx.inner.as_mut(),
@@ -99,6 +101,7 @@ impl Store {
         validate_retry_available_failed_jobs_limit(limit)?;
         let run_at_or_after_unix_microseconds =
             run_at_or_after.map(JobRunAtOrAfter::as_unix_microseconds);
+        self.config.protocol.admit(tx).await?;
         let database_operation_observer = tx.database_operation_observer().cloned();
         for attempt_index in 0..5 {
             record_database_operation(
@@ -229,6 +232,7 @@ impl Store {
         tx: &mut WriteTx<'_>,
         job_id: JobId,
     ) -> Result<(), Error> {
+        self.config.protocol.admit(tx).await?;
         let database_operation_observer = tx.database_operation_observer().cloned();
         execute_job_state_transition_for_expected_status(
             tx.inner.as_mut(),
@@ -266,6 +270,7 @@ impl Store {
         job_id: JobId,
         reason: DeadLetterReason,
     ) -> Result<JobId, Error> {
+        self.config.protocol.admit(tx).await?;
         let database_operation_observer = tx.database_operation_observer().cloned();
         move_failed_job_to_dead_letter(
             tx.inner.as_mut(),
@@ -285,15 +290,9 @@ impl Store {
         reason: DeadLetterReason,
     ) -> Result<MoveFailedJobsToDeadLetterBatchResult, Error> {
         let mut tx = pool.begin_transaction().await.map_err(Error::from)?;
-        let database_operation_observer = tx.database_operation_observer().cloned();
-        let result = move_failed_jobs_to_dead_letter_batch(
-            tx.inner.as_mut(),
-            database_operation_observer.as_ref(),
-            self.sql_catalog(),
-            job_ids,
-            reason,
-        )
-        .await;
+        let result = self
+            .move_failed_jobs_to_dead_letter_batch_in_current_transaction(&mut tx, job_ids, reason)
+            .await;
         finish_queue_pool_transaction("move failed jobs to dead letter batch", tx, result).await
     }
 
@@ -304,6 +303,9 @@ impl Store {
         job_ids: &[JobId],
         reason: DeadLetterReason,
     ) -> Result<MoveFailedJobsToDeadLetterBatchResult, Error> {
+        if !job_ids.is_empty() {
+            self.config.protocol.admit(tx).await?;
+        }
         let database_operation_observer = tx.database_operation_observer().cloned();
         move_failed_jobs_to_dead_letter_batch(
             tx.inner.as_mut(),

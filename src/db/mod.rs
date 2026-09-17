@@ -75,6 +75,7 @@
 //! ```
 
 mod bootstrap;
+mod bytea;
 mod component_schema;
 mod error;
 pub(crate) mod fleet;
@@ -88,6 +89,8 @@ mod portable_query_literal;
 mod portable_query_template;
 #[cfg(test)]
 pub(crate) mod postgres_test_support;
+mod protocol;
+mod protocol_schema;
 pub(crate) mod queue;
 mod schema;
 mod schema_ledger;
@@ -100,7 +103,7 @@ mod time;
 
 pub use bootstrap::{
     BOOTSTRAP_FLEET_COORDINATION_TABLE_NAME, BOOTSTRAP_FLEET_FENCING_COUNTER_TABLE_NAME,
-    BOOTSTRAP_FLEET_STATE_TABLE_NAME, BOOTSTRAP_KV_TABLE_NAME,
+    BOOTSTRAP_FLEET_STATE_TABLE_NAME, BOOTSTRAP_KV_TABLE_NAME, BOOTSTRAP_PROTOCOL_TABLE_NAME,
     BOOTSTRAP_QUEUE_DEAD_LETTER_TABLE_NAME, BOOTSTRAP_QUEUE_JOBS_TABLE_NAME,
     BOOTSTRAP_QUEUE_PAUSE_TABLE_NAME, BOOTSTRAP_SCHEMA_LEDGER_TABLE_NAME, BootstrapConfig,
     BootstrapError, BootstrapStores, BootstrapTableNames,
@@ -120,6 +123,7 @@ pub use portable_query::{
     portable_query_as, portable_query_scalar, unparameterized_simple_query,
 };
 pub use portable_query_literal::IntoPortableQueryLiteral;
+pub use protocol::{Protocol, ProtocolError, contains_protocol_failure};
 pub use schema_ledger::{ComponentSchemaVersion, component_schema_instance_key_for_tables};
 pub use schema_migration::{ComponentSchemaMigrationStep, ComponentSchemaMigrationTarget};
 pub use simple_query::{PostgresLiteral, SimpleQuery};

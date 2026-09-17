@@ -1,5 +1,4 @@
 use super::*;
-use crate::db::normalize_check_constraint_expression;
 use sqlx::{Executor, Postgres};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -236,13 +235,7 @@ async fn fetch_normalized_check_constraint_expressions<'e, E>(
 where
     E: Executor<'e, Database = Postgres>,
 {
-    let statement = r#"
-        SELECT pg_get_expr(con.conbin, con.conrelid)
-        FROM pg_constraint con
-        WHERE con.conrelid = to_regclass($1)
-          AND con.contype = 'c'
-          AND con.convalidated
-        "#;
+    let statement = crate::db::schema::BUILTIN_CHECK_EXPRESSIONS_SQL;
     record_database_operation(
         observer,
         DatabaseOperationKind::FetchAll,
@@ -255,7 +248,7 @@ where
         .await
         .map_err(DbError::query)?
         .into_iter()
-        .map(|expression| normalize_check_constraint_expression(&expression))
+        .map(|expression| crate::db::schema::normalize_builtin_check_expression(&expression))
         .collect::<Vec<String>>();
 
     Ok(normalized_check_expressions)

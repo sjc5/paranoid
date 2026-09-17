@@ -69,9 +69,7 @@ pub(super) async fn connect_paranoid_pool_with_max_connections(
     let mut config = PoolConfig::new(SecretString::from(database_url.to_owned()));
     config.max_connections = max_connections;
     config.application_name = Some("paranoid_db_kv_postgres_test".to_owned());
-    WritePool::connect(config)
-        .await
-        .expect("connect paranoid pool")
+    crate::db::postgres_test_support::connect_test_write_pool(config).await
 }
 
 pub(super) async fn connect_sqlx_pool(database_url: &str) -> PgPool {

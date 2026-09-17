@@ -343,7 +343,7 @@ async fn fleet_semaphore_claims_are_scoped_and_stale_claims_do_not_release_reuse
     let test_database = TestDatabase::connect().await;
 
     let store = Store::new(test_database.config.clone()).expect("fleet store");
-    let duration = Duration::from_millis(1200);
+    let duration = Duration::from_secs(60);
     let first_semaphore = store
         .new_semaphore(
             SemaphoreKey::new("first-semaphore").expect("semaphore key"),
@@ -383,7 +383,21 @@ async fn fleet_semaphore_claims_are_scoped_and_stale_claims_do_not_release_reuse
         "error = {err:?}"
     );
 
-    tokio::time::sleep(Duration::from_millis(1300)).await;
+    let slot_key = persisted_semaphore_slot_key(
+        &test_database.config,
+        first_semaphore.key(),
+        first_claim.slot_suffix(),
+    );
+    let expired = sqlx::query(sqlx::AssertSqlSafe(format!(
+        "UPDATE {} SET expires_at = clock_timestamp() - interval '1 second' WHERE key = $1",
+        test_database.config.state_table_name.quoted()
+    )))
+    .bind(slot_key.as_str())
+    .execute(&test_database.sqlx_pool)
+    .await
+    .expect("expire the first claim without expiring its replacement");
+    assert_eq!(expired.rows_affected(), 1);
+
     let second_claim = first_semaphore
         .begin_manual_claim_lifecycle()
         .try_acquire_claim_for_holder(&test_database.paranoid_pool, &second_holder)

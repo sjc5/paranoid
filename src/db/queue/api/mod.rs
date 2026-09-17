@@ -9,6 +9,7 @@ mod worker_transitions;
 impl Default for StoreConfig {
     fn default() -> Self {
         Self {
+            protocol: crate::db::postgres_test_support::test_protocol(),
             table_name: PgQualifiedTableName::unqualified(TEST_QUEUE_JOBS_TABLE_NAME)
                 .expect("test queue jobs table name must be valid"),
             dead_letter_table_name: PgQualifiedTableName::unqualified(
@@ -99,6 +100,7 @@ impl StoreConfig {
         pause_table_name: PgQualifiedTableName,
     ) -> Result<Self, Error> {
         let config = Self {
+            protocol: crate::db::postgres_test_support::test_protocol(),
             table_name,
             dead_letter_table_name,
             pause_table_name,
@@ -273,14 +275,21 @@ impl Store {
             options,
             self.config.payload_json_limit_bytes,
         )?;
+        if prepared.jobs.is_empty() {
+            return Ok(Vec::new());
+        }
         let mut tx = pool.begin_transaction().await.map_err(Error::from)?;
-        let database_operation_observer = tx.database_operation_observer().cloned();
-        let result = execute_batch_enqueue(
-            tx.inner.as_mut(),
-            database_operation_observer.as_ref(),
-            self.sql_catalog(),
-            prepared,
-        )
+        let result = async {
+            self.config.protocol.admit(&mut tx).await?;
+            let database_operation_observer = tx.database_operation_observer().cloned();
+            execute_batch_enqueue(
+                tx.inner.as_mut(),
+                database_operation_observer.as_ref(),
+                self.sql_catalog(),
+                prepared,
+            )
+            .await
+        }
         .await;
         finish_queue_pool_transaction("batch enqueue", tx, result).await
     }
@@ -299,6 +308,10 @@ impl Store {
             options,
             self.config.payload_json_limit_bytes,
         )?;
+        if prepared.jobs.is_empty() {
+            return Ok(Vec::new());
+        }
+        self.config.protocol.admit(tx).await?;
         let database_operation_observer = tx.database_operation_observer().cloned();
         execute_batch_enqueue(
             tx.inner.as_mut(),
@@ -324,6 +337,7 @@ impl Store {
         tx: &mut Tx<'_>,
         job_id: JobId,
     ) -> Result<Job, Error> {
+        self.config.protocol.admit(tx).await?;
         let database_operation_observer = tx.database_operation_observer().cloned();
         fetch_job_by_id(
             tx.inner.as_mut(),
@@ -377,6 +391,7 @@ impl Store {
         if let Some(task_name) = optional_task_name {
             validate_task_name(task_name)?;
         }
+        self.config.protocol.admit(tx).await?;
         let database_operation_observer = tx.database_operation_observer().cloned();
         fetch_status_counts(
             tx.inner.as_mut(),
@@ -412,6 +427,7 @@ impl Store {
         if let Some(task_name) = optional_task_name {
             validate_task_name(task_name)?;
         }
+        self.config.protocol.admit(tx).await?;
         let database_operation_observer = tx.database_operation_observer().cloned();
         fetch_job_count_by_status(
             tx.inner.as_mut(),
@@ -448,6 +464,7 @@ impl Store {
         if let Some(task_name) = optional_task_name {
             validate_task_name(task_name)?;
         }
+        self.config.protocol.admit(tx).await?;
         let database_operation_observer = tx.database_operation_observer().cloned();
         fetch_job_count_by_status(
             tx.inner.as_mut(),
@@ -471,6 +488,7 @@ impl Store {
         &self,
         tx: &mut WriteTx<'_>,
     ) -> Result<(), Error> {
+        self.config.protocol.admit(tx).await?;
         let database_operation_observer = tx.database_operation_observer().cloned();
         upsert_pause_key(
             tx.inner.as_mut(),
@@ -494,6 +512,7 @@ impl Store {
         &self,
         tx: &mut WriteTx<'_>,
     ) -> Result<(), Error> {
+        self.config.protocol.admit(tx).await?;
         let database_operation_observer = tx.database_operation_observer().cloned();
         delete_pause_key(
             tx.inner.as_mut(),
@@ -518,6 +537,7 @@ impl Store {
         &self,
         tx: &mut Tx<'_>,
     ) -> Result<bool, Error> {
+        self.config.protocol.admit(tx).await?;
         let database_operation_observer = tx.database_operation_observer().cloned();
         fetch_pause_key_exists(
             tx.inner.as_mut(),
@@ -567,6 +587,7 @@ impl Store {
         let task_name = task_name.as_ref();
         validate_task_name(task_name)?;
         let pause_key = paused_task_key(task_name);
+        self.config.protocol.admit(tx).await?;
         let database_operation_observer = tx.database_operation_observer().cloned();
         upsert_pause_key(
             tx.inner.as_mut(),
@@ -587,6 +608,7 @@ impl Store {
         let task_name = task_name.as_ref();
         validate_task_name(task_name)?;
         let pause_key = paused_task_key(task_name);
+        self.config.protocol.admit(tx).await?;
         let database_operation_observer = tx.database_operation_observer().cloned();
         delete_pause_key(
             tx.inner.as_mut(),
@@ -621,6 +643,7 @@ impl Store {
         let task_name = task_name.as_ref();
         validate_task_name(task_name)?;
         let pause_key = paused_task_key(task_name);
+        self.config.protocol.admit(tx).await?;
         let database_operation_observer = tx.database_operation_observer().cloned();
         fetch_pause_key_exists(
             tx.inner.as_mut(),
@@ -645,6 +668,7 @@ impl Store {
         &self,
         tx: &mut Tx<'_>,
     ) -> Result<Vec<String>, Error> {
+        self.config.protocol.admit(tx).await?;
         let database_operation_observer = tx.database_operation_observer().cloned();
         fetch_paused_task_names(
             tx.inner.as_mut(),
@@ -673,6 +697,7 @@ impl Store {
         tx: &mut Tx<'_>,
         registry: &TaskRegistry,
     ) -> Result<Vec<String>, Error> {
+        self.config.protocol.admit(tx).await?;
         let database_operation_observer = tx.database_operation_observer().cloned();
         fetch_orphaned_task_names(
             tx.inner.as_mut(),
@@ -702,6 +727,7 @@ impl Store {
         tx: &mut Tx<'_>,
         registry: &TaskRegistry,
     ) -> Result<WorkerPressure, Error> {
+        self.config.protocol.admit(tx).await?;
         let database_operation_observer = tx.database_operation_observer().cloned();
         let counts = fetch_worker_pressure_counts(
             tx.inner.as_mut(),

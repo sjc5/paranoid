@@ -1,14 +1,15 @@
 use super::*;
+use crate::db::bytea::Bytea;
 
 pub(super) fn queue_job_from_row(row: &sqlx::postgres::PgRow) -> Result<Job, Error> {
-    let id_bytes: Vec<u8> = row
+    let id_bytes: Bytea = row
         .try_get(QueueColumn::Id.name())
         .map_err(Error::decode_row)?;
     let status_text: String = row
         .try_get(QueueColumn::Status.name())
         .map_err(Error::decode_row)?;
     Ok(Job {
-        id: JobId::from_bytes(&id_bytes)?,
+        id: JobId::from_bytes(&id_bytes.0)?,
         task_name: row
             .try_get(QueueColumn::TaskName.name())
             .map_err(Error::decode_row)?,
@@ -66,18 +67,18 @@ pub(super) fn queue_job_from_row(row: &sqlx::postgres::PgRow) -> Result<Job, Err
 pub(super) fn queue_dead_letter_job_from_row(
     row: &sqlx::postgres::PgRow,
 ) -> Result<DeadLetterJob, Error> {
-    let id_bytes: Vec<u8> = row
+    let id_bytes: Bytea = row
         .try_get(QueueColumn::Id.name())
         .map_err(Error::decode_row)?;
-    let original_job_id_bytes: Vec<u8> = row
+    let original_job_id_bytes: Bytea = row
         .try_get(QueueColumn::OriginalJobId.name())
         .map_err(Error::decode_row)?;
     let reason_text: String = row
         .try_get(QueueColumn::Reason.name())
         .map_err(Error::decode_row)?;
     Ok(DeadLetterJob {
-        id: JobId::from_bytes(&id_bytes)?,
-        original_job_id: JobId::from_bytes(&original_job_id_bytes)?,
+        id: JobId::from_bytes(&id_bytes.0)?,
+        original_job_id: JobId::from_bytes(&original_job_id_bytes.0)?,
         task_name: row
             .try_get(QueueColumn::TaskName.name())
             .map_err(Error::decode_row)?,
@@ -118,11 +119,11 @@ pub(super) fn queue_dead_letter_job_from_row(
 pub(super) fn queue_reclaimed_job_from_row(
     row: &sqlx::postgres::PgRow,
 ) -> Result<ReclaimedJob, Error> {
-    let id_bytes: Vec<u8> = row
+    let id_bytes: Bytea = row
         .try_get(QueueColumn::Id.name())
         .map_err(Error::decode_row)?;
     Ok(ReclaimedJob {
-        id: JobId::from_bytes(&id_bytes)?,
+        id: JobId::from_bytes(&id_bytes.0)?,
         task_name: row
             .try_get(QueueColumn::TaskName.name())
             .map_err(Error::decode_row)?,
@@ -132,11 +133,11 @@ pub(super) fn queue_reclaimed_job_from_row(
 pub(super) fn queue_reclaimed_failed_job_from_row(
     row: &sqlx::postgres::PgRow,
 ) -> Result<ReclaimedFailedJob, Error> {
-    let id_bytes: Vec<u8> = row
+    let id_bytes: Bytea = row
         .try_get(QueueColumn::Id.name())
         .map_err(Error::decode_row)?;
     Ok(ReclaimedFailedJob {
-        id: JobId::from_bytes(&id_bytes)?,
+        id: JobId::from_bytes(&id_bytes.0)?,
         task_name: row
             .try_get(QueueColumn::TaskName.name())
             .map_err(Error::decode_row)?,
@@ -149,15 +150,15 @@ pub(super) fn queue_reclaimed_failed_job_from_row(
 pub(super) fn queue_moved_to_dead_letter_job_from_row(
     row: &sqlx::postgres::PgRow,
 ) -> Result<MovedToDeadLetterJob, Error> {
-    let dead_letter_id_bytes: Vec<u8> = row
+    let dead_letter_id_bytes: Bytea = row
         .try_get(QueueColumn::Id.name())
         .map_err(Error::decode_row)?;
-    let original_job_id_bytes: Vec<u8> = row
+    let original_job_id_bytes: Bytea = row
         .try_get(QueueColumn::OriginalJobId.name())
         .map_err(Error::decode_row)?;
     Ok(MovedToDeadLetterJob {
-        dead_letter_id: JobId::from_bytes(&dead_letter_id_bytes)?,
-        original_job_id: JobId::from_bytes(&original_job_id_bytes)?,
+        dead_letter_id: JobId::from_bytes(&dead_letter_id_bytes.0)?,
+        original_job_id: JobId::from_bytes(&original_job_id_bytes.0)?,
         task_name: row
             .try_get(QueueColumn::TaskName.name())
             .map_err(Error::decode_row)?,

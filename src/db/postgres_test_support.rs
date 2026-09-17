@@ -130,3 +130,62 @@ pub(crate) async fn fetch_table_exists(pool: &PgPool, table_name: &PgQualifiedTa
 fn postgres_string_literal(value: &str) -> String {
     format!("'{}'", value.replace('\'', "''"))
 }
+
+fn test_protocol_bootstrap_config() -> crate::db::BootstrapConfig {
+    crate::db::BootstrapConfig::from_schema_name_text("__paranoid_test_admission")
+        .expect("test protocol schema")
+}
+
+pub(crate) fn test_protocol() -> crate::db::Protocol {
+    crate::db::Protocol::new(test_protocol_bootstrap_config().table_names().protocol)
+}
+
+pub(crate) fn test_transaction_begin_record() -> crate::db::DatabaseOperationRecord {
+    crate::db::DatabaseOperationRecord {
+        kind: crate::db::DatabaseOperationKind::BeginTransaction,
+        label: "db.begin_transaction",
+        statement: Some("BEGIN ISOLATION LEVEL READ COMMITTED READ WRITE".to_owned()),
+    }
+}
+
+pub(crate) fn test_protocol_admission_record() -> crate::db::DatabaseOperationRecord {
+    let protocol = test_protocol();
+    let table = protocol.table_name().quoted();
+    crate::db::DatabaseOperationRecord {
+        kind: crate::db::DatabaseOperationKind::FetchAll,
+        label: "paranoid.protocol.admit",
+        statement: Some(format!(
+            "LOCK TABLE ONLY {table} IN ACCESS SHARE MODE; \
+             SELECT singleton, epoch, fingerprint, \
+             pg_catalog.current_setting('transaction_isolation') \
+             FROM ONLY {table} LIMIT 2"
+        )),
+    }
+}
+
+/// Installs real admission metadata before connecting the selected scenario role.
+pub(crate) async fn connect_test_write_pool(config: crate::db::PoolConfig) -> crate::db::WritePool {
+    let mut bootstrap_config =
+        crate::db::PoolConfig::new(secrecy::SecretString::from(standard_test_database_url()));
+    bootstrap_config.max_connections = 1;
+    let bootstrap_pool = crate::db::WritePool::connect(bootstrap_config)
+        .await
+        .expect("connect protocol fixture administrator");
+    let installation = test_protocol_bootstrap_config();
+    installation
+        .migrate_schema(&bootstrap_pool)
+        .await
+        .expect("install test protocol metadata");
+    unparameterized_simple_query(sqlx::AssertSqlSafe(format!(
+        "GRANT USAGE ON SCHEMA {} TO PUBLIC; GRANT SELECT ON {} TO PUBLIC",
+        installation.schema_name().identifier().quoted(),
+        installation.table_names().protocol.quoted(),
+    )))
+    .execute(bootstrap_pool.sqlx_pool())
+    .await
+    .expect("grant fixture protocol read access");
+    bootstrap_pool.sqlx_pool().close().await;
+    crate::db::WritePool::connect(config)
+        .await
+        .expect("connect paranoid pool")
+}

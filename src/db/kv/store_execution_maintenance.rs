@@ -1,4 +1,5 @@
 use super::*;
+use crate::db::bytea::Bytea;
 
 impl Store {
     pub(super) async fn count_live_keys_with_prefix_with_executor<'e, E>(
@@ -46,7 +47,7 @@ impl Store {
             KV_OPERATION_SCAN_BYTES_WITH_PREFIX,
             Some(self.queries.scan_bytes_with_prefix.as_str()),
         );
-        let rows = pooler_safe_query_as::<(String, Vec<u8>)>(sqlx::AssertSqlSafe(
+        let rows = pooler_safe_query_as::<(String, Bytea)>(sqlx::AssertSqlSafe(
             self.queries.scan_bytes_with_prefix.as_str(),
         ))
         .bind(prefix_like_pattern(prefix))
@@ -60,7 +61,7 @@ impl Store {
             .into_iter()
             .map(|(key, value)| ScannedBytes {
                 key: Key(key),
-                value,
+                value: value.0,
             })
             .collect())
     }
@@ -162,6 +163,7 @@ impl Store {
         batch_size: u32,
     ) -> Result<u64, Error> {
         validate_delete_batch_size(batch_size)?;
+        self.config.protocol.admit(tx).await?;
         tx.record_database_operation(
             DatabaseOperationKind::Execute,
             KV_OPERATION_DELETE_NAMESPACE_KEYS_WITH_PREFIX_ONCE,

@@ -638,3 +638,48 @@ fn validate_required_column(
     }
     Ok(())
 }
+
+pub(super) async fn validate_prepared_claim_token_in_current_transaction(
+    tx: &mut Tx<'_>,
+    config: &StoreConfig,
+) -> Result<(), Error> {
+    let statement = "SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_attribute WHERE attrelid = pg_catalog.to_regclass($1) AND attname = 'worker_claim_token' AND atttypid = 'pg_catalog.bytea'::pg_catalog.regtype AND NOT attnotnull AND attnum > 0 AND NOT attisdropped)";
+    tx.record_database_operation(
+        DatabaseOperationKind::FetchOne,
+        "queue.schema.validate_prepared_claim_token_column",
+        Some(statement),
+    );
+    let valid = pooler_safe_query_scalar::<bool>(statement)
+        .bind(config.table_name.quoted().to_string())
+        .fetch_one(tx.inner.as_mut())
+        .await
+        .map_err(DbError::query)?;
+    if !valid {
+        return Err(DbError::schema_mismatch(
+            "prepared Queue schema must have a nullable bytea worker_claim_token column",
+        )
+        .into());
+    }
+    let statement = crate::db::schema::BUILTIN_CHECK_EXPRESSIONS_SQL;
+    tx.record_database_operation(
+        DatabaseOperationKind::FetchAll,
+        "queue.schema.validate_prepared_claim_token_check",
+        Some(statement),
+    );
+    let checks = pooler_safe_query_scalar::<String>(statement)
+        .bind(config.table_name.quoted().to_string())
+        .fetch_all(tx.inner.as_mut())
+        .await
+        .map_err(DbError::query)?;
+    let expected = "(worker_claim_tokenISNULL)OR((octet_length(worker_claim_token)=32)AND(status='running'::text)AND(worker_idISNOTNULL))";
+    if !checks
+        .iter()
+        .any(|check| crate::db::schema::normalize_builtin_check_expression(check) == expected)
+    {
+        return Err(DbError::schema_mismatch(
+            "prepared Queue schema must enforce its claim-token shape",
+        )
+        .into());
+    }
+    Ok(())
+}
